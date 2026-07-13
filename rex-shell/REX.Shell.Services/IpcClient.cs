@@ -16,7 +16,7 @@ public class IpcClient : IDisposable
 
     public event Action? OnConnected;
     public event Action? OnDisconnected;
-    public event Action<string>? OnMessageReceived;
+    public event Action<byte[]>? OnMessageReceived;
 
     public bool IsConnected => _connected;
 
@@ -74,6 +74,40 @@ public class IpcClient : IDisposable
         SendRaw(MessageType.SetTriangleColor, bytes);
     }
 
+    public void SendSetWidgetTransform(ulong layerId, int x, int y, int width, int height, int zOrder)
+    {
+        var bytes = new byte[28];
+        BitConverter.GetBytes(layerId).CopyTo(bytes, 0);
+        BitConverter.GetBytes(x).CopyTo(bytes, 8);
+        BitConverter.GetBytes(y).CopyTo(bytes, 12);
+        BitConverter.GetBytes(width).CopyTo(bytes, 16);
+        BitConverter.GetBytes(height).CopyTo(bytes, 20);
+        BitConverter.GetBytes(zOrder).CopyTo(bytes, 24);
+        SendRaw(MessageType.SetWidgetTransform, bytes);
+    }
+
+    public void SendRegisterWidgetSurface(ulong layerId, ulong sharedHandle, int width, int height)
+    {
+        var bytes = new byte[24];
+        BitConverter.GetBytes(layerId).CopyTo(bytes, 0);
+        BitConverter.GetBytes(sharedHandle).CopyTo(bytes, 8);
+        BitConverter.GetBytes(width).CopyTo(bytes, 16);
+        BitConverter.GetBytes(height).CopyTo(bytes, 20);
+        SendRaw(MessageType.RegisterWidgetSurface, bytes);
+    }
+
+    public void SendUnregisterWidgetSurface(ulong layerId)
+    {
+        var bytes = new byte[8];
+        BitConverter.GetBytes(layerId).CopyTo(bytes, 0);
+        SendRaw(MessageType.UnregisterWidgetSurface, bytes);
+    }
+
+    public void SendShutdown()
+    {
+        SendRaw(MessageType.Shutdown, []);
+    }
+
     private void SendRaw(MessageType type, byte[] payload)
     {
         if (_pipe is null || !_connected) return;
@@ -121,7 +155,8 @@ public class IpcClient : IDisposable
                 int bytesRead = await _pipe!.ReadAsync(buffer, 0, buffer.Length, ct);
                 if (bytesRead == 0) break;
 
-                string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                var message = new byte[bytesRead];
+                Array.Copy(buffer, message, bytesRead);
                 OnMessageReceived?.Invoke(message);
             }
             catch { break; }
@@ -144,6 +179,9 @@ public class IpcClient : IDisposable
         Ping = 1,
         GetStatus = 4,
         Shutdown = 6,
+        SetWidgetTransform = 10,
+        RegisterWidgetSurface = 11,
+        UnregisterWidgetSurface = 12,
         SetTriangleColor = 99
     }
 }

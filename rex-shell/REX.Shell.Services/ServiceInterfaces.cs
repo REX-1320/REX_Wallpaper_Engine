@@ -1,5 +1,32 @@
 namespace REX.Shell.Services;
 
+public record WidgetManifest
+{
+    public int SchemaVersion { get; init; }
+    public string Id { get; init; } = string.Empty;
+    public string Name { get; init; } = string.Empty;
+    public string Version { get; init; } = string.Empty;
+    public string Author { get; init; } = string.Empty;
+    public string Entry { get; init; } = string.Empty;
+    public WidgetSize DefaultSize { get; init; } = new();
+    public WidgetSize? MinSize { get; init; }
+    public WidgetPermissions Permissions { get; init; } = new();
+    public List<string> DataBindings { get; init; } = [];
+}
+
+public record WidgetSize
+{
+    public int Width { get; init; }
+    public int Height { get; init; }
+}
+
+public record WidgetPermissions
+{
+    public bool Network { get; init; }
+    public List<string> DataSources { get; init; } = [];
+    public bool Storage { get; init; }
+}
+
 public record WidgetInstance
 {
     public Guid InstanceId { get; init; }
@@ -17,7 +44,7 @@ public record WidgetInstance
 
 public enum WidgetLifecycleState
 {
-    Loading, Running, Suspended, Crashed, Stopped
+    Stopped, Loading, Running, Suspended, Crashed
 }
 
 public interface IDataSource

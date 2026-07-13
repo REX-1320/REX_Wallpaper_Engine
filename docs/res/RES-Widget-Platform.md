@@ -1,7 +1,11 @@
-# RES-Widget-Platform v1.0
+# RES-Widget-Platform v1.1
 
 > Depends on: ADR-001, ADR-002, ADR-003, ADR-004
 > Owns: widget lifecycle, rendering contract, data source abstraction, SDK surface for widget authors
+
+**Changelog:**
+- v1.1 (Phase 1): Added §9 First-Party Widget Specifications with per-widget
+  data bindings, layout, and interaction models.
 
 ------------------------------------------------------------------------
 
@@ -196,3 +200,230 @@ Serialized per ADR-004 (JSON, versioned schema) as part of the profile document.
 - Unit tests (xUnit): manifest validation, lifecycle state transitions, layout persistence round-trip.
 - Integration tests: spawn a real sandboxed widget process, verify IPC round-trip, verify job-object resource caps actually trigger.
 - Fixture widgets: a minimal "hello world" widget and a deliberately-misbehaving widget (infinite loop, memory bomb) as permanent test fixtures for sandbox validation — these must live in the test suite forever, since sandbox regressions are the highest-severity bug class in this module.
+
+------------------------------------------------------------------------
+
+## 9. First-Party Widget Specifications (Phase 1 M1.6)
+
+These are the widgets built to dogfood the SDK. Each spec defines the widget's
+data bindings, default dimensions, visual layout, and interaction model. All
+widgets use `window.rex.*` SDK surface exclusively — no privileged internal APIs.
+
+### 9.1 Clock (`com.rex.clock`)
+
+| Property | Value |
+|---|---|
+| Default size | 240 × 120 |
+| Min size | 120 × 60 |
+| Data bindings | `clock` |
+| Permissions | none |
+
+**Data contract (`clock` data source):**
+```typescript
+{ iso: string;           // "2026-07-13T14:30:00"
+  formatted: string;     // "2:30 PM"
+  dateFormatted: string; // "Mon, Jul 13"
+  hour: number;
+  minute: number;
+  second: number;
+}
+```
+
+**Layout:**
+```
+┌─────────────────────┐
+│                     │
+│      2:30 PM        │  ← time, large (48px), bold, monospace
+│   Mon, Jul 13       │  ← date, smaller (14px), lighter weight
+│                     │
+└─────────────────────┘
+```
+
+**Interaction:**
+- Click: toggle between 12h/24h format (persisted via `window.rex.storage`)
+- Right-click: context menu (Lock, Close)
+- No drag handles — drag from any point on the widget body
+
+**Theme tokens used:** `--rex-text`, `--rex-bg`
+
+---
+
+### 9.2 System Monitor (`com.rex.system-monitor`)
+
+| Property | Value |
+|---|---|
+| Default size | 260 × 180 |
+| Min size | 160 × 120 |
+| Data bindings | `system.cpu`, `system.ram` |
+| Permissions | none |
+
+**Data contracts:**
+
+```typescript
+// system.cpu
+{ percent: number;    // 0.0 – 100.0
+  perCore: number[];  // per-core percentages
+}
+
+// system.ram
+{ totalGB: number;
+  usedGB: number;
+  percent: number;    // 0.0 – 100.0
+}
+```
+
+**Layout:**
+```
+┌─────────────────────────┐
+│ ⚙ System Monitor        │  ← header, 12px, uppercase label
+│                         │
+│ CPU ████████░░ 45%      │  ← horizontal bar (accent color)
+│     ██░░░░░░░░ 12%      │  ← per-core mini bars (optional, Phase 2)
+│ RAM ████████░░ 39%      │  ← horizontal bar (accent color)
+│     12.5 / 32 GB        │  ← numeric readout, 11px
+│                         │
+└─────────────────────────┘
+```
+
+**Interaction:**
+- Click CPU label: toggle per-core breakdown
+- Click RAM label: toggle between used/total and percentage
+- Right-click: context menu
+
+**Theme tokens used:** `--rex-text`, `--rex-bg`, `--rex-accent`
+
+**Performance constraint:** `system.cpu` data source polls at 1s interval; widget
+must not re-render the entire DOM on every tick — only update the changed text
+nodes and bar widths.
+
+---
+
+### 9.3 Weather (`com.rex.weather`)
+
+| Property | Value |
+|---|---|
+| Default size | 240 × 200 |
+| Min size | 160 × 140 |
+| Data bindings | `weather` |
+| Permissions | `network: true` (calls weather API) |
+
+**Data contract (`weather` data source):**
+```typescript
+{ temperature: number;      // °C
+  condition: string;        // "Clear", "Cloudy", "Rain", etc.
+  icon: string;             // emoji or icon key
+  humidity: number;         // 0–100
+  windSpeed: number;        // km/h
+  location: string;         // "San Francisco, CA"
+  forecast: Array<{         // next 3 days
+    day: string;            // "Mon"
+    high: number;
+    low: number;
+    icon: string;
+  }>;
+}
+```
+
+**Layout:**
+```
+┌─────────────────────┐
+│ ☀️ 24°C             │  ← icon + temperature, large (36px)
+│ Clear               │  ← condition text, 14px
+│ San Francisco, CA   │  ← location, 11px, muted
+│                     │
+│ Mon  ☀️ 26/18       │  ← 3-day forecast row
+│ Tue  ☁️ 22/15       │
+│ Wed  🌧 19/12       │
+└─────────────────────┘
+```
+
+**Interaction:**
+- Click temperature: toggle °C/°F (persisted via `window.rex.storage`)
+- Click location: open location picker (sends `SelectLocation` event to Shell via
+  `window.rex.automation.trigger` — stubbed in Phase 1, full in Phase 4)
+- Right-click: context menu
+
+**Theme tokens used:** `--rex-text`, `--rex-bg`, `--rex-accent`
+
+**Phase 1 note:** weather data source is a stub that returns hardcoded values
+(24°C, Clear). The HTTP provider that calls a real weather API will be implemented
+once the `network` permission gate is fully wired in Phase 2. The widget itself is
+built now so its layout and data binding contract can be validated.
+
+---
+
+### 9.4 Media Session (`com.rex.media-session`)
+
+| Property | Value |
+|---|---|
+| Default size | 300 × 80 |
+| Min size | 200 × 60 |
+| Data bindings | `media.session` |
+| Permissions | none |
+
+**Data contract (`media.session` data source):**
+```typescript
+{ state: "playing" | "paused" | "stopped";
+  title: string;
+  artist: string;
+  album: string;
+  thumbnail: string;     // base64 small image or URL
+  position: number;      // current playback position (seconds)
+  duration: number;      // total duration (seconds)
+}
+```
+
+**Layout:**
+```
+┌─────────────────────────────────────┐
+│ [🖼]  Song Title           ⏸ ▶ ⏭    │  ← 48px thumbnail, title (14px bold)
+│       Artist Name                    │  ← artist (12px) + transport controls
+│       ████████░░░░ 1:23 / 3:45      │  ← progress bar, time readout (11px)
+└─────────────────────────────────────┘
+```
+
+**Interaction:**
+- Play/Pause button → `window.rex.automation.trigger("mediaPlayPause")` (stubbed)
+- Next/Previous buttons → `window.rex.automation.trigger("mediaNext")` / `mediaPrev`
+- Click progress bar → seek to position
+- Double-click thumbnail: toggle expanded view (larger album art, Phase 2)
+- Right-click: context menu
+
+**Theme tokens used:** `--rex-text`, `--rex-bg`, `--rex-accent`
+
+**Phase 1 note:** media session data source reads from Windows `SMTC` (System
+Media Transport Controls) via `Windows.Media.Control.GlobalSystemMediaTransportControlsSession`
+— this is a WinRT API accessible from C#. Transport control actions are stubbed
+in Phase 1 (UI buttons present but non-functional) since they require the
+Automation Engine's `RunCommandAction` trust tier (Phase 4).
+
+---
+
+### 9.5 Widget Package Structure
+
+All first-party widgets follow this directory layout (identical to what
+`rex-cli init` produces):
+
+```
+widgets/com.rex.{name}/
+├── manifest.json       # per §2.1 schema
+├── index.html          # entry point
+├── script.js           # widget logic (uses window.rex.*)
+├── style.css           # themed styles
+└── icon.png            # 64×64 icon for Shell UI
+```
+
+The `manifest.json` must declare exactly the data sources and permissions the
+widget uses — no more, no less. This is the SDK dogfooding constraint: if the
+clock widget declares `permissions.network = true` when it doesn't use it,
+that's a spec violation.
+
+### 9.6 Widget Build Verification Checklist (per widget)
+
+- [ ] Runs in `rex-cli dev` hot-reload mode
+- [ ] Subscribes only to declared `dataBindings`
+- [ ] Handles data source unavailability gracefully (shows "—" or last known value)
+- [ ] Respects `window.rex.lifecycle.onSuspend`/`onResume` (pauses timers/animations)
+- [ ] Persists user preferences via `window.rex.storage`
+- [ ] No hardcoded colors — uses `var(--rex-*)` CSS custom properties
+- [ ] Frame budget compliant: no forced layout thrashing, no infinite animation loops

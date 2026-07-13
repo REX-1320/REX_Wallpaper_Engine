@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #include "animation_engine.h"
 #include <cmath>
 #include <algorithm>
@@ -15,7 +16,8 @@ void AnimationEngine::Cancel(AnimationHandle handle) {
 }
 
 void AnimationEngine::Tick(double frameTimeMs) {
-    std::vector<AnimationHandle> toRemove;
+    AnimationHandle toRemove[64];
+    int removeCount = 0;
 
     for (auto& [handle, anim] : m_animations) {
         anim.elapsedMs += frameTimeMs;
@@ -26,15 +28,15 @@ void AnimationEngine::Tick(double frameTimeMs) {
             anim.onTick(progress);
         }
 
-        if (t >= 1.0) {
+        if (t >= 1.0 && removeCount < 64) {
             anim.completed = true;
             if (anim.onComplete) anim.onComplete();
-            toRemove.push_back(handle);
+            toRemove[removeCount++] = handle;
         }
     }
 
-    for (auto handle : toRemove) {
-        m_animations.erase(handle);
+    for (int i = 0; i < removeCount; i++) {
+        m_animations.erase(toRemove[i]);
     }
 }
 

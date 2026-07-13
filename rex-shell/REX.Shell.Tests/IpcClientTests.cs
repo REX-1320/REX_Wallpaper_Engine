@@ -1,5 +1,6 @@
 using Xunit;
 using FluentAssertions;
+using REX.Shell.Services;
 
 namespace REX.Shell.Tests;
 

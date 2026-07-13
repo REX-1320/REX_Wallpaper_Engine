@@ -1,27 +1,27 @@
-# REX Tools — RES Documentation Package (v1.1)
+# REX Tools — RES Documentation Package (v1.2)
 
 > Engineering specification set. Companion to the Master Vision document.
 > All modules now at full/executable spec depth.
 
 ## Document Index
 
-| # | Document | Depth | Status |
-|---|---|---|---|
-| 1 | `ADR-001-to-006.md` | Complete | Locked decisions |
-| 2 | `RES-Widget-Platform.md` | Complete | Executable — Phase 1 |
-| 3 | `RES-Desktop-Platform.md` | Complete | Executable — Phase 1 |
-| 4 | `RES-SDK-Marketplace.md` | Complete | Executable — Phase 2/5 |
-| 5 | `RES-Wallpaper-Platform.md` | Complete | Executable — Phase 3 |
-| 6 | `RES-WindowFX.md` | Complete | Executable — Phase 3 |
-| 7 | `RES-Automation-Engine.md` | Complete | Executable — Phase 4 |
-| 8 | `RES-Rendering-Layer.md` | Complete | Executable — cross-cutting, hardens through Phase 3 |
-| 9 | `RES-Phase-0-1-Implementation.md` | Complete | Step-by-step, start Monday |
-| 10 | `RES-Testing-Security-Performance.md` | Complete | Executable |
-| 11 | `RES-API-Reference.md` | Complete (core) | Extend as SDK grows |
+| # | Document | Version | Depth | Status |
+|---|---|---|---|---|
+| 1 | `ADR-001-to-006.md` | v1.0 | Complete | Locked decisions |
+| 2 | `RES-Widget-Platform.md` | v1.1 | Complete | Executable — Phase 1 |
+| 3 | `RES-Desktop-Platform.md` | v1.0 | Complete | Executable — Phase 1 |
+| 4 | `RES-SDK-Marketplace.md` | v1.1 | Complete | Executable — Phase 1/2/5 |
+| 5 | `RES-Wallpaper-Platform.md` | v1.0 | Complete | Executable — Phase 3 |
+| 6 | `RES-WindowFX.md` | v1.0 | Complete | Executable — Phase 3 |
+| 7 | `RES-Automation-Engine.md` | v1.0 | Complete | Executable — Phase 4 |
+| 8 | `RES-Rendering-Layer.md` | v1.0 | Complete | Executable — cross-cutting, hardens through Phase 3 |
+| 9 | `RES-Phase-0-1-Implementation.md` | v1.1 | Complete | Step-by-step, start Monday |
+| 10 | `RES-Testing-Security-Performance.md` | v1.0 | Complete | Executable |
+| 11 | `RES-API-Reference.md` | v1.0 | Complete (core) | Extend as SDK grows |
 
 ## Reading Order
 
-**To start building today:** 9 → 1 → 2 → 3 → 10
+**To start building today:** 9 → 1 → 2 → 3 → 4 (§2.1) → 10
 **To understand the whole system:** 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 11
 **Before writing any plugin-facing or automation-command code:** doc 10 (security section) and doc 7 §5 (RunCommandAction trust tier) are mandatory reading first.
 

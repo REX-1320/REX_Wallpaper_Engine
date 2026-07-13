@@ -62,6 +62,7 @@ HWND WorkerWHost::FindRenderTargetWorkerW() {
         if (shellView) {
             HWND* result = reinterpret_cast<HWND*>(lparam);
             *result = FindWindowExW(nullptr, hwnd, L"WorkerW", nullptr);
+            return FALSE; // found the blank WorkerW, stop enumeration
         }
         return TRUE;
     }, reinterpret_cast<LPARAM>(&targetWorkerW));
@@ -127,7 +128,7 @@ bool WorkerWHost::MonitorExplorer() {
                         break;
                     }
                     attempts++;
-                    delay = std::min(delay * 2, std::chrono::milliseconds(5000));
+                    delay = (std::min)(delay * 2, std::chrono::milliseconds(5000));
                 }
             }
         }

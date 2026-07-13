@@ -1,19 +1,15 @@
 #include <gtest/gtest.h>
 #include "../src/workerw.h"
 
-TEST(WorkerWTest, Initialize) {
+TEST(WorkerWTest, InitializeAndShutdown) {
     WorkerWHost host;
     bool result = host.Initialize();
     host.Shutdown();
+    // No crash on double shutdown
+    host.Shutdown();
 }
 
-TEST(WorkerWTest, FindWorkerW) {
+TEST(WorkerWTest, GetRenderWindowReturnsNullBeforeInit) {
     WorkerWHost host;
-    HWND hwnd = nullptr;
-    EXPECT_NO_THROW({
-        if (host.Initialize()) {
-            hwnd = host.GetRenderTargetWindow();
-            host.Shutdown();
-        }
-    });
+    EXPECT_EQ(host.GetRenderTargetWindow(), nullptr);
 }

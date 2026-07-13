@@ -1,0 +1,8 @@
+{
+  "name": "rex-tools",
+  "version": "0.1.0",
+  "dependencies": [
+    "protobuf"
+  ],
+  "builtin-baseline": "5798dc209bfa9cd0da1195dd1796f5279e6e5e2d"
+}

@@ -72,5 +72,5 @@ bool LegacyAccentEffectRenderer::ApplyBackdrop(HWND target, BackdropType type) {
 }
 
 bool LegacyAccentEffectRenderer::SupportsBackdropType(BackdropType type) const {
-    return type == BackdropType::Acrylic || type == BackdropType::Blur;
+    return type == BackdropType::Acrylic;
 }

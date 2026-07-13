@@ -1,7 +1,10 @@
-# RES-SDK-Marketplace v1.0
+# RES-SDK-Marketplace v1.1
 
 > Depends on: ADR-002, ADR-003, RES-Widget-Platform
 > Owns: plugin/widget packaging, CLI, marketplace client + backend contract, permission manifest enforcement, review/signing pipeline
+
+**Changelog:**
+- v1.1 (Phase 1): Resolved rendering choice — WebView2 for Phase 1, minimal renderer re-evaluated at Phase 2 entry. Added §2.1 with integration spec.
 
 ------------------------------------------------------------------------
 
@@ -17,24 +20,71 @@ they are two sides of the same design.
 
 ## 2. Widget/Plugin Embedding Choice
 
-**Decision for Phase 2:** embed a minimal, purpose-built HTML/CSS/JS renderer
-(subset — no full DOM/CSS spec compliance required) rather than full Chromium
-(CEF) or full Node.js, to keep per-widget process overhead low (ADR-003 assumed
-~5–10MB baseline; full CEF is 100MB+ per instance, incompatible with "run 20
-widgets without eating a gigabyte of RAM").
+### 2.1 Phase 1 Decision — WebView2 Offscreen Mode
 
-**Evaluation checklist for the Phase 2 spike** (this is a real open question,
-not fully settled — resolve before committing further SDK design):
-- Candidate: `WebView2` in headless/offscreen mode (Microsoft-maintained, real
-  Chromium under the hood, but per-instance overhead needs measuring — WebView2
-  shares an Edge runtime process pool, may be lighter than raw CEF).
-- Candidate: QuickJS (or similar minimal JS engine) + a small custom
-  layout/paint engine supporting a CSS subset (flexbox + basic properties only)
-  — much lighter, but you build/maintain a mini rendering engine yourself.
-- **Recommendation:** start with WebView2 for Phase 2 (fastest to ship, real CSS/HTML
-  support, Microsoft-maintained), measure actual per-instance memory with 10+
-  concurrent widgets, and only invest in a custom minimal renderer if WebView2's
-  overhead genuinely blocks the "lightweight" product thesis in practice.
+**Status:** Accepted for Phase 1
+
+Embed Microsoft Edge WebView2 in offscreen/headless mode as the widget rendering
+engine. Rationale:
+
+- **Fastest path to a working widget** — WebView2 is pre-installed on Windows 11
+  and available via the Evergreen bootstrapper on Windows 10. Zero custom rendering
+  engine to build or maintain during Phase 1.
+- **Real CSS/HTML/JS support** — widget authors write standard web code. No subset
+  limitations, no "why doesn't flexbox work" support burden during MVP.
+- **Process-pool sharing** — WebView2 instances share a single `edge_video.exe`
+  child process across all widgets in the same app. Actual per-widget memory
+  overhead is ~5–15MB (not the 100MB+ of isolated CEF), meeting ADR-003's
+  assumption.
+- **DComposition integration** — `CreateCoreWebView2CompositionController` provides
+  a `DCompositionTarget` that can be integrated with the Core's D3D12 compositor
+  via shared DXGI resources.
+
+**Integration approach for Phase 1:**
+
+```
+Widget process (rex-widget-host.exe)
+  ├── Hidden WS_POPUP window (message pump)
+  ├── WebView2 environment (single per-process)
+  ├── CoreWebView2 offscreen controller
+  │     └── Composition target → D3D12 shared texture
+  ├── IPC client → Shell (named pipe, per-widget)
+  └── Shared memory handle → Core compositor
+```
+
+- Each widget process creates one WebView2 instance in offscreen mode.
+- The web content renders into a DComposition visual whose output is copied to
+  a shared D3D12 texture (via `ID3D11Device` interop or `IDXGIResource` sharing).
+- The texture handle is sent to the Core over the control IPC channel
+  (`RegisterWidgetSurface` message in `rex.proto`).
+- The Core compositor imports the handle and composites the texture as a layer.
+
+**Phase 1 scope limitation:** shared-memory texture handoff uses a CPU copy
+(WebView2 offscreen → system memory → GPU texture) rather than direct GPU-GPU
+handoff. This adds ~1–3ms per widget per frame — acceptable for Phase 1 widget
+counts (<10 widgets). Direct GPU sharing is a Phase 2 optimization.
+
+**Requirement validated by Phase 0 sandbox PoC:** Job Object capping + process
+isolation per widget means a WebView2 crash (Edge runtime bug, OOM) kills only
+one widget, not the desktop.
+
+### 2.2 Phase 2 Re-evaluation — Minimal Renderer
+
+The long-term goal (ADR-003, v1.0 of this doc) remains a minimal JS + layout
+engine to drop per-widget overhead below 5MB. The Phase 2 spike resolves:
+
+- **Candidate A (continue):** WebView2 — if Phase 1 shows acceptable overhead
+  at 20+ concurrent widgets on target hardware (8GB RAM), skip the custom
+  renderer entirely.
+- **Candidate B (build):** QuickJS + custom flexbox layout engine — if WebView2
+  overhead genuinely blocks the "lightweight" product thesis. Estimated 6–8 weeks
+  of engine work alone; must be scheduled explicitly in Phase 2, not discovered
+  mid-phase.
+
+**Decision gate:** at Phase 1 exit, measure and document:
+- Peak working set of Shell + Core + N widget processes at N = 5, 10, 20
+- Per-widget frame-time cost of the CPU copy texture path
+- User-visible lag at N = 10 widgets with the CPU copy path
 
 ------------------------------------------------------------------------
 

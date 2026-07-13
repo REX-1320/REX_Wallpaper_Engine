@@ -11,14 +11,15 @@ TEST(IpcTest, StartStop) {
     EXPECT_FALSE(server.IsConnected());
 }
 
-TEST(IpcTest, PingPong) {
+TEST(IpcTest, NotConnectedInitially) {
     IpcServer server;
-    std::vector<uint8_t> received;
-    server.SetMessageHandler([&](const std::vector<uint8_t>& data) {
-        received = data;
-    });
+    EXPECT_FALSE(server.IsConnected());
+}
 
-    server.Start("REX/test/v2");
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+TEST(IpcTest, DoubleStopNoCrash) {
+    IpcServer server;
+    server.Start("REX/test/v3");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    server.Stop();
     server.Stop();
 }

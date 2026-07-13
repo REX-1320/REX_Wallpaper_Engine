@@ -9,6 +9,8 @@ enum class ThrottleState { Normal, Throttled, Suspended };
 struct TimingHistory {
     double rollingAverageMs = 0.0;
     uint32_t consecutiveOverBudget = 0;
+    uint32_t consecutiveInBudget = 0;
+    uint32_t framesSinceLastTrial = 0;
 };
 
 struct FrameRenderPlan {
@@ -24,6 +26,8 @@ public:
     static constexpr double PER_WIDGET_DEFAULT_MS = 2.0;
     static constexpr uint32_t BUDGET_WINDOW_FRAMES = 30;
     static constexpr uint32_t THROTTLE_THRESHOLD = 60;
+    static constexpr uint32_t TRIAL_FRAME_INTERVAL = 600; // ~10s at 60fps
+    static constexpr uint32_t RECOVERY_THRESHOLD = 60;
 
     FrameRenderPlan PlanFrame(const std::vector<Layer>& layers);
     void RecordActualRenderTime(uint64_t layerId, double ms);

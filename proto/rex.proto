@@ -3,12 +3,16 @@ package rex.ipc;
 
 import "message_types.proto";
 
-message Envelope {
-  uint64 id = 1;
-  uint32 type = 2;
-  bytes payload = 3;
-  uint64 timestamp_ms = 4;
-}
+// Phase 0 wire format (simplified, matches current implementation):
+//   [1 byte padding (0)] [4 bytes uint32 message type] [payload bytes]
+// Phase 1 TODO: replace with proper Envelope below for versioned/typed messages.
+//
+// message Envelope {
+//   uint64 id = 1;
+//   uint32 type = 2;
+//   bytes payload = 3;
+//   uint64 timestamp_ms = 4;
+// }
 
 message PingCommand {
   string message = 1;
