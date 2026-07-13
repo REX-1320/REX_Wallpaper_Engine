@@ -1,0 +1,26 @@
+<Window
+    x:Class="REX.Shell.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="REX Tools"
+    SizeChanged="OnSizeChanged">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="12,8">
+            <Button x:Name="ConnectButton" Click="OnConnectClick">Connect</Button>
+            <Button x:Name="ColorButton" Click="OnColorClick">Set Color</Button>
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <Grid Grid.Row="1" Margin="12,0">
+            <TextBlock Text="REX Shell — Widget host will appear here" 
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Opacity="0.4" />
+        </Grid>
+    </Grid>
+</Window>

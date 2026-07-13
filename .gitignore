@@ -1,0 +1,32 @@
+# Build outputs
+build/
+rex-core/build/
+rex-core/src/generated/
+**/bin/
+**/obj/
+
+# IDE
+.vs/
+*.user
+*.suo
+*.sln.docstates
+
+# .NET
+*.nupkg
+*.log
+
+# Rust (if present)
+target/
+
+# CMake
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+
+# Protobuf
+*.pb.h
+*.pb.cc
+
+# OS
+Thumbs.db
+.DS_Store

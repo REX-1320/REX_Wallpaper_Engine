@@ -1,0 +1,71 @@
+name: REX CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  core:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rex-core
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup protoc
+        run: choco install protoc -y
+
+      - name: Configure CMake
+        run: cmake -S . -B build
+
+      - name: Build
+        run: cmake --build build --config Debug
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Lint (clang-tidy)
+        run: cmake --build build --config Debug --target clang-tidy
+        continue-on-error: true
+
+  shell:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rex-shell
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore REX.sln
+
+      - name: Build
+        run: dotnet build REX.sln --configuration Debug --no-restore
+
+      - name: Run tests
+        run: dotnet test REX.shell.Tests/REX.Shell.Tests.csproj --configuration Debug --no-build
+
+      - name: Format check
+        run: dotnet format REX.sln --verify-no-changes
+        continue-on-error: true
+
+  proto:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup protoc
+        run: choco install protoc -y
+
+      - name: Validate protobuf schema
+        run: protoc --proto_path=proto --error_format=msvs proto/*.proto

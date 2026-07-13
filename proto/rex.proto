@@ -1,0 +1,96 @@
+syntax = "proto3";
+package rex.ipc;
+
+import "message_types.proto";
+
+message Envelope {
+  uint64 id = 1;
+  uint32 type = 2;
+  bytes payload = 3;
+  uint64 timestamp_ms = 4;
+}
+
+message PingCommand {
+  string message = 1;
+}
+
+message PongResponse {
+  string message = 1;
+}
+
+message Error {
+  uint32 code = 1;
+  string description = 2;
+}
+
+message GetStatus {
+  uint64 request_id = 1;
+}
+
+message Status {
+  uint64 request_id = 1;
+  bool workerw_attached = 2;
+  uint64 uptime_ms = 3;
+  uint32 active_widget_count = 4;
+}
+
+message Shutdown {
+  string reason = 1;
+}
+
+message SetWidgetTransform {
+  string instance_id = 1;
+  int32 x = 2;
+  int32 y = 3;
+  int32 width = 4;
+  int32 height = 5;
+  int32 z_order = 6;
+}
+
+message RegisterWidgetSurface {
+  string instance_id = 1;
+  uint64 shared_memory_handle = 2;
+  int32 width = 3;
+  int32 height = 4;
+}
+
+message UnregisterWidgetSurface {
+  string instance_id = 1;
+}
+
+message WidgetCrashed {
+  string instance_id = 1;
+  string reason = 2;
+}
+
+message WidgetExceededBudget {
+  string instance_id = 1;
+  double average_frame_time_ms = 2;
+  double budget_ms = 3;
+}
+
+message ApplyEffect {
+  string rule_id = 1;
+  uint64 target_hwnd = 2;
+  string effect_type = 3;
+  string effect_params_json = 4;
+}
+
+message RemoveEffect {
+  string rule_id = 1;
+  uint64 target_hwnd = 2;
+}
+
+message FrameStats {
+  uint64 frame_number = 1;
+  double total_frame_time_ms = 2;
+  double compositor_time_ms = 3;
+  uint32 active_layers = 4;
+  double gpu_utilization_pct = 5;
+}
+
+message SetTriangleColor {
+  float r = 1;
+  float g = 2;
+  float b = 3;
+}
