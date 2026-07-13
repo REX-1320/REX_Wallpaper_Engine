@@ -3,7 +3,7 @@
 > A modern desktop platform for Windows — widgets, wallpaper, window effects, and automation.
 
 **Status:** Pre-development (Phase 0 — Foundation)
-**Target hardware:** Windows 10/11, AMD RX 6700 XT, Intel i5-12400F, 16GB RAM
+**Target hardware:** Windows 10/11
 
 ---
 
