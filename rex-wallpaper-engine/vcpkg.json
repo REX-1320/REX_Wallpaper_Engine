@@ -1,0 +1,9 @@
+{
+    "name": "rex-wallpaper-engine",
+    "version": "1.0.0",
+    "dependencies": [
+        "fmt",
+        "spdlog",
+        "gtest"
+    ]
+}

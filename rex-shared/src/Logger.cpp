@@ -1,0 +1,127 @@
+#include "shared/Logger.hpp"
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <iostream>
+
+namespace rex::shared {
+
+Logger::Logger() = default;
+Logger::~Logger() { Shutdown(); }
+
+Logger& Logger::Instance() {
+    static Logger instance;
+    return instance;
+}
+
+void Logger::Initialize(const std::string& logFilePath, LogLevel level) {
+    if (m_initialized) return;
+
+    try {
+        // Create console sink
+        auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        consoleSink->set_level(spdlog::level::trace);
+
+        // Create file sink
+        auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logFilePath, true);
+        fileSink->set_level(spdlog::level::trace);
+
+        // Create logger with multiple sinks
+        std::vector<spdlog::sink_ptr> sinks = {consoleSink, fileSink};
+        m_logger = std::make_shared<spdlog::logger>("rex", sinks.begin(), sinks.end());
+
+        // Set pattern
+        m_logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%s:%#] %v");
+
+        // Set level
+        m_logger->set_level(static_cast<spdlog::level::level_enum>(level));
+
+        m_initialized = true;
+
+        Info("Logger", "Logger initialized (file: " + logFilePath + ")");
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to initialize logger: " << e.what() << std::endl;
+    }
+}
+
+void Logger::Shutdown() {
+    if (!m_initialized) return;
+
+    Info("Logger", "Logger shutting down");
+
+    if (m_logger) {
+        m_logger->flush();
+        m_logger.reset();
+    }
+
+    m_initialized = false;
+    spdlog::drop_all();
+}
+
+void Logger::SetLevel(LogLevel level) {
+    if (!m_logger) return;
+    m_logger->set_level(static_cast<spdlog::level::level_enum>(level));
+}
+
+void Logger::SetConsoleOutput(bool enabled) {
+    // Handled by sinks
+}
+
+void Logger::SetFileOutput(bool enabled) {
+    // Handled by sinks
+}
+
+void Logger::Trace(const std::string& module, const std::string& message) {
+    Log(LogLevel::Trace, module, message);
+}
+
+void Logger::Debug(const std::string& module, const std::string& message) {
+    Log(LogLevel::Debug, module, message);
+}
+
+void Logger::Info(const std::string& module, const std::string& message) {
+    Log(LogLevel::Info, module, message);
+}
+
+void Logger::Warn(const std::string& module, const std::string& message) {
+    Log(LogLevel::Warn, module, message);
+}
+
+void Logger::Error(const std::string& module, const std::string& message) {
+    Log(LogLevel::Error, module, message);
+}
+
+void Logger::Fatal(const std::string& module, const std::string& message) {
+    Log(LogLevel::Fatal, module, message);
+}
+
+void Logger::Log(LogLevel level, const std::string& module, const std::string& message) {
+    if (!m_initialized || !m_logger) return;
+
+    std::string fullMessage = "[" + module + "] " + message;
+
+    switch (level) {
+        case LogLevel::Trace:   m_logger->trace(fullMessage); break;
+        case LogLevel::Debug:   m_logger->debug(fullMessage); break;
+        case LogLevel::Info:    m_logger->info(fullMessage); break;
+        case LogLevel::Warn:    m_logger->warn(fullMessage); break;
+        case LogLevel::Error:   m_logger->error(fullMessage); break;
+        case LogLevel::Fatal:   m_logger->critical(fullMessage); break;
+        default: break;
+    }
+
+    for (const auto& callback : m_callbacks) {
+        callback(fullMessage);
+    }
+}
+
+void Logger::RegisterCallback(LogCallback callback) {
+    m_callbacks.push_back(callback);
+}
+
+void Logger::UnregisterCallback(LogCallback callback) {
+    // Simplified – in production, use proper token-based registration
+    // For Phase 0, we'll just clear all callbacks
+    m_callbacks.clear();
+}
+
+} // namespace rex::shared
