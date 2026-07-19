@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/sandbox.h"
+#include "../src/core/sandbox/sandbox.h"
 
 TEST(SandboxTest, InitializeAndTerminate) {
     Sandbox sandbox;

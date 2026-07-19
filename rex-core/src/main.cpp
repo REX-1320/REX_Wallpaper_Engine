@@ -6,13 +6,13 @@
 #include <string>
 #include <vector>
 
-#include "workerw.h"
-#include "ipc_server.h"
-#include "compositor.h"
-#include "animation_engine.h"
-#include "render_scheduler.h"
+#include "wallpaper/host/DesktopHostFactory.hpp"
+#include "ipc/ipc_server.h"
+#include "graphics/compositor/compositor.h"
+#include "graphics/animation/animation_engine.h"
+#include "core/scheduler/render_scheduler.h"
 
-static WorkerWHost g_workerW;
+static std::unique_ptr<rex::wallpaper::host::IDesktopHost> g_desktopHost;
 static IpcServer g_ipcServer;
 static Compositor g_compositor;
 static AnimationEngine g_animationEngine;
@@ -27,7 +27,6 @@ void OnIpcMessage(const std::vector<uint8_t>& raw) {
 
     uint32_t msgType = *reinterpret_cast<const uint32_t*>(raw.data() + 1);
 
-    // Shared memory handle size Windows (64-bit: 8 bytes)
     auto readU64 = [&](size_t offset) -> uint64_t {
         uint64_t v;
         memcpy(&v, raw.data() + offset, sizeof(v));
@@ -46,9 +45,14 @@ void OnIpcMessage(const std::vector<uint8_t>& raw) {
         break;
     }
     case 4: {
-        HWND hwnd = g_workerW.GetRenderTargetWindow();
+        HWND hwnd = g_desktopHost ? g_desktopHost->GetRenderWindow() : nullptr;
         RECT rect;
-        GetClientRect(hwnd, &rect);
+        if (hwnd) {
+            GetClientRect(hwnd, &rect);
+        } else {
+            rect.left = rect.top = 0;
+            rect.right = rect.bottom = 0;
+        }
         std::string status = "{\"workerw_attached\":true,\"uptime_ms\":0}";
         std::vector<uint8_t> response(status.begin(), status.end());
         g_ipcServer.Send(response);
@@ -118,6 +122,17 @@ void OnIpcMessage(const std::vector<uint8_t>& raw) {
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    // ── DPI Awareness ──────────────────────────────────────────────────
+    // Must be set before any window creation or GetSystemMetrics calls.
+    // Without this, apps on high-DPI displays (e.g. 4K @ 150%) get
+    // virtualized to a lower resolution, causing partial screen coverage.
+    SetProcessDPIAware();
+
+    // Debug log — write immediately in case of early crash
+    FILE* log = nullptr;
+    fopen_s(&log, "D:\\REX_doc\\rex-core\\build\\Release\\rex_core_startup.log", "w");
+    if (log) { fprintf(log, "WinMain entered\n"); fflush(log); }
+
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
 
@@ -127,31 +142,73 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     FILE* fp;
     freopen_s(&fp, "CONOUT$", "w", stdout);
 
-    timeBeginPeriod(1); // 1ms timer resolution for accurate frame pacing
+    timeBeginPeriod(1);
     printf("[REX] Starting REX Core v0.1.0\n");
+    if (log) { fprintf(log, "Console allocated\n"); fflush(log); }
 
-    if (!g_workerW.Initialize()) {
-        printf("[REX] FATAL: WorkerW initialization failed\n");
+    // ── Acquire desktop host (WorkerW → Progman → error) ───────────────
+    g_desktopHost = rex::wallpaper::host::DesktopHostFactory::CreateBestAvailable();
+    if (!g_desktopHost) {
+        printf("[REX] FATAL: No desktop host available. Check logs.\n");
+        if (log) { fprintf(log, "FATAL: No desktop host\n"); fclose(log); }
         return 1;
     }
+    if (log) { fprintf(log, "Desktop host OK (%s)\n", g_desktopHost->GetHostType().data()); fflush(log); }
 
-    g_workerW.MonitorExplorer();
-    g_workerW.SetOnExplorerRestarted([]() {
-        printf("[REX] Explorer restarted, re-initializing compositor...\n");
+    // ── Start shell monitoring ─────────────────────────────────────────
+    g_desktopHost->StartMonitor([]() {
+        printf("[REX] Shell restarted, re-initializing compositor...\n");
         g_compositor.Shutdown();
-        g_compositor.Initialize(g_workerW.GetRenderTargetWindow());
+        g_compositor.Initialize(g_desktopHost->GetRenderWindow());
     });
+    if (log) { fprintf(log, "Monitor started\n"); fflush(log); }
 
-    if (!g_compositor.Initialize(g_workerW.GetRenderTargetWindow())) {
+    // ── Initialize Compositor ──────────────────────────────────────────
+    HWND targetHwnd = g_desktopHost->GetRenderWindow();
+    if (log) {
+        RECT cr; GetClientRect(targetHwnd, &cr);
+        RECT wr; GetWindowRect(targetHwnd, &wr);
+        HWND parent = GetParent(targetHwnd);
+        wchar_t pcls[256] = {0};
+        if (parent) GetClassNameW(parent, pcls, 256);
+        fprintf(log, "Render window: HWND=%p client=%dx%d window=%dx%d parent=%p(%S) visible=%d\n",
+                targetHwnd, cr.right, cr.bottom,
+                wr.right - wr.left, wr.bottom - wr.top,
+                parent, pcls, IsWindowVisible(targetHwnd));
+        fflush(log);
+    }
+    printf("[REX] Compositor target: HWND=%p (%s) %dx%d\n",
+           targetHwnd, g_desktopHost->GetHostType().data(),
+           g_desktopHost->GetWidth(), g_desktopHost->GetHeight());
+
+    // Force the render window to full desktop size before compositor init.
+    // On Raised Desktop (Win11 24H2), a child window's client rect may
+    // not reflect the desktop size until explicitly positioned.
+    SetWindowPos(targetHwnd, HWND_BOTTOM,
+                 0, 0,
+                 g_desktopHost->GetWidth(),
+                 g_desktopHost->GetHeight(),
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    ShowWindow(targetHwnd, SW_SHOW);
+    UpdateWindow(targetHwnd);
+    Sleep(50);
+
+    if (!g_compositor.Initialize(targetHwnd)) {
         printf("[REX] FATAL: Compositor initialization failed\n");
+        if (log) { fprintf(log, "Compositor FAILED\n"); fclose(log); }
         return 1;
     }
+    if (log) { fprintf(log, "Compositor OK\n"); fflush(log); }
+    printf("[REX] Compositor initialized. Clear color: (0.00, 0.50, 0.80)\n");
 
+    // ── Start IPC server ───────────────────────────────────────────────
     if (!g_ipcServer.Start("REX/core/v1")) {
         printf("[REX] FATAL: IPC server failed to start\n");
+        if (log) { fprintf(log, "IPC FAILED\n"); fclose(log); }
         return 1;
     }
     g_ipcServer.SetMessageHandler(OnIpcMessage);
+    if (log) { fprintf(log, "IPC OK\n"); fflush(log); }
 
     HANDLE readyEvent = CreateEventA(nullptr, FALSE, FALSE, "REX_Core_Ready");
     if (readyEvent) {
@@ -161,14 +218,19 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
     printf("[REX] Ready. Waiting for shell connection...\n");
 
+    // ── Main Loop ──────────────────────────────────────────────────────
+    if (log) { fprintf(log, "Entering main loop\n"); fflush(log); }
+
     LARGE_INTEGER freq, last;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&last);
 
+    int loopCount = 0;
     while (g_running) {
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
-        double frameTimeMs = static_cast<double>(now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
+        double frameTimeMs = static_cast<double>(now.QuadPart - last.QuadPart)
+                           * 1000.0 / freq.QuadPart;
         last = now;
 
         g_animationEngine.Tick(frameTimeMs);
@@ -183,12 +245,25 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         if (frameTimeMs < 16.6) {
             Sleep(static_cast<DWORD>(16.6 - frameTimeMs));
         }
+
+        if (loopCount == 0 && log) { fprintf(log, "First frame complete\n"); fflush(log); }
+        loopCount++;
+
+        // Periodic health check
+        if (loopCount % 600 == 0 && log) {
+            fprintf(log, "Heartbeat: %d frames\n", loopCount);
+            fflush(log);
+        }
     }
 
     printf("[REX] Shutting down...\n");
+    if (log) { fprintf(log, "Shutdown. Total frames: %d\n", loopCount); fflush(log); }
     g_ipcServer.Stop();
     g_compositor.Shutdown();
-    g_workerW.Shutdown();
+    if (g_desktopHost) {
+        g_desktopHost->StopMonitor();
+        g_desktopHost->Release();
+    }
     timeEndPeriod(1);
     printf("[REX] Shutdown complete.\n");
     return 0;

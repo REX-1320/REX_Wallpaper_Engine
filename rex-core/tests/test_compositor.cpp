@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/compositor.h"
+#include "../src/graphics/compositor/compositor.h"
 
 TEST(CompositorTest, SetClearColorStoresValues) {
     Compositor compositor;

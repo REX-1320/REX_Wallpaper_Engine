@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/ipc_server.h"
+#include "../src/ipc/ipc_server.h"
 #include <thread>
 #include <chrono>
 
