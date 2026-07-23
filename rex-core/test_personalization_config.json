@@ -1,0 +1,8 @@
+[
+  {
+    "moduleId": "rex.desktop_personalization",
+    "enabled": true,
+    "autoStart": true,
+    "restartCount": 0
+  }
+]

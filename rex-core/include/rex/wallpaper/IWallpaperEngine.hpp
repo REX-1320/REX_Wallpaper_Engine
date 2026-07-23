@@ -40,7 +40,7 @@ enum class FillMode {
 // ─── IRuntime ──────────────────────────────────────────────────────────────
 
 /// Base interface for all REX runtimes.
-/// Every runtime (Wallpaper, Widget, WindowFX) implements this.
+/// Every runtime (Wallpaper, WindowFX) implements this.
 class IRuntime {
 public:
     virtual ~IRuntime() = default;

@@ -2,6 +2,8 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include <cassert>
+#include <shellscalingapi.h>
 
 namespace rex::wallpaper {
 
@@ -42,12 +44,10 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
     }
 
     HWND renderWindow = m_workerW->GetRenderWindow();
-    int width = GetSystemMetrics(SM_CXSCREEN);
-    int height = GetSystemMetrics(SM_CYSCREEN);
 
     // Create Renderer
     m_renderer = std::make_unique<D3D12Renderer>();
-    result = m_renderer->Initialize(renderWindow, width, height);
+    result = m_renderer->Initialize(renderWindow, m_workerW->GetWidth(), m_workerW->GetHeight());
     if (result.IsError()) {
         REX_LOG_ERROR("Engine", "Failed to initialize renderer: {}", result.Error().message);
         return result;
@@ -134,11 +134,9 @@ shared::Result<void> Engine::ReinitializeRenderer() {
     }
 
     HWND renderWindow = m_workerW->GetRenderWindow();
-    int width = GetSystemMetrics(SM_CXSCREEN);
-    int height = GetSystemMetrics(SM_CYSCREEN);
 
     m_renderer = std::make_unique<D3D12Renderer>();
-    auto result = m_renderer->Initialize(renderWindow, width, height);
+    auto result = m_renderer->Initialize(renderWindow, m_workerW->GetWidth(), m_workerW->GetHeight());
     if (result.IsError()) {
         REX_LOG_ERROR("Engine", "Failed to reinitialize renderer: {}",
                       result.Error().message);
@@ -302,11 +300,12 @@ shared::Result<void> Engine::AssignMonitor(const std::string& monitorId) {
         }
     }
 
-    // Fallback: use primary monitor dimensions
+    // Fallback: use WorkerWManager's cached primary monitor dimensions
+    assert(m_workerW && "AssignMonitor requires initialized engine with WorkerWManager");
     m_currentMonitor.id = monitorId;
     m_currentMonitor.name = monitorId;
-    m_currentMonitor.width = GetSystemMetrics(SM_CXSCREEN);
-    m_currentMonitor.height = GetSystemMetrics(SM_CYSCREEN);
+    m_currentMonitor.width  = m_workerW->GetWidth();
+    m_currentMonitor.height = m_workerW->GetHeight();
     m_currentMonitor.isPrimary = true;
 
     REX_LOG_WARN("Engine", "Monitor '{}' not found, using fallback {}x{}",
@@ -342,14 +341,21 @@ std::vector<MonitorInfo> Engine::EnumerateMonitors() const {
             info.height   = mi.rcMonitor.bottom - mi.rcMonitor.top;
             info.isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
 
-            // Use wide-char name for the ID
+            // Normalize monitor ID: "\\.\DISPLAY1" → "DISPLAY1"
             char nameBuf[128];
             WideCharToMultiByte(CP_UTF8, 0, mi.szDevice, -1, nameBuf, sizeof(nameBuf), nullptr, nullptr);
-            info.id   = nameBuf;
+            std::string fullName(nameBuf);
+            if (fullName.size() > 4 && fullName[0] == '\\' && fullName[1] == '\\'
+                && fullName[2] == '.' && fullName[3] == '\\') {
+                info.id = fullName.substr(4);
+            } else {
+                info.id = fullName;
+            }
             info.name = info.id;
 
-            // DPI scale — use default 1.0; can be enhanced with GetDpiForMonitor
+            // DPI scale via GetDpiForMonitor
             UINT dpiX = 96, dpiY = 96;
+            GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
             info.dpiScale = static_cast<float>(dpiX) / 96.0f;
 
             vec->push_back(std::move(info));
@@ -466,7 +472,7 @@ void Engine::Update(double deltaTime) {
         m_currentPosition = elapsed;
 
         if (m_frameCount % 60 == 0) {
-            REX_LOG_DEBUG("Engine", "Frame {}: {:.2f} s, {:.2f} ms",
+            REX_LOG_DEBUG("Engine", "Frame {}: {:.2f} s, {:.4f} s",
                           m_frameCount, elapsed, deltaTime);
         }
     }
@@ -506,9 +512,7 @@ void Engine::CheckDisplayChanges() {
 
     // Notify renderer of new dimensions
     if (m_renderer && m_workerW) {
-        m_renderer->Resize(
-            m_workerW->GetWorkerW() ? GetSystemMetrics(SM_CXSCREEN) : primaryW,
-            m_workerW->GetWorkerW() ? GetSystemMetrics(SM_CYSCREEN) : primaryH);
+        m_renderer->Resize(m_workerW->GetWidth(), m_workerW->GetHeight());
     }
 }
 
@@ -567,12 +571,40 @@ void Engine::RenderLoop() {
             if (m_state == EngineState::Running && m_playback
                 && m_currentScene.type == "video") {
                 DecodedFrame frame = m_playback->Tick();
+
+                // [Stage 3] 1Hz diagnostic: Tick() result
+                {
+                    static auto s_nextLog = std::chrono::steady_clock::now();
+                    auto s_now = std::chrono::steady_clock::now();
+                    if (s_now >= s_nextLog) {
+                        s_nextLog = s_now + std::chrono::seconds(1);
+                        REX_LOG_INFO("EngDiag", "Tick: valid={} ts={}ms frame={}",
+                                     frame.valid ? 1 : 0,
+                                     frame.timestampHns / 10000,
+                                     m_frameCount);
+                    }
+                }
+
                 if (frame.valid && m_renderer) {
-                    m_renderer->UpdateTexturePixels(
+                    auto uploadResult = m_renderer->UpdateTexturePixels(
                         frame.pixels.data(),
                         frame.width,
                         frame.height,
                         frame.rowPitch);
+
+                    // [Stage 3] 1Hz diagnostic: UpdateTexturePixels result
+                    {
+                        static auto s_nextLog = std::chrono::steady_clock::now();
+                        auto s_now = std::chrono::steady_clock::now();
+                        if (s_now >= s_nextLog) {
+                            s_nextLog = s_now + std::chrono::seconds(1);
+                            REX_LOG_INFO("EngDiag", "Upload: {} err={}",
+                                         uploadResult.IsSuccess() ? "OK" : "FAIL",
+                                         uploadResult.IsError()
+                                             ? uploadResult.Error().message.c_str()
+                                             : "");
+                        }
+                    }
                 }
             }
 

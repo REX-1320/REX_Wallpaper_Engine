@@ -1,5 +1,5 @@
 #include "Engine.hpp"
-#include "wallpaper/host/DesktopHostFactory.hpp"
+#include "platform/windows/DesktopHostFactory.hpp"
 #include <iostream>
 #include <chrono>
 #include <algorithm>
@@ -35,8 +35,9 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
     }
 
     // Acquire desktop host (tries WorkerW → Progman → error)
-    m_desktopHost = host::DesktopHostFactory::CreateBestAvailable();
-    if (!m_desktopHost) {
+    // Use a temporary unique_ptr so the host is released on any early return.
+    auto host = rex::platform::windows::DesktopHostFactory::CreateBestAvailable();
+    if (!host) {
         REX_LOG_ERROR("Engine", "Failed to create desktop host");
         return shared::Result<void>(shared::ErrorCode::UnknownError,
             "No desktop hosting strategy available. "
@@ -44,17 +45,21 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
             "Progman both failed.");
     }
 
-    HWND renderWindow = m_desktopHost->GetRenderWindow();
-    int width  = m_desktopHost->GetWidth();
-    int height = m_desktopHost->GetHeight();
+    HWND renderWindow = host->GetRenderWindow();
+    int width  = host->GetWidth();
+    int height = host->GetHeight();
 
     // Create Renderer
     m_renderer = std::make_unique<D3D12Renderer>();
     auto result = m_renderer->Initialize(renderWindow, width, height);
     if (result.IsError()) {
         REX_LOG_ERROR("Engine", "Failed to initialize renderer: {}", result.Error().message);
+        host->Release();
         return result;
     }
+
+    // Success — transfer ownership to member
+    m_desktopHost = std::move(host);
 
     // Start shell monitor for desktop host recovery
     // The callback runs on a background thread — it only sets a flag.
@@ -89,6 +94,13 @@ shared::Result<void> Engine::Shutdown() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     if (m_state == EngineState::Uninitialized) {
+        // Defensive: clean up anything that may have been allocated during
+        // a failed Initialize (e.g. renderer failure after host acquisition).
+        if (m_desktopHost) {
+            m_desktopHost->Release();
+            m_desktopHost.reset();
+        }
+        m_renderer.reset();
         return shared::Result<void>();
     }
 

@@ -23,7 +23,7 @@ class RenderScheduler {
 public:
     static constexpr double TOTAL_FRAME_MS = 16.6;
     static constexpr double COMPOSITOR_RESERVED_MS = 2.0;
-    static constexpr double PER_WIDGET_DEFAULT_MS = 2.0;
+    static constexpr double DEFAULT_LAYER_BUDGET_MS = 2.0;
     static constexpr uint32_t BUDGET_WINDOW_FRAMES = 30;
     static constexpr uint32_t THROTTLE_THRESHOLD = 60;
     static constexpr uint32_t TRIAL_FRAME_INTERVAL = 600; // ~10s at 60fps

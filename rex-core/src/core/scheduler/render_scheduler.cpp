@@ -42,7 +42,7 @@ void RenderScheduler::RecordActualRenderTime(uint64_t layerId, double ms) {
     constexpr double alpha = 1.0 / BUDGET_WINDOW_FRAMES;
     history.rollingAverageMs = (1.0 - alpha) * history.rollingAverageMs + alpha * ms;
 
-    bool overBudget = history.rollingAverageMs > PER_WIDGET_DEFAULT_MS;
+    bool overBudget = history.rollingAverageMs > DEFAULT_LAYER_BUDGET_MS;
 
     if (overBudget) {
         history.consecutiveOverBudget++;

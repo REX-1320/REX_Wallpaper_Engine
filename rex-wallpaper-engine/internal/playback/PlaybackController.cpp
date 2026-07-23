@@ -241,6 +241,29 @@ void PlaybackController::DecoderThread() {
         // ── Decode one frame ───────────────────────────────────────────
         VideoFrame videoFrame = m_decoder->ReadFrame();
 
+        // [Stage 2] 1Hz diagnostic: decoder output
+        {
+            static auto s_nextLog = std::chrono::steady_clock::now();
+            auto s_now = std::chrono::steady_clock::now();
+            if (s_now >= s_nextLog) {
+                s_nextLog = s_now + std::chrono::seconds(1);
+                auto& pix = videoFrame.pixels;
+                uint32_t first4 = (pix.size() >= 4)
+                    ? (static_cast<uint32_t>(pix[0]) << 0 |
+                       static_cast<uint32_t>(pix[1]) << 8 |
+                       static_cast<uint32_t>(pix[2]) << 16 |
+                       static_cast<uint32_t>(pix[3]) << 24)
+                    : 0;
+                REX_LOG_INFO("PBDiag", "Decoded: valid={} {}x{} fmt={} ts={}ms bytes={} first4=0x{:08x} wc={}",
+                             videoFrame.valid ? 1 : 0,
+                             videoFrame.width, videoFrame.height,
+                             static_cast<int>(videoFrame.format),
+                             videoFrame.timestampHns / 10000,
+                             pix.size(), first4,
+                             m_writeCount.load(std::memory_order_relaxed));
+            }
+        }
+
         if (!videoFrame.valid) {
             // EOF — restart or stop
             if (m_looping.load(std::memory_order_relaxed)) {
@@ -284,6 +307,26 @@ void PlaybackController::DecoderThread() {
         // Release: all ring slot writes are visible before the counter
         // increment reaches the consumer.
         m_writeCount.store(wc + 1, std::memory_order_release);
+
+        // [Stage 2] 1Hz diagnostic: ring buffer published
+        {
+            static auto s_nextLog = std::chrono::steady_clock::now();
+            auto s_now = std::chrono::steady_clock::now();
+            if (s_now >= s_nextLog) {
+                s_nextLog = s_now + std::chrono::seconds(1);
+                auto& dpix = m_ring[slot].pixels;
+                uint32_t first4 = (dpix.size() >= 4)
+                    ? (static_cast<uint32_t>(dpix[0]) << 0 |
+                       static_cast<uint32_t>(dpix[1]) << 8 |
+                       static_cast<uint32_t>(dpix[2]) << 16 |
+                       static_cast<uint32_t>(dpix[3]) << 24)
+                    : 0;
+                REX_LOG_INFO("PBDiag", "Ring[slot={}]: wc={} valid={} {}x{} first4=0x{:08x}",
+                             slot, wc + 1,
+                             m_ring[slot].valid ? 1 : 0,
+                             m_ring[slot].width, m_ring[slot].height, first4);
+            }
+        }
 
         // Track current position in seconds (from 100-ns timestamp)
         double posSec = static_cast<double>(videoFrame.timestampHns) / 10000000.0;

@@ -49,6 +49,7 @@ target_link_libraries(rex-wallpaper-engine
         mfplat
         mfreadwrite
         mfuuid
+        shcore
 )
 
 target_compile_definitions(rex-wallpaper-engine

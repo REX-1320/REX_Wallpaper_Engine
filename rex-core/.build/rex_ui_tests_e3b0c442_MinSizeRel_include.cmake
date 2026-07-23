@@ -1,0 +1,5 @@
+if(EXISTS "D:/REX_doc/rex-core/.build/rex_ui_tests_e3b0c442_MinSizeRel_tests.cmake")
+  include("D:/REX_doc/rex-core/.build/rex_ui_tests_e3b0c442_MinSizeRel_tests.cmake")
+else()
+  add_test(rex-ui-tests_NOT_BUILT rex-ui-tests_NOT_BUILT)
+endif()

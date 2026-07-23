@@ -27,20 +27,22 @@ public:
     /// Stop the Explorer monitor thread (called during shutdown).
     void StopMonitor();
 
-    HWND GetWorkerW()      const { return m_workerW; }
+    HWND GetDesktopHwnd()  const { return m_desktopHwnd; }
     HWND GetRenderWindow() const { return m_renderWindow; }
-    bool IsValid()         const { return m_workerW != nullptr && m_renderWindow != nullptr; }
+    int  GetWidth()        const { return m_width; }
+    int  GetHeight()       const { return m_height; }
+    bool IsValid()         const { return m_desktopHwnd != nullptr && m_renderWindow != nullptr; }
     bool IsAcquired()      const { return m_acquired; }
 
 private:
-    HWND FindBlankWorkerW();
+    HWND FindDesktopWindow();
     HWND CreateRenderWindow(HWND parent, int width, int height);
-    void ReparentToWorkerW(HWND renderWindow, HWND workerW);
+    void ReparentToDesktop(HWND renderWindow, HWND parent);
     void MonitorExplorer();
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-    HWND m_workerW = nullptr;
+    HWND m_desktopHwnd = nullptr;
     HWND m_renderWindow = nullptr;
     int m_width = 0;
     int m_height = 0;

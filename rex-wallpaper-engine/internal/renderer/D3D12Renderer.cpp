@@ -537,6 +537,16 @@ void D3D12Renderer::WaitForFrame() {
 }
 
 void D3D12Renderer::BeginFrame() {
+    // [Stage 6] 1Hz diagnostic
+    {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            REX_LOG_INFO("GfxDiag", "BeginFrame: frameIdx={}", m_frameIndex);
+        }
+    }
+
     m_renderMutex.lock();
 
     WaitForFrame();
@@ -548,6 +558,20 @@ void D3D12Renderer::BeginFrame() {
 }
 
 void D3D12Renderer::RenderFrame() {
+    // [Stage 5] 1Hz diagnostic: RenderFrame entry
+    {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            REX_LOG_INFO("GfxDiag", "RenderFrame: hasTex={} tex={} srv=0x{:016x} texState={}",
+                         m_hasTexture ? 1 : 0,
+                         fmt::ptr(m_texture.Get()),
+                         m_textureSRVGpuHandle.ptr,
+                         static_cast<int>(m_textureState));
+        }
+    }
+
     // Transition back buffer to render target
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -587,6 +611,16 @@ void D3D12Renderer::RenderFrame() {
         m_commandList->SetGraphicsRootDescriptorTable(0, m_textureSRVGpuHandle);
 
         m_commandList->DrawInstanced(4, 1, 0, 0);
+
+        // [Stage 5] 1Hz diagnostic: DrawInstanced
+        {
+            static auto s_nextLog = std::chrono::steady_clock::now();
+            auto s_now = std::chrono::steady_clock::now();
+            if (s_now >= s_nextLog) {
+                s_nextLog = s_now + std::chrono::seconds(1);
+                REX_LOG_INFO("GfxDiag", "DrawInstanced: hasTex={} drawn=1", m_hasTexture ? 1 : 0);
+            }
+        }
     }
 
     // Transition back buffer to present
@@ -602,6 +636,16 @@ void D3D12Renderer::EndFrame() {
     m_commandQueue->ExecuteCommandLists(1, lists);
 
     HRESULT hr = m_swapChain->Present(1, 0);
+
+    // [Stage 6] 1Hz diagnostic: Present result
+    {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            REX_LOG_INFO("GfxDiag", "Present: hr={:08x} frameIdx={}", hr, m_frameIndex);
+        }
+    }
 
     // Detect device removal (TDR, driver crash, etc.)
     if (FAILED(hr)) {
@@ -724,7 +768,19 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
                                     "Invalid pixel data");
     }
 
-    std::lock_guard<std::mutex> lock(m_renderMutex);
+    // [Stage 4] 1Hz diagnostic: entry
+    {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            REX_LOG_INFO("GfxDiag", "UpdateTexturePixels: tex={} {}x{} pitch={} hasTex={} state={}",
+                         fmt::ptr(m_texture.Get()),
+                         width, height, rowPitch,
+                         m_hasTexture ? 1 : 0,
+                         static_cast<int>(m_textureState));
+        }
+    }
 
     // First call or size change: (re)create texture + upload buffer
     if (!m_texture || m_texWidth != width || m_texHeight != height) {
@@ -734,7 +790,7 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
             m_textureUploadBuffer.Reset();
         }
 
-        // Create DEFAULT texture
+        // Create DEFAULT texture (initial state: COPY_DEST)
         D3D12_RESOURCE_DESC texDesc = {};
         texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         texDesc.Width            = static_cast<UINT64>(width);
@@ -748,9 +804,10 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
         D3D12_HEAP_PROPERTIES heapProps = {};
         heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
+        m_textureState = D3D12_RESOURCE_STATE_COPY_DEST;
         HRESULT hr = m_device->CreateCommittedResource(
             &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            m_textureState, nullptr,
             IID_PPV_ARGS(&m_texture));
         if (FAILED(hr)) {
             REX_LOG_ERROR("D3D12", "Create texture for video failed: {:08x}", hr);
@@ -857,7 +914,34 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     srcLoc.PlacedFootprint.Footprint.Depth    = 1;
     srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
 
+    // [Stage 4] Log: resource state before copy
+    {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            REX_LOG_INFO("GfxDiag", "CopyTextureRegion: tex={} beforeState={} {}x{} pitch={}",
+                         fmt::ptr(m_texture.Get()),
+                         static_cast<int>(m_textureState),
+                         width, height, rowPitch);
+        }
+    }
+
     copyList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+
+    // Check if we need to transition from current state to COPY_DEST
+    if (m_textureState != D3D12_RESOURCE_STATE_COPY_DEST) {
+        D3D12_RESOURCE_BARRIER toCopy = {};
+        toCopy.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toCopy.Transition.pResource   = m_texture.Get();
+        toCopy.Transition.StateBefore = m_textureState;
+        toCopy.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        toCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyList->ResourceBarrier(1, &toCopy);
+        REX_LOG_INFO("GfxDiag", "Barrier: state {} → COPY_DEST before copy",
+                     static_cast<int>(m_textureState));
+        m_textureState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
 
     // Transition to shader-readable
     D3D12_RESOURCE_BARRIER barrier = {};
@@ -867,6 +951,8 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     copyList->ResourceBarrier(1, &barrier);
+
+    m_textureState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     copyList->Close();
 

@@ -16,14 +16,14 @@
 
 #include <gtest/gtest.h>
 
-#include "wallpaper/host/DesktopHostFactory.hpp"
-#include "wallpaper/host/WorkerWHost.hpp"
-#include "wallpaper/host/ProgmanHost.hpp"
+#include "platform/windows/DesktopHostFactory.hpp"
+#include "platform/windows/WorkerWHost.hpp"
+#include "platform/windows/ProgmanHost.hpp"
 
 #include <memory>
 #include <string>
 
-using namespace rex::wallpaper::host;
+using namespace rex::platform::windows;
 using namespace rex::shared;
 
 // ═══════════════════════════════════════════════════════════════════════════

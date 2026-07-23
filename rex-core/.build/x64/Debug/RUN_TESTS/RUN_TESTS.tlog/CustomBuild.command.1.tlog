@@ -1,0 +1,10 @@
+^D:\REX_DOC\REX-CORE\.BUILD\CMAKEFILES\8504FFB86458A8B83B6B8BC700ED198F\RUN_TESTS_FORCE.RULE
+setlocal
+cd .
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

@@ -1,0 +1,5 @@
+if(EXISTS "D:/REX_doc/rex-core/.build/rex_search_tests_e3b0c442_Release_tests.cmake")
+  include("D:/REX_doc/rex-core/.build/rex_search_tests_e3b0c442_Release_tests.cmake")
+else()
+  add_test(rex-search-tests_NOT_BUILT rex-search-tests_NOT_BUILT)
+endif()

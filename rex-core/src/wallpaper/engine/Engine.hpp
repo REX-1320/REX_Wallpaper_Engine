@@ -10,7 +10,7 @@
 #include <memory>
 #include <thread>
 
-#include "wallpaper/host/IDesktopHost.hpp"
+#include "platform/windows/IDesktopHost.hpp"
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "wallpaper/playback/PlaybackController.hpp"
 
@@ -86,7 +86,7 @@ private:
     int m_lastPrimaryWidth = 0;
     int m_lastPrimaryHeight = 0;
 
-    std::unique_ptr<host::IDesktopHost> m_desktopHost;
+    std::unique_ptr<rex::platform::windows::IDesktopHost> m_desktopHost;
     std::unique_ptr<D3D12Renderer> m_renderer;
     std::unique_ptr<PlaybackController> m_playback;
     std::thread m_renderThread;

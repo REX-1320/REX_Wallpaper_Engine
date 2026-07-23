@@ -6,6 +6,7 @@
 #include <codecapi.h>
 
 #include <algorithm>
+#include <chrono>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -139,11 +140,17 @@ shared::Result<void> MediaFoundationDecoder::Open(std::string_view path) {
     m_streamIndex = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 
     // ── Read metadata ───────────────────────────────────────────────────
+    // MF_PD_DURATION is a presentation-level attribute, query via
+    // MF_SOURCE_READER_MEDIASOURCE rather than the stream index.
     PROPVARIANT var = {};
-    hr = m_sourceReader->GetPresentationAttribute(m_streamIndex,
-                                                   MF_PD_DURATION, &var);
-    if (SUCCEEDED(hr) && var.vt == VT_UI8) {
-        m_duration = static_cast<double>(var.uhVal.QuadPart) / 10000000.0;
+    hr = m_sourceReader->GetPresentationAttribute(
+        MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var);
+    if (SUCCEEDED(hr)) {
+        if (var.vt == VT_UI8) {
+            m_duration = static_cast<double>(var.uhVal.QuadPart) / 10000000.0;
+        } else if (var.vt == VT_R8) {
+            m_duration = static_cast<double>(var.dblVal);
+        }
     }
     PropVariantClear(&var);
 
@@ -192,12 +199,34 @@ VideoFrame MediaFoundationDecoder::ReadFrame() {
     HRESULT hr = m_sourceReader->ReadSample(
         m_streamIndex, 0, &streamIndex, &flags, &timestamp, &sample);
 
+    // [Stage 1] 1Hz diagnostic: ReadSample result
+    {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            REX_LOG_INFO("MFDiag", "ReadSample: hr={:08x} ts={}ms eof={} sample={}",
+                         hr, timestamp / 10000,
+                         (flags & MF_SOURCE_READERF_ENDOFSTREAM) ? 1 : 0,
+                         sample.Get() ? 1 : 0);
+        }
+    }
+
     if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
         REX_LOG_DEBUG("MFDecoder", "EOF");
         return frame; // valid=false signals caller to loop
     }
 
-    if (FAILED(hr) || !sample) return frame;
+    if (FAILED(hr) || !sample) {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            REX_LOG_INFO("MFDiag", "ReadSample failed: hr={:08x} sample={}",
+                         hr, sample.Get() ? 1 : 0);
+        }
+        return frame;
+    }
 
     // ── Extract buffer from sample ───────────────────────────────────────
     Microsoft::WRL::ComPtr<IMFMediaBuffer> mediaBuffer;
@@ -255,6 +284,25 @@ VideoFrame MediaFoundationDecoder::ReadFrame() {
     frame.format       = DXGI_FORMAT_R8G8B8A8_UNORM;
     frame.timestampHns = static_cast<int64_t>(timestamp);
     frame.valid        = true;
+
+    // [Stage 1] 1Hz diagnostic: decoded frame
+    {
+        static auto s_nextLog = std::chrono::steady_clock::now();
+        auto s_now = std::chrono::steady_clock::now();
+        if (s_now >= s_nextLog) {
+            s_nextLog = s_now + std::chrono::seconds(1);
+            auto& buf = m_rgbaBuffer;
+            uint32_t first4 = (buf.size() >= 4)
+                ? (static_cast<uint32_t>(buf[0]) << 0 |
+                   static_cast<uint32_t>(buf[1]) << 8 |
+                   static_cast<uint32_t>(buf[2]) << 16 |
+                   static_cast<uint32_t>(buf[3]) << 24)
+                : 0;
+            REX_LOG_INFO("MFDiag", "Frame decoded: {}x{} fmt={} ts={}ms bytes={} first4=0x{:08x}",
+                         m_width, m_height, isNV12 ? "NV12" : "RGB32",
+                         timestamp / 10000, buf.size(), first4);
+        }
+    }
 
     return frame;
 }

@@ -52,10 +52,7 @@ shared::Result<void> TextureCache::LoadFromDisk(std::string_view path) {
     // Update or create the cache entry
     auto& entry = m_entries[key];
     entry.key = key;
-    entry.texture.pixels    = std::move(texData.pixels);
-    entry.texture.width     = texData.width;
-    entry.texture.height    = texData.height;
-    entry.texture.rowPitch  = texData.rowPitch;
+    entry.texture.pixels    = std::move(texData);
     entry.texture.writeTime = writeTime;
     entry.texture.version++;
     entry.texture.valid     = true;

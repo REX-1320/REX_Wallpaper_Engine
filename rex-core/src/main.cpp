@@ -6,13 +6,13 @@
 #include <string>
 #include <vector>
 
-#include "wallpaper/host/DesktopHostFactory.hpp"
+#include "platform/windows/DesktopHostFactory.hpp"
 #include "ipc/ipc_server.h"
 #include "graphics/compositor/compositor.h"
 #include "graphics/animation/animation_engine.h"
 #include "core/scheduler/render_scheduler.h"
 
-static std::unique_ptr<rex::wallpaper::host::IDesktopHost> g_desktopHost;
+static std::unique_ptr<rex::platform::windows::IDesktopHost> g_desktopHost;
 static IpcServer g_ipcServer;
 static Compositor g_compositor;
 static AnimationEngine g_animationEngine;
@@ -63,49 +63,6 @@ void OnIpcMessage(const std::vector<uint8_t>& raw) {
         g_running = false;
         break;
     }
-    case 10: {
-        if (raw.size() >= 33) {
-            uint64_t layerId = readU64(5);
-            int32_t x = readI32(13);
-            int32_t y = readI32(17);
-            int32_t w = readI32(21);
-            int32_t h = readI32(25);
-            int32_t z = readI32(29);
-            Layer layer = {};
-            layer.id = layerId;
-            layer.kind = 0;
-            layer.bounds[0] = static_cast<float>(x);
-            layer.bounds[1] = static_cast<float>(y);
-            layer.bounds[2] = static_cast<float>(w);
-            layer.bounds[3] = static_cast<float>(h);
-            layer.opacity = 1.0f;
-            layer.zOrder = z;
-            layer.visible = true;
-            g_compositor.SubmitLayer(layer);
-            printf("[REX] SetWidgetTransform: layer %llu -> (%d,%d %dx%d) z=%d\n",
-                layerId, x, y, w, h, z);
-        }
-        break;
-    }
-    case 11: {
-        if (raw.size() >= 29) {
-            uint64_t layerId = readU64(5);
-            uint64_t handleVal = readU64(13);
-            int32_t w = readI32(21);
-            int32_t h = readI32(25);
-            HANDLE sharedHandle = reinterpret_cast<HANDLE>(handleVal);
-            g_compositor.ImportLayerTexture(layerId, sharedHandle, w, h);
-        }
-        break;
-    }
-    case 12: {
-        if (raw.size() >= 13) {
-            uint64_t layerId = readU64(5);
-            g_compositor.RemoveLayerTexture(layerId);
-            printf("[REX] UnregisterWidgetSurface: layer %llu\n", layerId);
-        }
-        break;
-    }
     case 99: {
         if (raw.size() >= 19) {
             float r = *reinterpret_cast<const float*>(raw.data() + 9);
@@ -147,7 +104,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     if (log) { fprintf(log, "Console allocated\n"); fflush(log); }
 
     // ── Acquire desktop host (WorkerW → Progman → error) ───────────────
-    g_desktopHost = rex::wallpaper::host::DesktopHostFactory::CreateBestAvailable();
+    g_desktopHost = rex::platform::windows::DesktopHostFactory::CreateBestAvailable();
     if (!g_desktopHost) {
         printf("[REX] FATAL: No desktop host available. Check logs.\n");
         if (log) { fprintf(log, "FATAL: No desktop host\n"); fclose(log); }

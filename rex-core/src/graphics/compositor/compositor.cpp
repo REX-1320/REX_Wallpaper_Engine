@@ -388,7 +388,7 @@ void Compositor::PopulateCommandList() {
     m_commandList->RSSetViewports(1, &fullViewport);
     m_commandList->RSSetScissorRects(1, &fullScissor);
 
-    // Draw widget layers when present. When no layers are registered,
+    // Draw compositor layers when present. When no layers are registered,
     // the ClearRenderTargetView above already fills the back buffer
     // with the clear color — no draw call is needed. DWM will
     // composite the cleared buffer as-is.

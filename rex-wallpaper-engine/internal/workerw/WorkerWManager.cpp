@@ -1,6 +1,7 @@
 #include "WorkerWManager.hpp"
 #include <shared/Logger.hpp>
 #include <string>
+#include <optional>
 #include <chrono>
 #include <thread>
 
@@ -14,6 +15,27 @@ namespace {
         }
         return L"";
     }
+
+    std::optional<std::pair<int, int>> EnumeratePrimaryMonitorSize() {
+        std::optional<std::pair<int, int>> result;
+
+        EnumDisplayMonitors(nullptr, nullptr,
+            [](HMONITOR hMon, HDC, LPRECT, LPARAM lParam) -> BOOL {
+                auto* out = reinterpret_cast<std::optional<std::pair<int, int>>*>(lParam);
+                MONITORINFOEXW mi = {};
+                mi.cbSize = sizeof(mi);
+                if (GetMonitorInfoW(hMon, &mi) && (mi.dwFlags & MONITORINFOF_PRIMARY)) {
+                    *out = std::make_pair(
+                        mi.rcMonitor.right - mi.rcMonitor.left,
+                        mi.rcMonitor.bottom - mi.rcMonitor.top);
+                    return FALSE; // stop enumeration
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&result));
+
+        return result;
+    }
 }
 
 WorkerWManager::WorkerWManager() = default;
@@ -25,27 +47,36 @@ WorkerWManager::~WorkerWManager() {
 shared::Result<void> WorkerWManager::Acquire() {
     if (m_acquired) {
         return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
-                                    "WorkerW already acquired");
+                                    "Desktop window already acquired");
     }
 
-    REX_LOG_INFO("WorkerW", "Acquiring WorkerW...");
+    REX_LOG_INFO("WorkerW", "Acquiring desktop window...");
 
-    // Find blank WorkerW
-    m_workerW = FindBlankWorkerW();
-    if (!m_workerW) {
+    // Find Progman (the desktop window behind icons)
+    m_desktopHwnd = FindDesktopWindow();
+    if (!m_desktopHwnd) {
         return shared::Result<void>(shared::ErrorCode::NotFound,
-                                    "Failed to find WorkerW");
+                                    "Failed to find Progman desktop window");
     }
 
-    REX_LOG_INFO("WorkerW", "Found WorkerW: {}", fmt::ptr(m_workerW));
+    REX_LOG_INFO("WorkerW", "Found Progman: {}", fmt::ptr(m_desktopHwnd));
 
-    // Get screen size
-    m_width = GetSystemMetrics(SM_CXSCREEN);
-    m_height = GetSystemMetrics(SM_CYSCREEN);
+    // Get primary monitor dimensions from EnumDisplayMonitors
+    {
+        auto enumResult = EnumeratePrimaryMonitorSize();
+        if (enumResult.has_value()) {
+            m_width  = enumResult->first;
+            m_height = enumResult->second;
+        } else {
+            // Fallback: use SM_CXSCREEN (now DPI-aware, returns physical pixels)
+            m_width  = GetSystemMetrics(SM_CXSCREEN);
+            m_height = GetSystemMetrics(SM_CYSCREEN);
+        }
+    }
     REX_LOG_INFO("WorkerW", "Screen size: {}x{}", m_width, m_height);
 
     // Create render window
-    m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
+    m_renderWindow = CreateRenderWindow(m_desktopHwnd, m_width, m_height);
     if (!m_renderWindow) {
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Failed to create render window");
@@ -53,27 +84,27 @@ shared::Result<void> WorkerWManager::Acquire() {
 
     REX_LOG_INFO("WorkerW", "Render window created: {}", fmt::ptr(m_renderWindow));
 
-    // Reparent to WorkerW
-    ReparentToWorkerW(m_renderWindow, m_workerW);
+    // Reparent to Progman and position behind icons
+    ReparentToDesktop(m_renderWindow, m_desktopHwnd);
 
     m_acquired = true;
-    REX_LOG_INFO("WorkerW", "WorkerW acquired successfully");
+    REX_LOG_INFO("WorkerW", "Desktop window acquired successfully");
     return shared::Result<void>();
 }
 
 void WorkerWManager::Release() {
     if (!m_acquired) return;
 
-    REX_LOG_INFO("WorkerW", "Releasing WorkerW...");
+    REX_LOG_INFO("WorkerW", "Releasing desktop window...");
 
     if (m_renderWindow) {
         DestroyWindow(m_renderWindow);
         m_renderWindow = nullptr;
     }
 
-    m_workerW = nullptr;
+    m_desktopHwnd = nullptr;
     m_acquired = false;
-    REX_LOG_INFO("WorkerW", "WorkerW released");
+    REX_LOG_INFO("WorkerW", "Desktop window released");
 }
 
 void WorkerWManager::StartMonitor(WorkerWRecoveryCallback onRecovery) {
@@ -128,31 +159,37 @@ void WorkerWManager::MonitorExplorer() {
                         HWND newProgman = FindWindowW(L"Progman", nullptr);
                         if (newProgman && newProgman != progman) {
                             REX_LOG_INFO("WorkerW", "Explorer restarted. "
-                                         "Reacquiring WorkerW...");
+                                         "Reacquiring desktop window...");
 
                             // Release old state
                             if (m_renderWindow) {
                                 DestroyWindow(m_renderWindow);
                                 m_renderWindow = nullptr;
                             }
-                            m_workerW = nullptr;
+                            m_desktopHwnd = nullptr;
                             m_acquired = false;
 
                             // Re-acquire
-                            HWND workerW = FindBlankWorkerW();
-                            if (workerW) {
-                                m_workerW = workerW;
-                                m_width = GetSystemMetrics(SM_CXSCREEN);
-                                m_height = GetSystemMetrics(SM_CYSCREEN);
+                            HWND progmanHwnd = FindDesktopWindow();
+                            if (progmanHwnd) {
+                                m_desktopHwnd = progmanHwnd;
+                                auto enumResult = EnumeratePrimaryMonitorSize();
+                                if (enumResult.has_value()) {
+                                    m_width  = enumResult->first;
+                                    m_height = enumResult->second;
+                                } else {
+                                    m_width  = GetSystemMetrics(SM_CXSCREEN);
+                                    m_height = GetSystemMetrics(SM_CYSCREEN);
+                                }
 
                                 m_renderWindow = CreateRenderWindow(
-                                    m_workerW, m_width, m_height);
+                                    m_desktopHwnd, m_width, m_height);
                                 if (m_renderWindow) {
-                                    ReparentToWorkerW(m_renderWindow, m_workerW);
+                                    ReparentToDesktop(m_renderWindow, m_desktopHwnd);
                                     m_acquired = true;
 
                                     REX_LOG_INFO("WorkerW",
-                                        "WorkerW reacquired after Explorer restart");
+                                        "Desktop reacquired after Explorer restart");
 
                                     // Notify engine to recreate renderer
                                     if (m_recoveryCallback) {
@@ -178,62 +215,21 @@ void WorkerWManager::MonitorExplorer() {
     REX_LOG_INFO("WorkerW", "Monitor thread ended");
 }
 
-// ─── WorkerW Discovery ──────────────────────────────────────────────────────
+// ─── Desktop Window Discovery ─────────────────────────────────────────────
 
-HWND WorkerWManager::FindBlankWorkerW() {
+HWND WorkerWManager::FindDesktopWindow() {
+    // Use Progman directly — this is the desktop window that sits behind
+    // desktop icons (SHELLDLL_DefView). On Windows 11 the blank WorkerW
+    // windows are invisible, so reparenting to Progman and placing at
+    // HWND_BOTTOM keeps the render window behind the icon layer.
     HWND progman = FindWindowW(L"Progman", nullptr);
     if (progman) {
-        REX_LOG_DEBUG("WorkerW", "Found Progman: {}, sending 0x052C",
-                      fmt::ptr(progman));
-        SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, nullptr);
-        Sleep(100);
+        REX_LOG_DEBUG("WorkerW", "Found Progman: {}", fmt::ptr(progman));
     } else {
-        REX_LOG_WARN("WorkerW", "Progman not found. Is explorer.exe running?");
+        REX_LOG_ERROR("WorkerW", "Progman not found. Is explorer.exe running?");
     }
 
-    HWND target = nullptr;
-
-    // Step 1: Find a blank WorkerW (no SHELLDLL_DefView child)
-    EnumWindows([](HWND hwnd, LPARAM lparam) -> BOOL {
-        if (GetWindowClassName(hwnd) == L"WorkerW") {
-            HWND child = FindWindowExW(hwnd, nullptr,
-                                       L"SHELLDLL_DefView", nullptr);
-            if (child == nullptr) {
-                HWND* result = reinterpret_cast<HWND*>(lparam);
-                *result = hwnd;
-                REX_LOG_DEBUG("WorkerW", "Found blank WorkerW: {}",
-                              fmt::ptr(hwnd));
-                return FALSE;
-            }
-        }
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&target));
-
-    // Step 2: Fallback — sibling method
-    if (target == nullptr) {
-        REX_LOG_WARN("WorkerW", "Fallback: looking for WorkerW sibling...");
-        EnumWindows([](HWND hwnd, LPARAM lparam) -> BOOL {
-            if (FindWindowExW(hwnd, nullptr,
-                              L"SHELLDLL_DefView", nullptr) != nullptr) {
-                HWND* result = reinterpret_cast<HWND*>(lparam);
-                *result = FindWindowExW(nullptr, hwnd,
-                                        L"WorkerW", nullptr);
-                if (*result) {
-                    REX_LOG_DEBUG("WorkerW", "Found WorkerW sibling: {}",
-                                  fmt::ptr(*result));
-                    return FALSE;
-                }
-            }
-            return TRUE;
-        }, reinterpret_cast<LPARAM>(&target));
-    }
-
-    if (target == nullptr) {
-        REX_LOG_ERROR("WorkerW",
-                      "No WorkerW found. Try running as Administrator.");
-    }
-
-    return target;
+    return progman;
 }
 
 // ─── Window Management ─────────────────────────────────────────────────────
@@ -275,10 +271,10 @@ HWND WorkerWManager::CreateRenderWindow(HWND parent, int width, int height) {
     return hwnd;
 }
 
-void WorkerWManager::ReparentToWorkerW(HWND renderWindow, HWND workerW) {
-    if (!renderWindow || !workerW) return;
+void WorkerWManager::ReparentToDesktop(HWND renderWindow, HWND desktop) {
+    if (!renderWindow || !desktop) return;
 
-    SetParent(renderWindow, workerW);
+    SetParent(renderWindow, desktop);
 
     LONG_PTR style = GetWindowLongPtrW(renderWindow, GWL_STYLE);
     style = (style & ~WS_POPUP) | WS_CHILD | WS_VISIBLE;
@@ -295,7 +291,7 @@ void WorkerWManager::ReparentToWorkerW(HWND renderWindow, HWND workerW) {
     UpdateWindow(renderWindow);
 
     REX_LOG_DEBUG("WorkerW",
-                  "Window reparented to WorkerW and positioned at bottom");
+                  "Render window reparented to Progman at HWND_BOTTOM");
 }
 
 LRESULT CALLBACK WorkerWManager::WndProc(

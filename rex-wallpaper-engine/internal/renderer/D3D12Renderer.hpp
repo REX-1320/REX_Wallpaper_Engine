@@ -101,6 +101,7 @@ private:
     bool                                              m_hasTexture = false;
     int                                               m_texWidth = 0;
     int                                               m_texHeight = 0;
+    D3D12_RESOURCE_STATES                             m_textureState = D3D12_RESOURCE_STATE_COPY_DEST;
 
     // ─── Fill Mode ──────────────────────────────────────────────────────────
     FillMode m_fillMode = FillMode::Fill;

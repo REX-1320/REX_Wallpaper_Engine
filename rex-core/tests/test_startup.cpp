@@ -4,13 +4,13 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "wallpaper/workerw/WorkerWManager.hpp"
+#include "platform/windows/WorkerWManager.hpp"
 #include "graphics/compositor/compositor.h"
 
 int main() {
     printf("[TEST] Starting WorkerW test...\n");
 
-    rex::wallpaper::WorkerWManager ww;
+    rex::platform::windows::WorkerWManager ww;
     auto result = ww.Acquire();
     if (result.IsError()) {
         printf("[TEST] WorkerW FAILED: %s\n", result.Error().message.c_str());

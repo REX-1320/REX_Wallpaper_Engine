@@ -1,0 +1,74 @@
+[
+  {
+    "moduleId": "settings.test.bool",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.theme.darkMode",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.volume",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.desktop.wallpaper",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.desktop.darkMode",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.audio.volume",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.test.value",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.performance.cpu_limit",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.test.volume",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.a",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.b",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  },
+  {
+    "moduleId": "settings.test.greeting",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0
+  }
+]

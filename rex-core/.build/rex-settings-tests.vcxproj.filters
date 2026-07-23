@@ -1,0 +1,85 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\REX_doc\rex-core\tests\all_settings_tests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest_main.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-assertion-result.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-death-test.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-filepath.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-matchers.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-port.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-printers.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-test-part.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-typed-test.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\SettingsModule.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\registry\SettingsRegistry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\services\SettingsService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\services\SettingsTransaction.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\validation\ValidationEngine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\validation\Validators.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\search\SettingsSearch.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\history\SettingsHistory.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\backup\BackupManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\schema\SchemaManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\io\ImportExportManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\ui\UIModelGenerator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\ConfigurationStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\REX_doc\rex-core\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{436CF3F2-44E5-3329-9AE4-3B80ED5AC597}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

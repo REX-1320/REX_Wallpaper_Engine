@@ -1,0 +1,233 @@
+{
+  "tests": 37,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "UIModelTest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "ThemeDefaults",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 21
+        },
+        {
+          "name": "ThemeDark",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 29
+        },
+        {
+          "name": "ThemeWithParent",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 39
+        },
+        {
+          "name": "TokenCategoryValues",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 48
+        },
+        {
+          "name": "ComponentStyleDefaults",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 57
+        },
+        {
+          "name": "ComponentStyleWithVariant",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 64
+        }
+      ]
+    },
+    {
+      "name": "ThemeRegistryTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "RegisterAndGet",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 93
+        },
+        {
+          "name": "GetNonexistentReturnsNull",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 107
+        },
+        {
+          "name": "GetAllThemes",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 112
+        },
+        {
+          "name": "RegisterOverwrites",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 125
+        }
+      ]
+    },
+    {
+      "name": "TokenManagerTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "GetTokenEmptyTheme",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 152
+        },
+        {
+          "name": "LoadAndGet",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 159
+        },
+        {
+          "name": "OverrideToken",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 171
+        },
+        {
+          "name": "LoadWithParentInheritance",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 181
+        }
+      ]
+    },
+    {
+      "name": "ComponentRegistryTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "RegisterAndGet",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 212
+        },
+        {
+          "name": "GetNonexistentReturnsNull",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 223
+        }
+      ]
+    },
+    {
+      "name": "StyleResolverTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "ResolveDefaultNoVariant",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 262
+        },
+        {
+          "name": "ResolveWithVariant",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 270
+        },
+        {
+          "name": "ResolveWithState",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 282
+        },
+        {
+          "name": "ResolveWithVariantAndState",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 288
+        },
+        {
+          "name": "ResolveNonexistentTokenReturnsEmpty",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 300
+        }
+      ]
+    },
+    {
+      "name": "ThemeServiceTest",
+      "tests": 15,
+      "testsuite": [
+        {
+          "name": "RegisterAndListThemes",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 326
+        },
+        {
+          "name": "LoadBuiltInThemes",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 343
+        },
+        {
+          "name": "SetTheme",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 349
+        },
+        {
+          "name": "SetNonexistentThemeThrows",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 363
+        },
+        {
+          "name": "GetTokenBeforeThemeSet",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 367
+        },
+        {
+          "name": "RegisterAndResolveComponent",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 371
+        },
+        {
+          "name": "ResolveNonexistentComponentReturnsEmpty",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 399
+        },
+        {
+          "name": "SubscribeToThemeChanges",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 404
+        },
+        {
+          "name": "GetComponentStyleNonexistentReturnsEmpty",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 424
+        },
+        {
+          "name": "GetCurrentThemeBeforeSetReturnsEmpty",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 429
+        },
+        {
+          "name": "ThemeTokenInheritance",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 436
+        },
+        {
+          "name": "ThemeChangeCallbackCalledOnSet",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 457
+        },
+        {
+          "name": "BuiltInThemesHaveTokens",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 473
+        },
+        {
+          "name": "BuiltInSwitchToLight",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 484
+        },
+        {
+          "name": "BuiltInSwitchToAmoled",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 491
+        }
+      ]
+    },
+    {
+      "name": "ThemeProviderTest",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "MockProviderRegistersTheme",
+          "file": "D:\\REX_doc\\rex-core\\tests\\ui\\test_ui.cpp",
+          "line": 515
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,500 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="MinSizeRel|x64">
+      <Configuration>MinSizeRel</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="RelWithDebInfo|x64">
+      <Configuration>RelWithDebInfo</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{AD476E2E-F907-38FD-897D-817695596B75}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <VcpkgEnabled>false</VcpkgEnabled>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <Platform>x64</Platform>
+    <ProjectName>rex-command-tests</ProjectName>
+    <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="do_not_import_user.props" Condition="exists('do_not_import_user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">D:\REX_doc\rex-core\.build\Debug\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">rex-command-tests.dir\Debug\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">rex-command-tests</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</GenerateManifest>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">D:\REX_doc\rex-core\.build\Release\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">rex-command-tests.dir\Release\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">rex-command-tests</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</GenerateManifest>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">D:\REX_doc\rex-core\.build\MinSizeRel\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">rex-command-tests.dir\MinSizeRel\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">rex-command-tests</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">true</GenerateManifest>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">D:\REX_doc\rex-core\.build\RelWithDebInfo\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">rex-command-tests.dir\RelWithDebInfo\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">rex-command-tests</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">true</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">true</GenerateManifest>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251;4275</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>Disabled</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <PostBuildEvent>
+      <Message>	</Message>
+      <Command>setlocal
+C:\vcpkg\vcpkg.exe z-applocal --target-binary=D:/REX_doc/rex-core/.build/Debug/rex-command-tests.exe --installed-bin-dir=D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/debug/bin
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -P D:/REX_doc/rex-core/.build/rex_command_tests_e3b0c442_Debug_discovery.cmake -- 
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+    </PostBuildEvent>
+    <Link>
+      <AdditionalDependencies>rex-shared\Debug\rex-shared.lib;vcpkg_installed\x64-windows\debug\lib\spdlogd.lib;vcpkg_installed\x64-windows\debug\lib\spdlogd.lib;vcpkg_installed\x64-windows\debug\lib\fmtd.lib;vcpkg_installed\x64-windows\debug\lib\fmtd.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <DataExecutionPrevention></DataExecutionPrevention>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
+      <ImportLibrary>D:/REX_doc/rex-core/.build/Debug/rex-command-tests.lib</ImportLibrary>
+      <LinkErrorReporting></LinkErrorReporting>
+      <ProgramDataBaseFile>D:/REX_doc/rex-core/.build/Debug/rex-command-tests.pdb</ProgramDataBaseFile>
+      <RandomizedBaseAddress></RandomizedBaseAddress>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DisableSpecificWarnings>4251;4275</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <PostBuildEvent>
+      <Message>	</Message>
+      <Command>setlocal
+C:\vcpkg\vcpkg.exe z-applocal --target-binary=D:/REX_doc/rex-core/.build/Release/rex-command-tests.exe --installed-bin-dir=D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/bin
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -P D:/REX_doc/rex-core/.build/rex_command_tests_e3b0c442_Release_discovery.cmake -- 
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+    </PostBuildEvent>
+    <Link>
+      <AdditionalDependencies>rex-shared\Release\rex-shared.lib;vcpkg_installed\x64-windows\lib\spdlog.lib;vcpkg_installed\x64-windows\lib\spdlog.lib;vcpkg_installed\x64-windows\lib\fmt.lib;vcpkg_installed\x64-windows\lib\fmt.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <DataExecutionPrevention></DataExecutionPrevention>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
+      <ImportLibrary>D:/REX_doc/rex-core/.build/Release/rex-command-tests.lib</ImportLibrary>
+      <LinkErrorReporting></LinkErrorReporting>
+      <ProgramDataBaseFile>D:/REX_doc/rex-core/.build/Release/rex-command-tests.pdb</ProgramDataBaseFile>
+      <RandomizedBaseAddress></RandomizedBaseAddress>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DisableSpecificWarnings>4251;4275</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MinSpace</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <PostBuildEvent>
+      <Message>	</Message>
+      <Command>setlocal
+C:\vcpkg\vcpkg.exe z-applocal --target-binary=D:/REX_doc/rex-core/.build/MinSizeRel/rex-command-tests.exe --installed-bin-dir=D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/bin
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -P D:/REX_doc/rex-core/.build/rex_command_tests_e3b0c442_MinSizeRel_discovery.cmake -- 
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+    </PostBuildEvent>
+    <Link>
+      <AdditionalDependencies>rex-shared\MinSizeRel\rex-shared.lib;vcpkg_installed\x64-windows\lib\spdlog.lib;vcpkg_installed\x64-windows\lib\spdlog.lib;vcpkg_installed\x64-windows\lib\fmt.lib;vcpkg_installed\x64-windows\lib\fmt.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <DataExecutionPrevention></DataExecutionPrevention>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
+      <ImportLibrary>D:/REX_doc/rex-core/.build/MinSizeRel/rex-command-tests.lib</ImportLibrary>
+      <LinkErrorReporting></LinkErrorReporting>
+      <ProgramDataBaseFile>D:/REX_doc/rex-core/.build/MinSizeRel/rex-command-tests.pdb</ProgramDataBaseFile>
+      <RandomizedBaseAddress></RandomizedBaseAddress>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251;4275</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-core\src;D:\REX_doc\rex-core\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows;D:\REX_doc\rex-shared\include;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <PostBuildEvent>
+      <Message>	</Message>
+      <Command>setlocal
+C:\vcpkg\vcpkg.exe z-applocal --target-binary=D:/REX_doc/rex-core/.build/RelWithDebInfo/rex-command-tests.exe --installed-bin-dir=D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/bin
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -P D:/REX_doc/rex-core/.build/rex_command_tests_e3b0c442_RelWithDebInfo_discovery.cmake -- 
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+    </PostBuildEvent>
+    <Link>
+      <AdditionalDependencies>rex-shared\RelWithDebInfo\rex-shared.lib;vcpkg_installed\x64-windows\lib\spdlog.lib;vcpkg_installed\x64-windows\lib\spdlog.lib;vcpkg_installed\x64-windows\lib\fmt.lib;vcpkg_installed\x64-windows\lib\fmt.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <DataExecutionPrevention></DataExecutionPrevention>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
+      <ImportLibrary>D:/REX_doc/rex-core/.build/RelWithDebInfo/rex-command-tests.lib</ImportLibrary>
+      <LinkErrorReporting></LinkErrorReporting>
+      <ProgramDataBaseFile>D:/REX_doc/rex-core/.build/RelWithDebInfo/rex-command-tests.pdb</ProgramDataBaseFile>
+      <RandomizedBaseAddress></RandomizedBaseAddress>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\REX_doc\rex-core\CMakeLists.txt">
+      <UseUtf8Encoding>Always</UseUtf8Encoding>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Building Custom Rule D:/REX_doc/rex-core/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/REX_doc/rex-core -BD:/REX_doc/rex-core/.build --check-stamp-file D:/REX_doc/rex-core/.build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeDependentOption.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestTargets.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestUseLaunchers.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\DartConfiguration.tcl.in;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\GoogleTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Program Files\CMake\share\cmake-4.4\Templates\CTestScript.cmake.in;C:\vcpkg\scripts\buildsystems\vcpkg.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeCXXCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeRCCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeSystem.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-assertion-result.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-death-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-filepath.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-matchers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-port.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-printers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-test-part.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-typed-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest_main.cc;D:\REX_doc\rex-core\src\core\sandbox\sandbox.cpp;D:\REX_doc\rex-core\src\core\scheduler\render_scheduler.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\AppearanceManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\DesktopManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\EffectsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ExplorerManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\PersonalizationService.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ProfileManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\SettingsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\TaskbarManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ThemeManager.cpp;D:\REX_doc\rex-core\src\graphics\animation\animation_engine.cpp;D:\REX_doc\rex-core\src\graphics\compositor\compositor.cpp;D:\REX_doc\rex-core\src\graphics\effects\effect_renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\CommandQueue.cpp;D:\REX_doc\rex-core\src\graphics\renderer\D3D12Renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\DescriptorHeapManager.cpp;D:\REX_doc\rex-core\src\graphics\renderer\Device.cpp;D:\REX_doc\rex-core\src\graphics\renderer\SwapChain.cpp;D:\REX_doc\rex-core\src\graphics\resource\TextureCache.cpp;D:\REX_doc\rex-core\src\ipc\ipc_server.cpp;D:\REX_doc\rex-core\src\modules\ConfigurationStore.cpp;D:\REX_doc\rex-core\src\modules\DependencyResolver.cpp;D:\REX_doc\rex-core\src\modules\HealthMonitor.cpp;D:\REX_doc\rex-core\src\modules\LifecycleCoordinator.cpp;D:\REX_doc\rex-core\src\modules\ModuleContext.cpp;D:\REX_doc\rex-core\src\modules\ModuleLoader.cpp;D:\REX_doc\rex-core\src\modules\ModuleManager.cpp;D:\REX_doc\rex-core\src\modules\ModuleOrchestrator.cpp;D:\REX_doc\rex-core\src\modules\ModuleRegistry.cpp;D:\REX_doc\rex-core\src\modules\ModuleState.cpp;D:\REX_doc\rex-core\src\modules\PluginSandbox.cpp;D:\REX_doc\rex-core\src\modules\Settings\SettingsModule.cpp;D:\REX_doc\rex-core\src\modules\Settings\backup\BackupManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\history\SettingsHistory.cpp;D:\REX_doc\rex-core\src\modules\Settings\io\ImportExportManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\registry\SettingsRegistry.cpp;D:\REX_doc\rex-core\src\modules\Settings\schema\SchemaManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\search\SettingsSearch.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsService.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsTransaction.cpp;D:\REX_doc\rex-core\src\modules\Settings\ui\UIModelGenerator.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\ValidationEngine.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\Validators.cpp;D:\REX_doc\rex-core\src\modules\SignatureVerifier.cpp;D:\REX_doc\rex-core\src\modules\UpdateManager.cpp;D:\REX_doc\rex-core\src\modules\builtin\AboutModule\AboutModule.cpp;D:\REX_doc\rex-core\src\platform\windows\DesktopHostFactory.cpp;D:\REX_doc\rex-core\src\platform\windows\ProgmanHost.cpp;D:\REX_doc\rex-core\src\platform\windows\Windows.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWHost.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWManager.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\MediaFoundationDecoder.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\WICTextureLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\Engine.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\EngineFactory.cpp;D:\REX_doc\rex-core\src\wallpaper\loader\ImageLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\playback\PlaybackController.cpp;D:\REX_doc\rex-core\src\wallpaper\scene\StaticImageScene.cpp;D:\REX_doc\rex-core\tests\all_settings_tests.cpp;D:\REX_doc\rex-core\tests\desktop_personalization\test_personalization_service.cpp;D:\REX_doc\rex-core\tests\test_compositor.cpp;D:\REX_doc\rex-core\tests\test_desktop_host.cpp;D:\REX_doc\rex-core\tests\test_ipc.cpp;D:\REX_doc\rex-core\tests\test_sandbox.cpp;D:\REX_doc\rex-core\tests\wallpaper\test_engine.cpp;D:\REX_doc\rex-core\vcpkg.json;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">D:\REX_doc\rex-core\.build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Building Custom Rule D:/REX_doc/rex-core/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/REX_doc/rex-core -BD:/REX_doc/rex-core/.build --check-stamp-file D:/REX_doc/rex-core/.build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeDependentOption.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestTargets.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestUseLaunchers.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\DartConfiguration.tcl.in;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\GoogleTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Program Files\CMake\share\cmake-4.4\Templates\CTestScript.cmake.in;C:\vcpkg\scripts\buildsystems\vcpkg.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeCXXCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeRCCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeSystem.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-assertion-result.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-death-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-filepath.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-matchers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-port.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-printers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-test-part.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-typed-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest_main.cc;D:\REX_doc\rex-core\src\core\sandbox\sandbox.cpp;D:\REX_doc\rex-core\src\core\scheduler\render_scheduler.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\AppearanceManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\DesktopManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\EffectsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ExplorerManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\PersonalizationService.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ProfileManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\SettingsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\TaskbarManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ThemeManager.cpp;D:\REX_doc\rex-core\src\graphics\animation\animation_engine.cpp;D:\REX_doc\rex-core\src\graphics\compositor\compositor.cpp;D:\REX_doc\rex-core\src\graphics\effects\effect_renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\CommandQueue.cpp;D:\REX_doc\rex-core\src\graphics\renderer\D3D12Renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\DescriptorHeapManager.cpp;D:\REX_doc\rex-core\src\graphics\renderer\Device.cpp;D:\REX_doc\rex-core\src\graphics\renderer\SwapChain.cpp;D:\REX_doc\rex-core\src\graphics\resource\TextureCache.cpp;D:\REX_doc\rex-core\src\ipc\ipc_server.cpp;D:\REX_doc\rex-core\src\modules\ConfigurationStore.cpp;D:\REX_doc\rex-core\src\modules\DependencyResolver.cpp;D:\REX_doc\rex-core\src\modules\HealthMonitor.cpp;D:\REX_doc\rex-core\src\modules\LifecycleCoordinator.cpp;D:\REX_doc\rex-core\src\modules\ModuleContext.cpp;D:\REX_doc\rex-core\src\modules\ModuleLoader.cpp;D:\REX_doc\rex-core\src\modules\ModuleManager.cpp;D:\REX_doc\rex-core\src\modules\ModuleOrchestrator.cpp;D:\REX_doc\rex-core\src\modules\ModuleRegistry.cpp;D:\REX_doc\rex-core\src\modules\ModuleState.cpp;D:\REX_doc\rex-core\src\modules\PluginSandbox.cpp;D:\REX_doc\rex-core\src\modules\Settings\SettingsModule.cpp;D:\REX_doc\rex-core\src\modules\Settings\backup\BackupManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\history\SettingsHistory.cpp;D:\REX_doc\rex-core\src\modules\Settings\io\ImportExportManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\registry\SettingsRegistry.cpp;D:\REX_doc\rex-core\src\modules\Settings\schema\SchemaManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\search\SettingsSearch.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsService.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsTransaction.cpp;D:\REX_doc\rex-core\src\modules\Settings\ui\UIModelGenerator.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\ValidationEngine.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\Validators.cpp;D:\REX_doc\rex-core\src\modules\SignatureVerifier.cpp;D:\REX_doc\rex-core\src\modules\UpdateManager.cpp;D:\REX_doc\rex-core\src\modules\builtin\AboutModule\AboutModule.cpp;D:\REX_doc\rex-core\src\platform\windows\DesktopHostFactory.cpp;D:\REX_doc\rex-core\src\platform\windows\ProgmanHost.cpp;D:\REX_doc\rex-core\src\platform\windows\Windows.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWHost.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWManager.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\MediaFoundationDecoder.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\WICTextureLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\Engine.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\EngineFactory.cpp;D:\REX_doc\rex-core\src\wallpaper\loader\ImageLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\playback\PlaybackController.cpp;D:\REX_doc\rex-core\src\wallpaper\scene\StaticImageScene.cpp;D:\REX_doc\rex-core\tests\all_settings_tests.cpp;D:\REX_doc\rex-core\tests\desktop_personalization\test_personalization_service.cpp;D:\REX_doc\rex-core\tests\test_compositor.cpp;D:\REX_doc\rex-core\tests\test_desktop_host.cpp;D:\REX_doc\rex-core\tests\test_ipc.cpp;D:\REX_doc\rex-core\tests\test_sandbox.cpp;D:\REX_doc\rex-core\tests\wallpaper\test_engine.cpp;D:\REX_doc\rex-core\vcpkg.json;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">D:\REX_doc\rex-core\.build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Building Custom Rule D:/REX_doc/rex-core/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/REX_doc/rex-core -BD:/REX_doc/rex-core/.build --check-stamp-file D:/REX_doc/rex-core/.build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeDependentOption.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestTargets.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestUseLaunchers.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\DartConfiguration.tcl.in;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\GoogleTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Program Files\CMake\share\cmake-4.4\Templates\CTestScript.cmake.in;C:\vcpkg\scripts\buildsystems\vcpkg.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeCXXCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeRCCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeSystem.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-assertion-result.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-death-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-filepath.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-matchers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-port.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-printers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-test-part.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-typed-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest_main.cc;D:\REX_doc\rex-core\src\core\sandbox\sandbox.cpp;D:\REX_doc\rex-core\src\core\scheduler\render_scheduler.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\AppearanceManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\DesktopManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\EffectsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ExplorerManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\PersonalizationService.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ProfileManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\SettingsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\TaskbarManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ThemeManager.cpp;D:\REX_doc\rex-core\src\graphics\animation\animation_engine.cpp;D:\REX_doc\rex-core\src\graphics\compositor\compositor.cpp;D:\REX_doc\rex-core\src\graphics\effects\effect_renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\CommandQueue.cpp;D:\REX_doc\rex-core\src\graphics\renderer\D3D12Renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\DescriptorHeapManager.cpp;D:\REX_doc\rex-core\src\graphics\renderer\Device.cpp;D:\REX_doc\rex-core\src\graphics\renderer\SwapChain.cpp;D:\REX_doc\rex-core\src\graphics\resource\TextureCache.cpp;D:\REX_doc\rex-core\src\ipc\ipc_server.cpp;D:\REX_doc\rex-core\src\modules\ConfigurationStore.cpp;D:\REX_doc\rex-core\src\modules\DependencyResolver.cpp;D:\REX_doc\rex-core\src\modules\HealthMonitor.cpp;D:\REX_doc\rex-core\src\modules\LifecycleCoordinator.cpp;D:\REX_doc\rex-core\src\modules\ModuleContext.cpp;D:\REX_doc\rex-core\src\modules\ModuleLoader.cpp;D:\REX_doc\rex-core\src\modules\ModuleManager.cpp;D:\REX_doc\rex-core\src\modules\ModuleOrchestrator.cpp;D:\REX_doc\rex-core\src\modules\ModuleRegistry.cpp;D:\REX_doc\rex-core\src\modules\ModuleState.cpp;D:\REX_doc\rex-core\src\modules\PluginSandbox.cpp;D:\REX_doc\rex-core\src\modules\Settings\SettingsModule.cpp;D:\REX_doc\rex-core\src\modules\Settings\backup\BackupManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\history\SettingsHistory.cpp;D:\REX_doc\rex-core\src\modules\Settings\io\ImportExportManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\registry\SettingsRegistry.cpp;D:\REX_doc\rex-core\src\modules\Settings\schema\SchemaManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\search\SettingsSearch.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsService.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsTransaction.cpp;D:\REX_doc\rex-core\src\modules\Settings\ui\UIModelGenerator.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\ValidationEngine.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\Validators.cpp;D:\REX_doc\rex-core\src\modules\SignatureVerifier.cpp;D:\REX_doc\rex-core\src\modules\UpdateManager.cpp;D:\REX_doc\rex-core\src\modules\builtin\AboutModule\AboutModule.cpp;D:\REX_doc\rex-core\src\platform\windows\DesktopHostFactory.cpp;D:\REX_doc\rex-core\src\platform\windows\ProgmanHost.cpp;D:\REX_doc\rex-core\src\platform\windows\Windows.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWHost.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWManager.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\MediaFoundationDecoder.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\WICTextureLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\Engine.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\EngineFactory.cpp;D:\REX_doc\rex-core\src\wallpaper\loader\ImageLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\playback\PlaybackController.cpp;D:\REX_doc\rex-core\src\wallpaper\scene\StaticImageScene.cpp;D:\REX_doc\rex-core\tests\all_settings_tests.cpp;D:\REX_doc\rex-core\tests\desktop_personalization\test_personalization_service.cpp;D:\REX_doc\rex-core\tests\test_compositor.cpp;D:\REX_doc\rex-core\tests\test_desktop_host.cpp;D:\REX_doc\rex-core\tests\test_ipc.cpp;D:\REX_doc\rex-core\tests\test_sandbox.cpp;D:\REX_doc\rex-core\tests\wallpaper\test_engine.cpp;D:\REX_doc\rex-core\vcpkg.json;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">D:\REX_doc\rex-core\.build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Building Custom Rule D:/REX_doc/rex-core/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/REX_doc/rex-core -BD:/REX_doc/rex-core/.build --check-stamp-file D:/REX_doc/rex-core/.build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeDependentOption.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestTargets.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CTestUseLaunchers.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\DartConfiguration.tcl.in;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\GoogleTest.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Program Files\CMake\share\cmake-4.4\Templates\CTestScript.cmake.in;C:\vcpkg\scripts\buildsystems\vcpkg.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeCXXCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeRCCompiler.cmake;D:\REX_doc\rex-core\.build\CMakeFiles\4.4.0\CMakeSystem.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\gtest\GTestTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-assertion-result.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-death-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-filepath.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-matchers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-port.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-printers.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-test-part.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-typed-test.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest.cc;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest_main.cc;D:\REX_doc\rex-core\src\core\sandbox\sandbox.cpp;D:\REX_doc\rex-core\src\core\scheduler\render_scheduler.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\AppearanceManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\DesktopManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\EffectsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ExplorerManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\PersonalizationService.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ProfileManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\SettingsManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\TaskbarManager.cpp;D:\REX_doc\rex-core\src\desktop_personalization\services\ThemeManager.cpp;D:\REX_doc\rex-core\src\graphics\animation\animation_engine.cpp;D:\REX_doc\rex-core\src\graphics\compositor\compositor.cpp;D:\REX_doc\rex-core\src\graphics\effects\effect_renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\CommandQueue.cpp;D:\REX_doc\rex-core\src\graphics\renderer\D3D12Renderer.cpp;D:\REX_doc\rex-core\src\graphics\renderer\DescriptorHeapManager.cpp;D:\REX_doc\rex-core\src\graphics\renderer\Device.cpp;D:\REX_doc\rex-core\src\graphics\renderer\SwapChain.cpp;D:\REX_doc\rex-core\src\graphics\resource\TextureCache.cpp;D:\REX_doc\rex-core\src\ipc\ipc_server.cpp;D:\REX_doc\rex-core\src\modules\ConfigurationStore.cpp;D:\REX_doc\rex-core\src\modules\DependencyResolver.cpp;D:\REX_doc\rex-core\src\modules\HealthMonitor.cpp;D:\REX_doc\rex-core\src\modules\LifecycleCoordinator.cpp;D:\REX_doc\rex-core\src\modules\ModuleContext.cpp;D:\REX_doc\rex-core\src\modules\ModuleLoader.cpp;D:\REX_doc\rex-core\src\modules\ModuleManager.cpp;D:\REX_doc\rex-core\src\modules\ModuleOrchestrator.cpp;D:\REX_doc\rex-core\src\modules\ModuleRegistry.cpp;D:\REX_doc\rex-core\src\modules\ModuleState.cpp;D:\REX_doc\rex-core\src\modules\PluginSandbox.cpp;D:\REX_doc\rex-core\src\modules\Settings\SettingsModule.cpp;D:\REX_doc\rex-core\src\modules\Settings\backup\BackupManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\history\SettingsHistory.cpp;D:\REX_doc\rex-core\src\modules\Settings\io\ImportExportManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\registry\SettingsRegistry.cpp;D:\REX_doc\rex-core\src\modules\Settings\schema\SchemaManager.cpp;D:\REX_doc\rex-core\src\modules\Settings\search\SettingsSearch.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsService.cpp;D:\REX_doc\rex-core\src\modules\Settings\services\SettingsTransaction.cpp;D:\REX_doc\rex-core\src\modules\Settings\ui\UIModelGenerator.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\ValidationEngine.cpp;D:\REX_doc\rex-core\src\modules\Settings\validation\Validators.cpp;D:\REX_doc\rex-core\src\modules\SignatureVerifier.cpp;D:\REX_doc\rex-core\src\modules\UpdateManager.cpp;D:\REX_doc\rex-core\src\modules\builtin\AboutModule\AboutModule.cpp;D:\REX_doc\rex-core\src\platform\windows\DesktopHostFactory.cpp;D:\REX_doc\rex-core\src\platform\windows\ProgmanHost.cpp;D:\REX_doc\rex-core\src\platform\windows\Windows.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWHost.cpp;D:\REX_doc\rex-core\src\platform\windows\WorkerWManager.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\MediaFoundationDecoder.cpp;D:\REX_doc\rex-core\src\wallpaper\decoder\WICTextureLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\Engine.cpp;D:\REX_doc\rex-core\src\wallpaper\engine\EngineFactory.cpp;D:\REX_doc\rex-core\src\wallpaper\loader\ImageLoader.cpp;D:\REX_doc\rex-core\src\wallpaper\playback\PlaybackController.cpp;D:\REX_doc\rex-core\src\wallpaper\scene\StaticImageScene.cpp;D:\REX_doc\rex-core\tests\all_settings_tests.cpp;D:\REX_doc\rex-core\tests\desktop_personalization\test_personalization_service.cpp;D:\REX_doc\rex-core\tests\test_compositor.cpp;D:\REX_doc\rex-core\tests\test_desktop_host.cpp;D:\REX_doc\rex-core\tests\test_ipc.cpp;D:\REX_doc\rex-core\tests\test_sandbox.cpp;D:\REX_doc\rex-core\tests\wallpaper\test_engine.cpp;D:\REX_doc\rex-core\vcpkg.json;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">D:\REX_doc\rex-core\.build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="D:\REX_doc\rex-core\tests\command\test_command_phase0.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\tests\command\test_command_phase1.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Command\services\CommandRegistry.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Command\services\CommandValidator.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Command\services\CommandExecutor.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Command\services\CommandDispatcher.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Command\services\CommandService.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Command\history\CommandHistory.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Command\shortcut\ShortcutManager.cpp" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest_main.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-assertion-result.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-death-test.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-filepath.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-matchers.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-port.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-printers.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-test-part.cc" />
+    <ClCompile Include="D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\src\gtest-typed-test.cc" />
+  </ItemGroup>
+  <ItemGroup />
+  <ItemGroup>
+    <ProjectReference Include="D:\REX_doc\rex-core\.build\ZERO_CHECK.vcxproj">
+      <Project>{97DB7E62-31A7-3D75-9F2D-CFA836188AD5}</Project>
+      <Name>ZERO_CHECK</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+    <ProjectReference Include="D:\REX_doc\rex-core\.build\rex-shared\rex-shared.vcxproj">
+      <Project>{4FBBC52C-C642-3DF2-89FE-C1E37A80C1AF}</Project>
+      <Name>rex-shared</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>
