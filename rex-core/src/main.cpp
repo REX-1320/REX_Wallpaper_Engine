@@ -5,6 +5,11 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cctype>
+
+#include "wallpaper/playback/PlaybackController.hpp"
+#include <shared/Result.hpp>
 
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "ipc/ipc_server.h"
@@ -19,6 +24,8 @@ static AnimationEngine g_animationEngine;
 static RenderScheduler g_renderScheduler;
 
 static bool g_running = true;
+static rex::wallpaper::PlaybackController g_playback;
+static bool g_isVideo = false;
 
 void SignalHandler(int) { g_running = false; }
 
@@ -158,7 +165,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     if (log) { fprintf(log, "Compositor OK\n"); fflush(log); }
     printf("[REX] Compositor initialized. Clear color: (0.00, 0.50, 0.80)\n");
 
-    // ── Load background image from command line ────────────────────────
+    // ── Load media from command line (video or image) ─────────────────
     if (lpCmdLine && lpCmdLine[0] != '\0') {
         std::string path(lpCmdLine);
         // Trim trailing whitespace
@@ -169,13 +176,47 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (path.size() >= 2 && path.front() == '\"' && path.back() == '\"') {
             path = path.substr(1, path.size() - 2);
         }
-        if (log) { fprintf(log, "Image path: '%s'\n", path.c_str()); fflush(log); }
-        bool ok = g_compositor.SetBackgroundFromFile(path.c_str());
-        if (log) { fprintf(log, "SetBackgroundFromFile: %s\n", ok ? "OK" : "FAILED"); fflush(log); }
-        // Check debug log written by compositor
-        FILE* dbg = nullptr;
-        fopen_s(&dbg, "D:\\REX_doc\\rex-core\\build\\Release\\debug_log.txt", "r");
-        if (dbg) { char dbgbuf[4096] = {}; while (fgets(dbgbuf, sizeof(dbgbuf), dbg)) { fprintf(log, "  [DEBUG] %s", dbgbuf); } fclose(dbg); fflush(log); }
+
+        // Detect video files by extension
+        std::string ext;
+        auto dot = path.rfind('.');
+        if (dot != std::string::npos) {
+            ext = path.substr(dot);
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        }
+
+        bool isVideoExt = (ext == ".mp4" || ext == ".avi" || ext == ".mkv" || ext == ".mov" || ext == ".webm");
+
+        if (isVideoExt) {
+            g_isVideo = true;
+            if (log) { fprintf(log, "Video path: '%s'\n", path.c_str()); fflush(log); }
+            auto result = g_playback.Open(path);
+            if (result.IsSuccess()) {
+                g_playback.Play();
+                if (log) { fprintf(log, "Video opened: %dx%d\n", g_playback.GetWidth(), g_playback.GetHeight()); fflush(log); }
+                // Submit an empty layer for video (texture created on first frame)
+                Layer bgLayer;
+                bgLayer.id = 1;
+                bgLayer.kind = 0;
+                bgLayer.bounds[0] = 0.0f;
+                bgLayer.bounds[1] = 0.0f;
+                bgLayer.bounds[2] = g_compositor.GetViewportWidth();
+                bgLayer.bounds[3] = g_compositor.GetViewportHeight();
+                bgLayer.opacity = 1.0f;
+                bgLayer.zOrder = 0;
+                bgLayer.visible = true;
+                g_compositor.SubmitLayer(bgLayer);
+                if (log) { fprintf(log, "Video layer submitted\n"); fflush(log); }
+            } else {
+                if (log) { fprintf(log, "Video open FAILED: %s\n", result.Error().message.c_str()); fflush(log); }
+                g_isVideo = false;
+            }
+        } else {
+            if (log) { fprintf(log, "Image path: '%s'\n", path.c_str()); fflush(log); }
+            bool ok = g_compositor.SetBackgroundFromFile(path.c_str());
+            if (log) { fprintf(log, "SetBackgroundFromFile: %s\n", ok ? "OK" : "FAILED"); fflush(log); }
+        }
     }
 
     // ── Start IPC server ───────────────────────────────────────────────
@@ -210,6 +251,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                            * 1000.0 / freq.QuadPart;
         last = now;
 
+        // ── Video frame update ───────────────────────────────────────
+        if (g_isVideo && g_playback.IsPlaying()) {
+            rex::wallpaper::DecodedFrame frame = g_playback.Tick();
+            if (frame.valid) {
+                g_compositor.UpdateLayerPixels(1, frame.pixels.data(),
+                    frame.width, frame.height, frame.rowPitch);
+            }
+        }
+
         g_animationEngine.Tick(frameTimeMs);
         g_compositor.RenderFrame();
 
@@ -235,6 +285,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
 
     printf("[REX] Shutting down...\n");
     if (log) { fprintf(log, "Shutdown. Total frames: %d\n", loopCount); fflush(log); }
+    g_playback.Stop();
+    g_playback.Close();
     g_ipcServer.Stop();
     g_compositor.Shutdown();
     if (g_desktopHost) {

@@ -68,6 +68,15 @@ void Compositor::Shutdown() {
     for (int i = 0; i < FRAME_COUNT; i++) {
         m_renderTargets[i].Reset();
     }
+    m_videoUploadBuffer.Reset();
+    m_videoCopyAlloc.Reset();
+    m_videoCopyList.Reset();
+    m_videoCopyFence.Reset();
+    if (m_videoCopyFenceEvent) {
+        CloseHandle(m_videoCopyFenceEvent);
+        m_videoCopyFenceEvent = nullptr;
+    }
+    m_videoUploadSize = 0;
 }
 
 bool Compositor::CreateDevice() {
@@ -546,6 +555,184 @@ void Compositor::RemoveLayerTexture(uint64_t layerId) {
     printf("[REX] Compositor: removed texture for layer %llu\n", layerId);
 }
 
+bool Compositor::UpdateLayerPixels(uint64_t layerId,
+                                   const uint8_t* pixels,
+                                   int width, int height, int rowPitch) {
+    if (!m_device) return false;
+
+    auto texIt = m_textures.find(layerId);
+    if (texIt == m_textures.end()) {
+        int slot;
+        if (!m_freeSrvSlots.empty()) {
+            slot = m_freeSrvSlots.back();
+            m_freeSrvSlots.pop_back();
+        } else if (m_nextSrvSlot < MAX_TEXTURES) {
+            slot = m_nextSrvSlot++;
+        } else {
+            return false;
+        }
+        LayerTexture placeholder;
+        placeholder.srvSlot = slot;
+        auto result = m_textures.emplace(layerId, std::move(placeholder));
+        texIt = result.first;
+    }
+    LayerTexture& lt = texIt->second;
+
+    // Recreate target texture on size change
+    bool sizeChanged = (!lt.resource || lt.texWidth != width || lt.texHeight != height);
+    if (sizeChanged) {
+        if (lt.resource) lt.resource.Reset();
+        m_videoUploadBuffer.Reset();
+
+        D3D12_HEAP_PROPERTIES heapProps = {};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC texDesc = {};
+        texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texDesc.Width            = static_cast<UINT64>(width);
+        texDesc.Height           = static_cast<UINT>(height);
+        texDesc.DepthOrArraySize = 1;
+        texDesc.MipLevels        = 1;
+        texDesc.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        texDesc.SampleDesc.Count = 1;
+        texDesc.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+        HRESULT hr = m_device->CreateCommittedResource(
+            &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&lt.resource));
+        if (FAILED(hr)) return false;
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MipLevels     = 1;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle =
+            m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+        cpuHandle.ptr += static_cast<UINT64>(lt.srvSlot) * m_srvDescriptorSize;
+        m_device->CreateShaderResourceView(lt.resource.Get(), &srvDesc, cpuHandle);
+
+        lt.texWidth  = width;
+        lt.texHeight = height;
+    }
+
+    // Ensure upload buffer is large enough
+    UINT64 uploadSize = static_cast<UINT64>(rowPitch) * height;
+    uploadSize = (uploadSize + 511) & ~511ULL;
+
+    if (!m_videoUploadBuffer || uploadSize > m_videoUploadSize) {
+        m_videoUploadBuffer.Reset();
+        m_videoUploadSize = static_cast<uint32_t>(uploadSize);
+
+        D3D12_HEAP_PROPERTIES uploadHeapProps = {};
+        uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+        D3D12_RESOURCE_DESC uploadDesc = {};
+        uploadDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        uploadDesc.Width            = uploadSize;
+        uploadDesc.Height           = 1;
+        uploadDesc.DepthOrArraySize = 1;
+        uploadDesc.MipLevels        = 1;
+        uploadDesc.Format           = DXGI_FORMAT_UNKNOWN;
+        uploadDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        uploadDesc.SampleDesc.Count = 1;
+
+        HRESULT hr = m_device->CreateCommittedResource(
+            &uploadHeapProps, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(&m_videoUploadBuffer));
+        if (FAILED(hr)) return false;
+    }
+
+    // Map and copy pixels
+    void* mapped = nullptr;
+    HRESULT hr = m_videoUploadBuffer->Map(0, nullptr, &mapped);
+    if (FAILED(hr)) return false;
+    {
+        const uint8_t* src = pixels;
+        uint8_t* dst = static_cast<uint8_t*>(mapped);
+        for (int row = 0; row < height; ++row) {
+            memcpy(dst, src, static_cast<size_t>(rowPitch));
+            src += rowPitch;
+            dst += rowPitch;
+        }
+    }
+    m_videoUploadBuffer->Unmap(0, nullptr);
+
+    // Ensure copy resources exist
+    if (!m_videoCopyAlloc) {
+        hr = m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                               IID_PPV_ARGS(&m_videoCopyAlloc));
+        if (FAILED(hr)) return false;
+    }
+    if (!m_videoCopyList) {
+        hr = m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                          m_videoCopyAlloc.Get(), nullptr,
+                                          IID_PPV_ARGS(&m_videoCopyList));
+        if (FAILED(hr)) return false;
+    }
+    if (!m_videoCopyFence) {
+        hr = m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                    IID_PPV_ARGS(&m_videoCopyFence));
+        if (FAILED(hr)) return false;
+    }
+    if (!m_videoCopyFenceEvent) {
+        m_videoCopyFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (!m_videoCopyFenceEvent) return false;
+    }
+
+    // Reset and record copy commands
+    m_videoCopyAlloc->Reset();
+    m_videoCopyList->Reset(m_videoCopyAlloc.Get(), nullptr);
+
+    {
+        D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+        dstLoc.pResource        = lt.resource.Get();
+        dstLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+        srcLoc.pResource = m_videoUploadBuffer.Get();
+        srcLoc.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        srcLoc.PlacedFootprint.Offset = 0;
+        srcLoc.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srcLoc.PlacedFootprint.Footprint.Width    = static_cast<UINT>(width);
+        srcLoc.PlacedFootprint.Footprint.Height   = static_cast<UINT>(height);
+        srcLoc.PlacedFootprint.Footprint.Depth    = 1;
+        srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
+
+        m_videoCopyList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+    }
+
+    {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource   = lt.resource.Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_videoCopyList->ResourceBarrier(1, &barrier);
+    }
+
+    m_videoCopyList->Close();
+
+    ID3D12CommandList* lists[] = { m_videoCopyList.Get() };
+    m_commandQueue->ExecuteCommandLists(1, lists);
+
+    // Wait for copy to complete
+    m_videoCopyFenceVal++;
+    m_commandQueue->Signal(m_videoCopyFence.Get(), m_videoCopyFenceVal);
+    if (m_videoCopyFence->GetCompletedValue() < m_videoCopyFenceVal) {
+        m_videoCopyFence->SetEventOnCompletion(m_videoCopyFenceVal,
+                                                m_videoCopyFenceEvent);
+        WaitForSingleObject(m_videoCopyFenceEvent, INFINITE);
+    }
+
+    return true;
+}
+
 static void LogToFile(const char* msg) {
     FILE* f = fopen("C:\\Users\\munna\\AppData\\Local\\Temp\\rex_bg_log.txt", "a");
     if (f) { fprintf(f, "%s\n", msg); fclose(f); }
@@ -716,6 +903,8 @@ bool Compositor::SetBackgroundFromFile(const char* filePath) {
     LayerTexture lt;
     lt.resource = std::move(texture);
     lt.srvSlot = slot;
+    lt.texWidth = texData.width;
+    lt.texHeight = texData.height;
     constexpr uint64_t BG_LAYER_ID = 1;
     m_textures[BG_LAYER_ID] = std::move(lt);
 

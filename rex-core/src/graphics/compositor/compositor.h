@@ -36,6 +36,11 @@ public:
     void RemoveLayerTexture(uint64_t layerId);
 
     bool SetBackgroundFromFile(const char* filePath);
+    bool UpdateLayerPixels(uint64_t layerId, const uint8_t* pixels,
+                           int width, int height, int rowPitch);
+
+    float GetViewportWidth()  const { return m_viewportWidth; }
+    float GetViewportHeight() const { return m_viewportHeight; }
 
     static constexpr uint32_t MAX_TEXTURES = 64;
 
@@ -73,6 +78,8 @@ private:
     struct LayerTexture {
         ComPtr<ID3D12Resource> resource;
         int srvSlot = -1;
+        int texWidth = 0;
+        int texHeight = 0;
     };
     std::unordered_map<uint64_t, LayerTexture> m_textures;
     std::vector<uint32_t> m_freeSrvSlots;
@@ -82,6 +89,15 @@ private:
     float m_clearColor[4] = { 0.0f, 0.5f, 0.8f, 1.0f };
     float m_viewportWidth = 800.0f;
     float m_viewportHeight = 600.0f;
+
+    // Reusable video frame upload resources
+    ComPtr<ID3D12Resource> m_videoUploadBuffer;
+    ComPtr<ID3D12CommandAllocator> m_videoCopyAlloc;
+    ComPtr<ID3D12GraphicsCommandList> m_videoCopyList;
+    ComPtr<ID3D12Fence> m_videoCopyFence;
+    HANDLE m_videoCopyFenceEvent = nullptr;
+    UINT64 m_videoCopyFenceVal = 0;
+    uint32_t m_videoUploadSize = 0;
 
     bool m_initialized = false;
 };
