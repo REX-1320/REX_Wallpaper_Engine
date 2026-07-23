@@ -46,8 +46,8 @@ shared::Result<void> WorkerWHost::Acquire() {
             "Failed to get WorkerW window dimensions");
     }
 
-    m_width  = GetSystemMetrics(SM_CXSCREEN);
-    m_height = GetSystemMetrics(SM_CYSCREEN);
+    m_width  = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    m_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
     int wwW = wwRect.right - wwRect.left;
     int wwH = wwRect.bottom - wwRect.top;

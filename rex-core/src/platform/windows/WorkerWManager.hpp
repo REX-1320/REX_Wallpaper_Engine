@@ -39,7 +39,10 @@ private:
     HWND m_renderWindow = nullptr;
     int m_width = 0;
     int m_height = 0;
+    int m_virtualLeft = 0;
+    int m_virtualTop = 0;
     bool m_acquired = false;
+    bool m_syntheticWorkerW = false;
 
     std::atomic<bool> m_monitoring{false};
     std::thread m_monitorThread;

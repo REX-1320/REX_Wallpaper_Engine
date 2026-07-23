@@ -31,6 +31,7 @@ shared::Result<void> WorkerWManager::Acquire() {
 
     REX_LOG_INFO("WorkerW", "Acquiring WorkerW...");
 
+    m_syntheticWorkerW = false;
     m_workerW = FindBlankWorkerW();
     if (!m_workerW) {
         return shared::Result<void>(shared::ErrorCode::NotFound,
@@ -39,9 +40,12 @@ shared::Result<void> WorkerWManager::Acquire() {
 
     REX_LOG_INFO("WorkerW", "Found WorkerW: {}", fmt::ptr(m_workerW));
 
-    m_width = GetSystemMetrics(SM_CXSCREEN);
-    m_height = GetSystemMetrics(SM_CYSCREEN);
-    REX_LOG_INFO("WorkerW", "Screen size: {}x{}", m_width, m_height);
+    m_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    m_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    m_virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    m_virtualTop  = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    REX_LOG_INFO("WorkerW", "Virtual desktop: {}x{} offset ({}, {})",
+                 m_width, m_height, m_virtualLeft, m_virtualTop);
 
     m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
     if (!m_renderWindow) {
@@ -66,6 +70,13 @@ void WorkerWManager::Release() {
     if (m_renderWindow) {
         DestroyWindow(m_renderWindow);
         m_renderWindow = nullptr;
+    }
+
+    if (m_syntheticWorkerW && m_workerW) {
+        REX_LOG_INFO("WorkerW", "Destroying synthetic WorkerW: {}",
+                     fmt::ptr(m_workerW));
+        DestroyWindow(m_workerW);
+        m_syntheticWorkerW = false;
     }
 
     m_workerW = nullptr;
@@ -133,8 +144,10 @@ void WorkerWManager::MonitorExplorer() {
                             HWND workerW = FindBlankWorkerW();
                             if (workerW) {
                                 m_workerW = workerW;
-                                m_width = GetSystemMetrics(SM_CXSCREEN);
-                                m_height = GetSystemMetrics(SM_CYSCREEN);
+                                m_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                                m_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                                m_virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                                m_virtualTop  = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
                                 m_renderWindow = CreateRenderWindow(
                                     m_workerW, m_width, m_height);
@@ -176,8 +189,10 @@ HWND WorkerWManager::FindBlankWorkerW() {
         }
     }
 
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int virtualTop  = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
     FILE* diag = nullptr;
     fopen_s(&diag,
@@ -315,11 +330,14 @@ HWND WorkerWManager::FindBlankWorkerW() {
         if (target) {
             RECT r;
             GetWindowRect(target, &r);
+            int curW = r.right - r.left;
+            int curH = r.bottom - r.top;
             WDLOG("Using child WorkerW of Progman: %p (%dx%d)",
-                  target, r.right - r.left, r.bottom - r.top);
-            if ((r.right - r.left) < screenW / 2 ||
-                (r.bottom - r.top) < screenH / 2) {
-                WDLOG("Resizing to %dx%d", screenW, screenH);
+                  target, curW, curH);
+            // Always resize to full virtual desktop to handle DPI scaling
+            // mismatches (e.g. 2560x1440 logical vs 3840x2160 physical).
+            if (curW != screenW || curH != screenH) {
+                WDLOG("Resizing %dx%d -> %dx%d", curW, curH, screenW, screenH);
                 SetWindowPos(target, HWND_BOTTOM,
                     0, 0, screenW, screenH,
                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
@@ -349,7 +367,7 @@ HWND WorkerWManager::FindBlankWorkerW() {
         WDLOG("Resizing WorkerW %p (score=%d) to %dx%d",
               target, bestScore, screenW, screenH);
         SetWindowPos(target, nullptr,
-                     0, 0, screenW, screenH,
+                     virtualLeft, virtualTop, screenW, screenH,
                      SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS);
         Sleep(100);
     }
@@ -369,6 +387,10 @@ HWND WorkerWManager::FindBlankWorkerW() {
             progman, nullptr,
             GetModuleHandleW(nullptr), nullptr);
         if (target) {
+            m_syntheticWorkerW = true;
+            REX_LOG_INFO("WorkerW",
+                "Created synthetic WorkerW: {}", fmt::ptr(target));
+
             SetWindowPos(target, HWND_BOTTOM,
                 0, 0, screenW, screenH,
                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
@@ -405,7 +427,7 @@ HWND WorkerWManager::CreateRenderWindow(HWND parent, int width, int height) {
         CLASS_NAME,
         L"REX Render",
         WS_POPUP,
-        0, 0, width, height,
+        m_virtualLeft, m_virtualTop, width, height,
         nullptr,
         nullptr,
         hInst,
@@ -431,7 +453,8 @@ void WorkerWManager::ReparentToWorkerW(HWND renderWindow, HWND workerW) {
     SetWindowLongPtrW(renderWindow, GWL_EXSTYLE,
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT);
 
-    SetWindowPos(renderWindow, HWND_BOTTOM, 0, 0,
+    SetWindowPos(renderWindow, HWND_BOTTOM,
+                 0, 0,
                  m_width, m_height,
                  SWP_NOACTIVATE | SWP_FRAMECHANGED);
 

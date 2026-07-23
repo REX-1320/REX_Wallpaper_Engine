@@ -35,6 +35,8 @@ public:
     bool ImportLayerTexture(uint64_t layerId, HANDLE sharedHandle, int width, int height);
     void RemoveLayerTexture(uint64_t layerId);
 
+    bool SetBackgroundFromFile(const char* filePath);
+
     static constexpr uint32_t MAX_TEXTURES = 64;
 
 private:

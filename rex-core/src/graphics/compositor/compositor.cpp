@@ -1,4 +1,5 @@
 #include "graphics/compositor/compositor.h"
+#include "wallpaper/decoder/WICTextureLoader.hpp"
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -266,7 +267,9 @@ bool Compositor::CreatePipelineState() {
         "Texture2D tex : register(t0);"
         "SamplerState sam : register(s0);"
         "float4 main(PSInput input) : SV_TARGET {"
-        "    return tex.Sample(sam, input.uv);"
+        "    float4 color = tex.Sample(sam, input.uv);"
+        "    color.a = 1.0;"
+        "    return color;"
         "}";
 
     ComPtr<ID3DBlob> vs, ps, error;
@@ -541,4 +544,196 @@ void Compositor::RemoveLayerTexture(uint64_t layerId) {
     m_freeSrvSlots.push_back(it->second.srvSlot);
     m_textures.erase(it);
     printf("[REX] Compositor: removed texture for layer %llu\n", layerId);
+}
+
+static void LogToFile(const char* msg) {
+    FILE* f = fopen("C:\\Users\\munna\\AppData\\Local\\Temp\\rex_bg_log.txt", "a");
+    if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+}
+
+bool Compositor::SetBackgroundFromFile(const char* filePath) {
+    LogToFile("SetBackgroundFromFile entered");
+    if (!m_device) { LogToFile("  FAIL: no device"); return false; }
+
+    LogToFile("  Decoding image...");
+    auto texData = rex::wallpaper::DecodeTextureFromFile(filePath);
+    if (texData.pixels.empty()) {
+        char buf[512]; snprintf(buf, sizeof(buf), "  FAIL: decode failed for '%s'", filePath);
+        LogToFile(buf);
+        return false;
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf), "  Decoded OK: %dx%d, rowPitch=%d",
+             texData.width, texData.height, texData.rowPitch);
+    LogToFile(buf);
+
+    int slot;
+    if (!m_freeSrvSlots.empty()) {
+        slot = m_freeSrvSlots.back();
+        m_freeSrvSlots.pop_back();
+    } else if (m_nextSrvSlot < MAX_TEXTURES) {
+        slot = m_nextSrvSlot++;
+    } else {
+        LogToFile("  FAIL: out of SRV slots");
+        return false;
+    }
+    snprintf(buf, sizeof(buf), "  Allocated SRV slot %d", slot);
+    LogToFile(buf);
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width            = static_cast<UINT64>(texData.width);
+    texDesc.Height           = static_cast<UINT>(texData.height);
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels        = 1;
+    texDesc.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    ComPtr<ID3D12Resource> texture;
+    HRESULT hr = m_device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture));
+    if (FAILED(hr)) {
+        LogToFile("  FAIL: CreateCommittedResource texture");
+        m_freeSrvSlots.push_back(slot); return false;
+    }
+    LogToFile("  Created texture OK");
+
+    UINT64 uploadSize = static_cast<UINT64>(texData.rowPitch) * texData.height;
+    uploadSize = (uploadSize + 511) & ~511ULL;
+
+    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC uploadDesc = {};
+    uploadDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width            = uploadSize;
+    uploadDesc.Height           = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels        = 1;
+    uploadDesc.Format           = DXGI_FORMAT_UNKNOWN;
+    uploadDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    uploadDesc.SampleDesc.Count = 1;
+
+    ComPtr<ID3D12Resource> uploadBuffer;
+    hr = m_device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
+    if (FAILED(hr)) {
+        LogToFile("  FAIL: upload buffer creation");
+        m_freeSrvSlots.push_back(slot); return false;
+    }
+    LogToFile("  Created upload buffer OK");
+
+    void* mapped = nullptr;
+    hr = uploadBuffer->Map(0, nullptr, &mapped);
+    if (FAILED(hr)) { LogToFile("  FAIL: Map upload buffer"); m_freeSrvSlots.push_back(slot); return false; }
+    {
+        const uint8_t* src = texData.pixels.data();
+        uint8_t* dst = static_cast<uint8_t*>(mapped);
+        for (int row = 0; row < texData.height; ++row) {
+            memcpy(dst, src, static_cast<size_t>(texData.rowPitch));
+            src += texData.rowPitch;
+            dst += texData.rowPitch;
+        }
+    }
+    uploadBuffer->Unmap(0, nullptr);
+    LogToFile("  Copied pixels to upload buffer");
+
+    ComPtr<ID3D12CommandAllocator> copyAlloc;
+    hr = m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           IID_PPV_ARGS(&copyAlloc));
+    if (FAILED(hr)) { LogToFile("  FAIL: create copy allocator"); m_freeSrvSlots.push_back(slot); return false; }
+
+    ComPtr<ID3D12GraphicsCommandList> copyList;
+    hr = m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                      copyAlloc.Get(), nullptr,
+                                      IID_PPV_ARGS(&copyList));
+    if (FAILED(hr)) { LogToFile("  FAIL: create copy list"); m_freeSrvSlots.push_back(slot); return false; }
+    LogToFile("  Created copy list OK");
+
+    D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+    dstLoc.pResource        = texture.Get();
+    dstLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dstLoc.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+    srcLoc.pResource = uploadBuffer.Get();
+    srcLoc.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    srcLoc.PlacedFootprint.Offset = 0;
+    srcLoc.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srcLoc.PlacedFootprint.Footprint.Width    = static_cast<UINT>(texData.width);
+    srcLoc.PlacedFootprint.Footprint.Height   = static_cast<UINT>(texData.height);
+    srcLoc.PlacedFootprint.Footprint.Depth    = 1;
+    srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(texData.rowPitch);
+
+    copyList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource   = texture.Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    copyList->ResourceBarrier(1, &barrier);
+
+    copyList->Close();
+
+    ID3D12CommandList* lists[] = { copyList.Get() };
+    m_commandQueue->ExecuteCommandLists(1, lists);
+
+    // Wait for copy to complete
+    ComPtr<ID3D12Fence> fence;
+    hr = m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(hr)) { LogToFile("  FAIL: create fence"); m_freeSrvSlots.push_back(slot); return false; }
+
+    HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!fenceEvent) { LogToFile("  FAIL: create event"); m_freeSrvSlots.push_back(slot); return false; }
+
+    UINT64 fenceVal = 1;
+    m_commandQueue->Signal(fence.Get(), fenceVal);
+    if (fence->GetCompletedValue() < fenceVal) {
+        fence->SetEventOnCompletion(fenceVal, fenceEvent);
+        WaitForSingleObject(fenceEvent, INFINITE);
+    }
+    CloseHandle(fenceEvent);
+    LogToFile("  Copy completed via fence");
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2D.MipLevels     = 1;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle =
+        m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+    cpuHandle.ptr += static_cast<UINT64>(slot) * m_srvDescriptorSize;
+    m_device->CreateShaderResourceView(texture.Get(), &srvDesc, cpuHandle);
+    LogToFile("  Created SRV");
+
+    LayerTexture lt;
+    lt.resource = std::move(texture);
+    lt.srvSlot = slot;
+    constexpr uint64_t BG_LAYER_ID = 1;
+    m_textures[BG_LAYER_ID] = std::move(lt);
+
+    Layer bgLayer;
+    bgLayer.id = BG_LAYER_ID;
+    bgLayer.kind = 0;
+    bgLayer.bounds[0] = 0.0f;
+    bgLayer.bounds[1] = 0.0f;
+    bgLayer.bounds[2] = m_viewportWidth;
+    bgLayer.bounds[3] = m_viewportHeight;
+    bgLayer.opacity = 1.0f;
+    bgLayer.zOrder = 0;
+    bgLayer.visible = true;
+    SubmitLayer(bgLayer);
+    LogToFile("  Submitted layer OK");
+
+    snprintf(buf, sizeof(buf), "SetBackgroundFromFile SUCCESS: %s (%dx%d)",
+             filePath, texData.width, texData.height);
+    LogToFile(buf);
+    return true;
 }

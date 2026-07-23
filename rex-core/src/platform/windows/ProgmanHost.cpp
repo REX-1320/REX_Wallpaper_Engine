@@ -61,8 +61,8 @@ shared::Result<void> ProgmanHost::Acquire() {
             "Failed to get Progman window dimensions");
     }
 
-    m_width  = GetSystemMetrics(SM_CXSCREEN);
-    m_height = GetSystemMetrics(SM_CYSCREEN);
+    m_width  = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    m_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
     int pW = progmanRect.right - progmanRect.left;
     int pH = progmanRect.bottom - progmanRect.top;
@@ -96,12 +96,15 @@ shared::Result<void> ProgmanHost::Acquire() {
         }
     }
 
+    int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int virtualTop  = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
     m_renderWindow = CreateWindowExW(
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
         CLASS_NAME,
         L"REX Wallpaper",
         WS_POPUP | WS_VISIBLE,
-        0, 0,
+        virtualLeft, virtualTop,
         m_width, m_height,
         nullptr,
         nullptr,
@@ -118,8 +121,11 @@ shared::Result<void> ProgmanHost::Acquire() {
     REX_LOG_DEBUG("ProgmanHost", "Render window created: {}",
                   fmt::ptr(m_renderWindow));
 
+    int vl = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vt = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
     SetWindowPos(m_renderWindow, m_progman,
-                 0, 0, m_width, m_height,
+                 vl, vt, m_width, m_height,
                  SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
     ShowWindow(m_renderWindow, SW_SHOW);
@@ -232,7 +238,9 @@ shared::Result<void> ProgmanHost::Acquire() {
     }
 
     SetWindowPos(m_renderWindow, m_progman,
-                 0, 0, m_width, m_height,
+                 GetSystemMetrics(SM_XVIRTUALSCREEN),
+                 GetSystemMetrics(SM_YVIRTUALSCREEN),
+                 m_width, m_height,
                  SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
     m_acquired = true;

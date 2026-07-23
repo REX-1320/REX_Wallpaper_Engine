@@ -78,12 +78,12 @@ void OnIpcMessage(const std::vector<uint8_t>& raw) {
     }
 }
 
-int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     // ── DPI Awareness ──────────────────────────────────────────────────
     // Must be set before any window creation or GetSystemMetrics calls.
     // Without this, apps on high-DPI displays (e.g. 4K @ 150%) get
     // virtualized to a lower resolution, causing partial screen coverage.
-    SetProcessDPIAware();
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     // Debug log — write immediately in case of early crash
     FILE* log = nullptr;
@@ -157,6 +157,26 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
     if (log) { fprintf(log, "Compositor OK\n"); fflush(log); }
     printf("[REX] Compositor initialized. Clear color: (0.00, 0.50, 0.80)\n");
+
+    // ── Load background image from command line ────────────────────────
+    if (lpCmdLine && lpCmdLine[0] != '\0') {
+        std::string path(lpCmdLine);
+        // Trim trailing whitespace
+        while (!path.empty() && (path.back() == ' ' || path.back() == '\t')) {
+            path.pop_back();
+        }
+        // Strip surrounding quotes if present
+        if (path.size() >= 2 && path.front() == '\"' && path.back() == '\"') {
+            path = path.substr(1, path.size() - 2);
+        }
+        if (log) { fprintf(log, "Image path: '%s'\n", path.c_str()); fflush(log); }
+        bool ok = g_compositor.SetBackgroundFromFile(path.c_str());
+        if (log) { fprintf(log, "SetBackgroundFromFile: %s\n", ok ? "OK" : "FAILED"); fflush(log); }
+        // Check debug log written by compositor
+        FILE* dbg = nullptr;
+        fopen_s(&dbg, "D:\\REX_doc\\rex-core\\build\\Release\\debug_log.txt", "r");
+        if (dbg) { char dbgbuf[4096] = {}; while (fgets(dbgbuf, sizeof(dbgbuf), dbg)) { fprintf(log, "  [DEBUG] %s", dbgbuf); } fclose(dbg); fflush(log); }
+    }
 
     // ── Start IPC server ───────────────────────────────────────────────
     if (!g_ipcServer.Start("REX/core/v1")) {
