@@ -27,6 +27,11 @@ CMakeCache.txt
 *.pb.h
 *.pb.cc
 
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
 # OS
 Thumbs.db
 .DS_Store

@@ -7,9 +7,6 @@
 
 #include <algorithm>
 
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mfreadwrite.lib")
-#pragma comment(lib, "mfuuid.lib")
 
 namespace rex::wallpaper {
 

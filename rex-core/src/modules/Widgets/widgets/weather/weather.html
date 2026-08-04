@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {
+        margin: 0; background: transparent; color: white;
+        font-family: 'Segoe UI'; user-select: none;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        height: 100vh; overflow: hidden;
+    }
+    .city { font-size: 14px; opacity: 0.7; margin-bottom: 4px; }
+    .temp { font-size: 42px; font-weight: bold; text-shadow: 0 0 12px rgba(255,255,255,0.5); }
+    .desc { font-size: 14px; margin-top: 2px; }
+    .highlow { font-size: 12px; opacity: 0.6; }
+    .refresh { position: absolute; top: 4px; right: 8px; font-size: 12px; cursor: pointer; opacity: 0.5; }
+    .loading { opacity: 0.5; }
+</style>
+</head>
+<body>
+    <span class="refresh" onclick="fetchWeather()">&#x21BB;</span>
+    <span class="city" id="city">--</span>
+    <span class="temp" id="temp">--&#176;</span>
+    <span class="desc" id="desc">--</span>
+    <span class="highlow" id="highlow">H:-- L:--</span>
+
+    <script>
+        let widgetId = '';
+        window.addEventListener('message', function(e) {
+            if (e.data && e.data.type === 'init') {
+                widgetId = e.data.widgetId;
+            }
+        });
+
+        function weatherCodeToText(code) {
+            var map = {0:'Clear',1:'Clear',2:'Partly Cloudy',3:'Cloudy',45:'Fog',48:'Frost',51:'Drizzle',53:'Drizzle',55:'Drizzle',61:'Rain',63:'Rain',65:'Rain',71:'Snow',73:'Snow',75:'Snow',80:'Showers',81:'Showers',82:'Showers',95:'Thunder'};
+            return map[code] || '?';
+        }
+
+        async function fetchWeather() {
+            try {
+                var res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=40.71&longitude=-74.0&current_weather=true&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=auto');
+                var data = await res.json();
+                var cw = data.current_weather;
+                document.getElementById('temp').textContent = Math.round(cw.temperature) + '\u00B0';
+                document.getElementById('desc').textContent = weatherCodeToText(cw.weathercode);
+                if (data.daily) {
+                    document.getElementById('highlow').textContent = 'H:' + Math.round(data.daily.temperature_2m_max[0]) + '\u00B0 L:' + Math.round(data.daily.temperature_2m_min[0]) + '\u00B0';
+                }
+                document.getElementById('city').textContent = 'New York';
+            } catch(e) {
+                document.getElementById('temp').textContent = 'Err';
+            }
+        }
+
+        fetchWeather();
+        setInterval(fetchWeather, 1800000);
+
+        document.body.addEventListener('dblclick', function() {
+            try {
+                window.chrome.webview.postMessage('close');
+            } catch(e) {}
+        });
+    </script>
+</body>
+</html>

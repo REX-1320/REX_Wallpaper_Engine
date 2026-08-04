@@ -64,6 +64,9 @@
     <ClCompile Include="D:\REX_doc\rex-core\src\graphics\effects\effect_renderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\graphics\effects\NoiseTexture.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="D:\REX_doc\rex-core\src\graphics\resource\TextureCache.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

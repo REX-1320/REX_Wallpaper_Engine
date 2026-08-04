@@ -1,0 +1,11 @@
+D:\REX_doc\rex-core\tests\desktop_personalization\test_personalization_service.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\test_personalization_service.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\PersonalizationService.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\PersonalizationService.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\ThemeManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\ThemeManager.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\AppearanceManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\AppearanceManager.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\EffectsManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\EffectsManager.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\DesktopManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\DesktopManager.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\ExplorerManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\ExplorerManager.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\TaskbarManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\TaskbarManager.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\ProfileManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\ProfileManager.obj
+D:\REX_doc\rex-core\src\desktop_personalization\services\SettingsManager.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\SettingsManager.obj
+D:\REX_doc\rex-core\src\modules\ConfigurationStore.cpp;D:\REX_doc\rex-core\.build\rex-desktop-personalization-tests.dir\Release\ConfigurationStore.obj

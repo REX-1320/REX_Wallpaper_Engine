@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {
+        margin: 0; background: transparent; color: white;
+        font-family: 'Segoe UI'; user-select: none;
+        display: flex; flex-direction: column; justify-content: center;
+        height: 100vh; padding: 12px; box-sizing: border-box;
+    }
+    .row { display: flex; justify-content: space-between; margin: 4px 0; }
+    .label { font-size: 12px; opacity: 0.7; }
+    .value { font-size: 14px; font-weight: bold; }
+    .bar-bg { height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 2px; }
+    .bar-fill { height: 4px; border-radius: 2px; transition: width 0.3s ease; }
+</style>
+</head>
+<body>
+    <div class="row"><span class="label">CPU</span><span class="value" id="cpuVal">0%</span></div>
+    <div class="bar-bg"><div class="bar-fill" id="cpuBar" style="width:0%; background:#ff6188;"></div></div>
+
+    <div class="row"><span class="label">GPU</span><span class="value" id="gpuVal">0%</span></div>
+    <div class="bar-bg"><div class="bar-fill" id="gpuBar" style="width:0%; background:#fc9867;"></div></div>
+
+    <div class="row"><span class="label">RAM</span><span class="value" id="ramVal">0%</span></div>
+    <div class="bar-bg"><div class="bar-fill" id="ramBar" style="width:0%; background:#ffd866;"></div></div>
+
+    <div class="row"><span class="label">NET &#8595;</span><span class="value" id="netDown">0 B/s</span></div>
+    <div class="row"><span class="label">NET &#8593;</span><span class="value" id="netUp">0 B/s</span></div>
+
+    <script>
+        function updateStats() {
+            try {
+                window.chrome.webview.postMessage('getStats');
+            } catch(e) {}
+        }
+
+        try {
+            window.chrome.webview.addEventListener('message', function(e) {
+                try {
+                    var data = JSON.parse(e.data);
+                    if (data.type === 'stats') {
+                        var s = data;
+                        setStat('cpu', s.cpu);
+                        setStat('gpu', s.gpu);
+                        setStat('ram', s.ram);
+                        document.getElementById('netDown').textContent = formatBytes(s.netDown);
+                        document.getElementById('netUp').textContent = formatBytes(s.netUp);
+                    }
+                } catch(ex) {}
+            });
+        } catch(e) {}
+
+        function setStat(type, value) {
+            var elVal = document.getElementById(type+'Val');
+            var elBar = document.getElementById(type+'Bar');
+            if (elVal) elVal.textContent = Math.round(value) + '%';
+            if (elBar) elBar.style.width = Math.round(value) + '%';
+        }
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return bytes + ' B/s';
+            if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB/s';
+            return (bytes/1048576).toFixed(1) + ' MB/s';
+        }
+
+        setInterval(updateStats, 2000);
+        updateStats();
+
+        document.body.addEventListener('dblclick', function() {
+            try {
+                window.chrome.webview.postMessage('close');
+            } catch(e) {}
+        });
+    </script>
+</body>
+</html>

@@ -64,6 +64,9 @@
     <ClCompile Include="D:\REX_doc\rex-core\src\graphics\effects\effect_renderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\graphics\effects\NoiseTexture.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="D:\REX_doc\rex-core\src\graphics\resource\TextureCache.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -151,6 +154,9 @@
     <ClCompile Include="D:\REX_doc\rex-core\src\desktop_personalization\services\SettingsManager.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\profiles\services\ProfileManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\SettingsModule.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -185,24 +191,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="D:\REX_doc\rex-core\src\modules\Settings\ui\UIModelGenerator.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="D:\REX_doc\rex-core\src\modules\UI\UIModule.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="D:\REX_doc\rex-core\src\modules\UI\services\ThemeRegistry.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="D:\REX_doc\rex-core\src\modules\UI\services\TokenManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="D:\REX_doc\rex-core\src\modules\UI\services\ComponentRegistry.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="D:\REX_doc\rex-core\src\modules\UI\services\StyleResolver.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="D:\REX_doc\rex-core\src\modules\UI\services\ThemeService.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="D:\REX_doc\rex-core\src\modules\Notification\NotificationModule.cpp">
@@ -281,6 +269,48 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="D:\REX_doc\rex-core\src\modules\Search\semantic\SemanticIndex.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Widgets\WidgetModule.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Widgets\services\WidgetRegistry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Widgets\services\WidgetHost.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Widgets\services\WidgetService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Widgets\services\WidgetRuntime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Personalization\PersonalizationModule.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Personalization\services\PersonalizationService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Personalization\platform\WinTaskbarAdapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Personalization\platform\WinExplorerAdapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Personalization\platform\WinStartMenuAdapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Sync\crypto\CryptoService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Sync\storage\SyncStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Sync\transport\SyncRestClient.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\REX_doc\rex-core\src\modules\Sync\engine\SyncEngine.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

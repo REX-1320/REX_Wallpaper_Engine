@@ -34,6 +34,6 @@ private:
 
 }
 
-extern "C" __declspec(dllexport) rex::modules::IModule* createModule() {
+extern "C" inline __declspec(dllexport) rex::modules::IModule* createModule() {
     return new rex::notifications::NotificationModule();
 }

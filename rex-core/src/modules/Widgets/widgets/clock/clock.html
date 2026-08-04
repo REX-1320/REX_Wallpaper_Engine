@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            margin: 0;
+            background: transparent;
+            color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            user-select: none;
+            -webkit-app-region: no-drag;
+            overflow: hidden;
+        }
+        .clock {
+            font-size: 52px;
+            font-weight: 200;
+            text-shadow: 0 0 20px rgba(0,0,0,0.6), 0 2px 4px rgba(0,0,0,0.4);
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+    <div class="clock" id="clock">00:00:00</div>
+    <script>
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').textContent = now.toLocaleTimeString();
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        document.body.addEventListener('dblclick', function() {
+            try {
+                window.chrome.webview.postMessage('close');
+            } catch(e) {}
+        });
+    </script>
+</body>
+</html>

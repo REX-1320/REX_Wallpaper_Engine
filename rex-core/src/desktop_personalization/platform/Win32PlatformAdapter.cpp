@@ -5,8 +5,6 @@
 #include <shlwapi.h>
 #include <cstring>
 
-#pragma comment(lib, "dwmapi.lib")
-#pragma comment(lib, "shlwapi.lib")
 
 namespace rex::desktop_personalization::platform {
 

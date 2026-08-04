@@ -80,7 +80,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-shared/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -107,10 +107,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -124,7 +124,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-shared/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -152,10 +152,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -169,7 +169,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-shared/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -197,10 +197,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -214,7 +214,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-core/.build/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/REX_doc/rex-shared/vcpkg_installed/x64-windows/include" /utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -241,10 +241,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;REX_SHARED_BUILD;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;FMT_SHARED;SPDLOG_SHARED_LIB;SPDLOG_COMPILED_LIB;SPDLOG_FMT_EXTERNAL;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\REX_doc\rex-shared\include;D:\REX_doc\rex-shared\src;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -268,7 +268,7 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">D:\REX_doc\rex-core\.build\rex-shared\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Building Custom Rule D:/REX_doc/rex-shared/CMakeLists.txt</Message>
@@ -281,7 +281,7 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">D:\REX_doc\rex-core\.build\rex-shared\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Building Custom Rule D:/REX_doc/rex-shared/CMakeLists.txt</Message>
@@ -294,7 +294,7 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">D:\REX_doc\rex-core\.build\rex-shared\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Building Custom Rule D:/REX_doc/rex-shared/CMakeLists.txt</Message>
@@ -307,7 +307,7 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-core\.build\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeFindDependencyMacro.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckCXXSourceCompiles.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckIncludeFileCXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CheckLibraryExists.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\FindThreads.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CheckSourceCompiles.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config-version.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-config.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\fmt\fmt-targets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfig.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-debug.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets-release.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigTargets.cmake;D:\REX_doc\rex-shared\vcpkg_installed\x64-windows\share\spdlog\spdlogConfigVersion.cmake;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">D:\REX_doc\rex-core\.build\rex-shared\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
     </CustomBuild>

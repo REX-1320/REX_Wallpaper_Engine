@@ -1,0 +1,1012 @@
+# REX User Interface Specification v1.1
+
+**Status:** Complete
+**Last Updated:** 2026-07-27
+**Scope:** Every visual element, module page, component, animation, and interaction within the REX shell.
+
+> **v1.1 changelog (summary):** Reconciled conflicting layout percentages/pixel widths (§9 is now the single source of truth); added Multi-Monitor Support (§10); added the widget/wallpaper trust boundary for sandboxed vs. static content (§11); added a formal Drag-and-Drop spec (§12); expanded Accessibility with contrast floors, focus trapping, and live regions (§13); added semantic status color tokens (§14.3); added a canonical keybind reference table (§15); added two new workflows (§16.6–16.7). Full changelog at the end of the document.
+
+---
+
+## Table of Contents
+1. [UI Architecture Overview](#1-ui-architecture-overview)
+2. [Global Shell Layout](#2-global-shell-layout)
+3. [Navigation System](#3-navigation-system)
+4. [Global UI Components](#4-global-ui-components)
+   - 4.1 Search Bar
+   - 4.2 Command Palette
+   - 4.3 Notification Center
+5. [Module Pages](#5-module-pages)
+   - 5.1 Home Dashboard
+   - 5.2 Wallpaper Studio
+   - 5.3 Widgets Page
+   - 5.4 Marketplace Page
+   - 5.5 Personalization Page
+   - 5.6 Settings Page
+   - 5.7 Profiles Page
+   - 5.8 Performance Page
+   - 5.9 Developer Page
+6. [Component Library](#6-component-library)
+7. [Liquid Glass Visual Language](#7-liquid-glass-visual-language)
+8. [Motion & Physics System](#8-motion--physics-system)
+9. [Responsive Breakpoints & Layout Sizing](#9-responsive-breakpoints--layout-sizing)
+10. [Multi-Monitor Support](#10-multi-monitor-support)
+11. [Widget & Marketplace Content Rendering (Trust Boundary)](#11-widget--marketplace-content-rendering-trust-boundary)
+12. [Drag-and-Drop Behavior](#12-drag-and-drop-behavior)
+13. [Accessibility](#13-accessibility)
+14. [Theming](#14-theming)
+15. [Default Keyboard Shortcuts (Canonical Reference)](#15-default-keyboard-shortcuts-canonical-reference)
+16. [UI Workflows](#16-ui-workflows)
+17. [Changelog](#17-changelog)
+
+---
+
+## 1. UI Architecture Overview
+
+The REX shell is a single, transparent, layered window that hosts all modules. It consists of five main regions:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Top Bar (48px)                           │
+├──────────┬─────────────────────────────────┬───────────────┤
+│ Sidebar  │ Workspace                       │ Inspector     │
+│ (fixed)  │ (fills remaining space)         │ (fixed)       │
+│          │                                 │               │
+│          │                                 │               │
+│          │                                 │               │
+│          │                                 │               │
+├──────────┴─────────────────────────────────┴───────────────┤
+│ Status Bar (28px)                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Top Bar:** App logo, module title, search, monitor selector (multi-monitor only, see §10.4), notification bell, user avatar, settings gear, window controls.
+- **Sidebar:** Categorized navigation tree with group headers and selectable items. Fixed pixel width per breakpoint — see §9 for exact values; do not treat any percentage mentioned elsewhere as authoritative.
+- **Workspace:** Renders the active module page. Uses a two- or three-panel sub-layout depending on the module. Always star-sized (`*`) to consume the remaining width after Sidebar and Inspector are laid out.
+- **Inspector:** Contextual properties panel that updates based on selected item in the workspace. Fixed pixel width per breakpoint — see §9.
+- **Status Bar:** System status, FPS, GPU usage, memory, version.
+
+All rendering is done via Direct2D + DirectComposition with Liquid Glass materials applied per layer.
+
+---
+
+## 2. Global Shell Layout
+
+### 2.1 Top Bar
+- **Height:** 48px
+- **Background:** `Glass.Surface` tokens (40px blur, 75% tint)
+- **Left section:** App icon (24px) + Module title (Body font, 14px)
+- **Center:** Search bar (flexible, max 600px) — see §4.1
+- **Right section:** Monitor selector icon (24px, visible only when more than one display is detected — see §10.4), Notification bell (24px icon), User avatar (32px circle), Settings gear (24px), Minimize/Maximize/Close buttons
+- **Spacing:** 16px left/right, 20px between icons
+
+### 2.2 Sidebar
+- **Width:** Fixed per breakpoint (240–280px expanded; see §9 for the authoritative table); collapses to 64px (icons only)
+- **Background:** `Glass.Base` tokens (60px blur, 60% tint), edge highlight on right border
+- **Content:** Group headers (Overline style, 12px, uppercase, bold, non-clickable) + items (Body, 14px, glowing text buttons)
+- **Active indicator:** 3px left border in `Accent.Primary`, item text becomes `Text.Primary`
+- **Hover:** subtle background highlight (10% accent tint)
+- **Animation:** Width transition uses Spring.Normal (300ms)
+
+### 2.3 Inspector
+- **Width:** Fixed per breakpoint (280–360px; see §9 for the authoritative table)
+- **Background:** `Glass.Surface` tokens (40px blur, 75% tint)
+- **Content:** Section headers (Overline) + PropertyGrid or contextual content
+- **Toggle:** Can be shown/hidden via toolbar button or shortcut
+
+### 2.4 Status Bar
+- **Height:** 28px
+- **Background:** `Glass.Surface` with reduced blur (20px)
+- **Left:** Status text ("Ready", "Playing", etc.)
+- **Right:** Metrics (FPS, GPU %, Memory MB, Version)
+- **Font:** Caption (11px), `Text.Secondary`
+
+---
+
+## 3. Navigation System
+
+### 3.1 Sidebar Tree Structure
+```
+🏠 HOME
+   Dashboard
+
+🖥 DESKTOP
+   Wallpapers
+   Widgets
+   Themes
+   Personalization
+
+🛒 DISCOVER
+   Marketplace
+   Downloads
+
+⚡ SYSTEM
+   Performance
+   Activity
+   Settings
+
+🧪 ADVANCED
+   Developer
+   About
+```
+
+Each group header is rendered as non-clickable bold text. Items are glowing text buttons. The active item has a 3px left accent border and white text. Hovered items glow softly.
+
+### 3.2 Keyboard Navigation
+- `Ctrl+1` through `Ctrl+9` jumps to the respective module (by flat index).
+- Arrow keys navigate within the sidebar when focused.
+- See §15 for the full canonical keymap and remapping rules.
+
+### 3.3 Collapse Behavior
+- Sidebar can be collapsed to 64px (icons only) via a hamburger button or `Ctrl+B`.
+- In collapsed mode, only icons are shown; group headers are hidden.
+- Below 1366px, the sidebar collapses by default (see §9); expanding it manually shows it as a temporary overlay rather than pushing the Workspace.
+
+---
+
+## 4. Global UI Components
+
+### 4.1 Search Bar
+- **Location:** Top bar, centered.
+- **Appearance:** Rounded input (corner radius 8px), `Glass.Surface` background, placeholder text "Search wallpapers, widgets, settings…"
+- **Icon:** Magnifying glass (16px) on the left; clear button (×) appears when text is present.
+- **Interactions:** Typing triggers federated search across all modules. Results appear in a dropdown (max 10 items), grouped by category.
+- **Keyboard:** `Ctrl+F` focuses the search bar; `Esc` clears and closes dropdown.
+
+### 4.2 Command Palette
+- **Activation:** `Ctrl+P` or clicking the command palette button in the top bar.
+- **Appearance:** Modal overlay (dark backdrop at 50% opacity). Centered panel (560×400px), `Glass.Elevated` style, scale entrance animation.
+- **Content:** Input field at top, list of commands below. Each row shows command name, shortcut, and category.
+- **Filtering:** As user types, commands are filtered in real time.
+- **Execution:** `Enter` runs the selected command; `Esc` closes the palette.
+- **Focus:** Traps keyboard focus while open; see §13 (Accessibility).
+
+### 4.3 Notification Center
+- **Location:** Right side overlay, slides in from the right.
+- **Dimensions:** 340px wide, full height below top bar.
+- **Appearance:** `Glass.Elevated` panel with shadow.
+- **Header:** "Notifications" title + "Clear All" button.
+- **Items:** Each notification shows title, message, relative time, and module icon. Divider lines between items. A per-item dismiss (×) button appears on hover.
+- **States:** Unread notifications have a small dot indicator.
+- **Empty:** "No notifications" centered text.
+- **Animation:** Slide in using Spring.Normal (300ms), fades background. New items are announced via a polite live region (see §13) rather than only appearing visually.
+- **Known gap (Phase 2):** Per-category filtering and a dedicated notification settings pane (which modules can notify, priority levels) are not in Phase 0/1 scope. This is a deliberate deferral, not an oversight — flagged here so it isn't silently dropped.
+
+---
+
+## 5. Module Pages
+
+### 5.1 Home Dashboard
+
+**Purpose:** At-a-glance desktop control center.
+
+**Layout Diagram:**
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Welcome Back, User                                    Time | Date       │
+├─────────────────────────────────────────────────────────────────────────┤
+│ ┌──────────────────────────────┐ ┌──────────────┐ ┌──────────────┐     │
+│ │ Active Wallpaper             │ │ Running      │ │ Current      │     │
+│ │ (thumbnail)                  │ │ Widgets: 5   │ │ Theme: Glass │     │
+│ └──────────────────────────────┘ └──────────────┘ └──────────────┘     │
+│ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐                    │
+│ │ CPU 18%  │ │ GPU 11%  │ │ RAM 35%  │ │ Stor 45% │                    │
+│ └──────────┘ └──────────┘ └──────────┘ └──────────┘                    │
+│ Quick Actions                                                          │
+│ [Import] [Browse] [Theme] [Widgets] [Market] [Profile]                  │
+│ Recent Wallpapers                                                      │
+│ [thumb] [thumb] [thumb] [thumb] [thumb]                                │
+│ Downloads: ████████ 45%                                                │
+│ Recent Activity                                                        │
+│ • Installed Glass Theme                                                │
+│ • Updated Widget                                                       │
+│ • Imported Wallpaper                                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Right Inspector:** System status, module health, update indicator.
+
+**Components Used:** SectionHeader, Card, Button (quick actions), Gallery (recent wallpapers), ProgressBar, PropertyGrid.
+
+**Animations:**
+- Cards fade and scale in on page load (staggered, 50ms delay each).
+- Live preview refreshes at 60fps via the wallpaper engine.
+- Quick action buttons have hover scale (1.05) and press scale (0.96).
+
+**Empty State:**
+- Large illustration + "Welcome to REX! Import your first wallpaper or browse the Marketplace."
+- Two primary buttons: Import, Browse Marketplace.
+
+**Keyboard Shortcuts:**
+- `Ctrl+1` → Home
+- `Ctrl+I` → Import wallpaper
+
+---
+
+### 5.2 Wallpaper Studio
+
+**Purpose:** Browse, preview, and manage all wallpapers.
+
+**Layout Diagram:**
+```
+┌─────── Collections ──────┬──────────── Live Preview ────────────┬───── Inspector ──────┐
+│ ⭐ Favorites               │ [All] [Monitor 1] [Monitor 2]         │ Properties            │
+│ 🕒 Recent                  │        (tab strip, multi-monitor      │ Name: Aurora.mp4      │
+│ 🎥 Videos                  │         only — see §10.2)             │ Renderer: Video       │
+│ 🖼 Images                  │                                       │ Resolution: 3840×2160 │
+│ 🌐 Web                     │       (wallpaper playing)             │ FPS: 60               │
+│ ✨ Shader                  │                                       │ GPU: 5%               │
+│ 🎮 Scene                   │                                       │ Tags: nature, 4k      │
+│ 🎵 Audio                   │                                       │ Playlist: Favorites   │
+│ 📁 Local                   │                                       │ Assigned Monitor: ▾   │
+│ ☁ Online                   │                                       │  All Monitors         │
+│ Playlists                  │                                       │                       │
+│ Downloads                  │                                       │                       │
+│ Trash                      │                                       │                       │
+├────────────────────────────┴───────────────────────────────────────┴─────────────────────┤
+│ ◀  ▶  ⏸  🔊  ⚡  🖥  ❤️                                                                │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│ Library Strip (horizontal scroll)                                                        │
+│ [thumb] [thumb] [thumb] [thumb] [thumb] [thumb] [thumb] [thumb] [thumb]                 │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Components Used:** TreeView (collections), Gallery (library strip), Card (preview placeholder, in actual rendering it's a live D3D12 texture), Button (transport controls), PropertyGrid (inspector).
+
+**Interactions:**
+- Click a collection → filters the library strip.
+- Click a thumbnail → selects it and updates the preview and inspector.
+- Double-click a thumbnail → applies the wallpaper immediately (to the currently active monitor tab, or all monitors if "All" is selected).
+- Transport buttons control playback (video) or cycle (images).
+- Files can be imported by dragging them from Explorer onto the Library Strip or Live Preview — see §12.1.
+
+**Animations:**
+- Collection items have hover glow.
+- Thumbnails have hover scale (1.05) and elevation lift (4px).
+- Inspector values fade when they change.
+
+**Context Menu (right-click on thumbnail):**
+- Apply, **Apply to Monitor >** (submenu: Monitor 1, Monitor 2, … All Monitors, Span Across All — see §10.2), Add to Playlist, Favorite, Edit, Duplicate, Export, Delete.
+
+**Empty State:**
+- "No wallpapers in this collection. Import wallpapers or browse the Marketplace."
+
+---
+
+### 5.3 Widgets Page
+
+**Purpose:** Manage desktop widgets.
+
+**Layout Diagram:**
+```
+┌──── Toolbar ────┬──────────────────────────────────┬──── Inspector ────┐
+│ [+ Add] [Remove] │ [Monitor 1] [Monitor 2] [All]     │ Widget: Clock     │
+│ [Type: Clock ▾] │ (tab strip, multi-monitor only —  │ Position:         │
+│                  │  see §10.3)                       │  Monitor 1        │
+│                  │  Desktop Preview                  │  100, 200         │
+│                  │  (draggable widget previews)      │ Size: 200×200     │
+│                  │                                    │ Opacity: 80%      │
+│                  │                                    │ Click-through: On │
+├──────────────────┴──────────────────────────────────┴───────────────────┤
+│ Widget Library                                                          │
+│ [Clock Card] [Weather Card] [SysMon Card] [Calendar Card] [Notes Card]  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Components Used:** Toolbar, Dropdown, Gallery, PropertyGrid.
+
+**Interactions:**
+- Drag a widget card from the library onto the desktop preview to place it — see §12.3 for the drop affordance spec.
+- Click a widget on the preview to select it; inspector updates.
+- Resize handles on selected widgets.
+- Double-click a widget to configure its settings.
+- When multiple monitors are detected, the Desktop Preview is tabbed per monitor; the "All (overview)" tab is read-only and used for reference only — placement always happens on a specific monitor's tab. See §10.3.
+
+**Animations:**
+- Widgets on the desktop preview have subtle bounce when first placed.
+- Removal has a shrink-and-fade animation.
+
+**Error / Crash State:**
+- If a widget's sandboxed process crashes or exceeds its resource quota, its tile renders as a Skeleton (§6.17) with an Error Badge (§6.16) and a "Restart" action, rather than disappearing. See §11.3.
+
+**Empty State:**
+- "No widgets installed. Browse the Marketplace to find widgets."
+
+---
+
+### 5.4 Marketplace Page
+
+**Purpose:** Discover and install content.
+
+**Layout Diagram:**
+```
+┌─────── Toolbar ────────┬──────────────────────────────────┬──── Detail ──────┐
+│ [Search] [Categories ▾] │ Grid of Product Cards            │ Name:           │
+│                         │ ┌────────┐ ┌────────┐ ┌────────┐│ Description:    │
+│                         │ │ Thumb  │ │ Thumb  │ │ Thumb  ││ Rating: ⭐⭐⭐⭐ │
+│                         │ │ Title  │ │ Title  │ │ Title  ││ Downloads: 1.2k │
+│                         │ │ Author │ │ Author │ │ Author ││ Version: 2.0    │
+│                         │ └────────┘ └────────┘ └────────┘│ Trust: Verified │
+│                         │ ┌────────┐ ┌────────┐ ┌────────┐│ [Install]       │
+│                         │ │ ...    │ │ ...    │ │ ...    ││                 │
+│                         │ └────────┘ └────────┘ └────────┘│                 │
+└─────────────────────────┴──────────────────────────────────┴─────────────────┘
+```
+
+**Components Used:** Toolbar, SearchBar, Dropdown, Gallery, Card, Button, ProgressBar, Badge.
+
+**Interactions:**
+- Click a product card → select it, update the detail panel.
+- Click "Install" → progress bar appears, item is downloaded and installed.
+- Filter by category or search text.
+- Drag a product card directly onto the desktop to install-and-place in one motion — see §12.2.
+
+**Trust Boundary:**
+- Product card thumbnails and detail-panel preview media are static, author-supplied assets — no third-party code executes while browsing. See §11.1 for the full rendering trust boundary.
+- The Detail panel shows a "Verified" or "Community" trust Badge so users know whether a listing has been reviewed before installing.
+
+**Animations:**
+- Cards have hover lift and glow.
+- Download progress bar fills with spring animation.
+
+**Empty State:**
+- "Could not connect to Marketplace. Check your connection." (if offline)
+- "No results found. Try a different search." (if no items match)
+
+---
+
+### 5.5 Personalization Page
+
+**Purpose:** Customize Windows shell elements.
+
+**Layout Diagram:**
+```
+┌─── Sidebar ───┬────── Workspace ──────────┬──── Inspector ────┐
+│ Taskbar        │ Taskbar Settings          │ Current Values    │
+│ Start Menu     │ ┌──────────────────────┐  │ Position: Bottom  │
+│ Explorer       │ │ [Toggle] Auto-hide   │  │ Auto-hide: Off    │
+│ Window         │ │ [Toggle] Transparent │  │ Transparency: On  │
+│ Fonts          │ │ [Dropdown] Position  │  │ Icon Size: Small  │
+│ Icons          │ │ [Slider] Corner Rad. │  │ Corner Radius: 8  │
+│ Cursor         │ │ [Preview]            │  │                   │
+│ Animations     │ └──────────────────────┘  │                   │
+├────────────────┴───────────────────────────┴───────────────────┤
+│ [Apply] [Reset]                                                │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Components Used:** TreeView (sidebar), Toggle, Dropdown, Slider, Button, PropertyGrid.
+
+**Interactions:**
+- Click a category in the sidebar → loads that section in the workspace.
+- Toggle/Slider/Dropdown changes apply instantly to the preview.
+- "Apply" commits all changes to the system.
+
+**Animations:**
+- Preview updates are instant (no animation) to feel immediate.
+
+**Context Menu:** None.
+
+---
+
+### 5.6 Settings Page
+
+**Purpose:** Configure all REX settings.
+
+**Layout Diagram:**
+```
+┌── Categories ──┬──── Workspace ──────────────────────────────────┐
+│ General         │ General Settings                                │
+│ Appearance      │ ┌───────────────────────────────────────────┐   │
+│ Wallpaper       │ │ Language: [English ▾]                      │   │
+│ Widgets         │ │ Startup: [Toggle] Launch on Windows start   │   │
+│ Marketplace     │ │ Updates: [Toggle] Automatically check       │   │
+│ Commands        │ │ Theme: [Dropdown] Dark / Light              │   │
+│ Display         │ └───────────────────────────────────────────┘   │
+│ Notifications   │                                                 │
+│ Search          │                                                 │
+│ Backup          │                                                 │
+│ Privacy         │                                                 │
+│ Developer       │                                                 │
+├─────────────────┴─────────────────────────────────────────────────┤
+│ [Search settings...]                                              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Components Used:** TreeView (categories), SearchBar, PropertyGrid (editable), Toggle, Dropdown.
+
+**Interactions:**
+- Click a category → scrolls to that section and highlights the search match.
+- Edit a value directly in the property grid; changes are validated and saved on blur.
+- The **Commands** category hosts the KeybindRecorder (§6.24) for remapping any entry in the canonical keymap (§15).
+- The **Display** category hosts the Monitor Topology view (§10.1).
+
+**Animations:**
+- Category highlight fades when changing.
+
+**Empty State:** N/A.
+
+---
+
+### 5.7 Profiles Page
+
+**Purpose:** Manage desktop configuration profiles.
+
+**Layout Diagram:**
+```
+┌───── Toolbar ────┬──────────────────────────┬────── Details ────┐
+│ [+ New] [Apply]   │ Gallery of Profile Cards │ Name: Gaming      │
+│                   │ ┌────────┐ ┌────────┐    │ Wallpaper: Aurora │
+│                   │ │ Gaming │ │ Work   │    │ Theme: Dark       │
+│                   │ │ Active │ │        │    │ Widgets: 2 active │
+│                   │ └────────┘ └────────┘    │ Auto-switch: On   │
+│                   │ ┌────────┐ ┌────────┐    │ [Edit] [Delete]   │
+│                   │ │ Movie  │ │ Custom │    │                   │
+│                   │ └────────┘ └────────┘    │                   │
+└───────────────────┴──────────────────────────┴───────────────────┘
+```
+
+**Components Used:** Toolbar, Gallery, Card, Button, PropertyGrid.
+
+**Interactions:**
+- Click a profile card → select it.
+- "Apply" → immediately switches to that profile's settings.
+- "New" → opens a dialog to name and snapshot current state.
+- "Delete" → removes the profile after confirmation.
+
+**Animations:**
+- Profile switch has a brief transition (fade to black and back, 300ms).
+
+**Empty State:**
+- "No profiles yet. Create your first profile to save your desktop setup."
+
+---
+
+### 5.8 Performance Page
+
+**Purpose:** Monitor system resource usage.
+
+**Layout Diagram:**
+```
+┌──────────────────────────────────────────────────────────┐
+│ FPS: 60  Frame: 16.2 ms                                 │
+│ CPU  ████████████░░░░ 18%                               │
+│ GPU  ██████░░░░░░░░░░ 11%                               │
+│ RAM  ██████████████░░ 35%                               │
+│ VRAM ████████░░░░░░░░ 25%                               │
+│ Sto  ███████████████░ 45%                               │
+│ Net  ████░░░░░░░░░░░░ 12 Mbps                           │
+│                                                          │
+│ Module Usage                                             │
+│ ┌───────────────┬────────┬─────────┬────────┐            │
+│ │ Module        │ CPU %  │ RAM MB  │ GPU %  │            │
+│ │ Wallpaper Eng │ 5%     │ 120     │ 3%     │            │
+│ │ Widget Platf  │ 2%     │ 45      │ 0%     │            │
+│ │ Shell UI      │ 8%     │ 80      │ 0%     │            │
+│ └───────────────┴────────┴─────────┴────────┘            │
+│                                                          │
+│ Performance Settings                                     │
+│ [Toggle] Pause wallpaper when fullscreen app is running   │
+│ [Toggle] Pause wallpaper on battery                      │
+│ [Toggle] Reduce visual effects (lowers shell blur radius  │
+│          and disables parallax/dynamic tint on chrome)    │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Components Used:** SectionHeader, ProgressBar (×6), Table, Toggle.
+
+**Notes:**
+- "Reduce visual effects" targets the shell's *own* rendering cost (Liquid Glass blur/parallax, §7), distinct from the wallpaper-pause toggles above it which target the wallpaper engine. On integrated GPUs the shell chrome itself is not free, so this is offered as an independent lever.
+
+**Animations:**
+- Progress bars fill with spring animation when values change.
+- Table rows highlight on hover.
+
+**Empty State:** N/A.
+
+---
+
+### 5.9 Developer Page
+
+**Purpose:** Power tools for developers.
+
+**Layout Diagram:**
+```
+┌─────── Tabs ────────────────────────────────────────────────────────┐
+│ [Events] [Commands] [Modules] [Search] [Notifications] [Settings]   │
+├─────────────────────────────────────────────────────────────────────┤
+│ Events Table                                                        │
+│ ┌──────┬──────────┬────────┬──────────────────────────────────┐     │
+│ │ Time │ Module   │ Event  │ Details                          │     │
+│ │10:32 │ rex.core │ Started│ Engine initialized               │     │
+│ │10:33 │ rex.wall │ Loaded │ scene "Aurora"                   │     │
+│ └──────┴──────────┴────────┴──────────────────────────────────┘     │
+│ [Clear]                                                             │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Components Used:** Tabs, Table, Button.
+
+**Interactions:**
+- Switch tabs to view different data.
+- In Commands tab, click "Execute" to run the selected command.
+- Events auto-scroll to the latest entry.
+
+**Animations:**
+- New rows fade in at the top of the Events table.
+
+---
+
+## 6. Component Library
+
+### 6.1 Button
+
+- **Purpose:** Trigger an action.
+- **Variants:** Primary, Secondary, Ghost, Icon, Danger.
+- **Appearance:**
+  - Primary: `Accent.Primary` background, white text, 8px corner radius, 1px inner highlight.
+  - Secondary: transparent background, 1px `Border.Default`, `Text.Primary`.
+  - Ghost: no background, `Text.Primary`, no border.
+  - Icon: circular, 36×36px, icon only.
+- **States:**
+  - Normal: as above.
+  - Hover: elevate 2px, increase glow, background lightens.
+  - Pressed: scale 0.96, background darkens.
+  - Focused: 2px `Accent.Primary` outline.
+  - Disabled: 40% opacity, no interactions.
+  - Loading: spinner replaces text.
+- **Physics:** Spring.Fast for press/release.
+
+### 6.2 Card
+
+- **Purpose:** Container for grouped content.
+- **Appearance:** `Glass.Surface` background, 16px corner radius, 1px edge highlight, subtle shadow.
+- **States:**
+  - Normal: flat.
+  - Hover: lifts 4px, shadow grows, blur radius increases.
+  - Selected: 2px `Accent.Primary` border.
+- **Padding:** 16px.
+- **Physics:** Spring.Normal for hover lift.
+
+### 6.3 Toggle / Switch
+
+- **Purpose:** Binary on/off.
+- **Appearance:** Track 44×24px rounded rect, thumb 20px circle.
+- **States:**
+  - Off: track `Border.Default`, thumb `Text.Secondary`.
+  - On: track `Accent.Primary` at 60% opacity, thumb `Text.Primary`.
+  - Hover: thumb glows.
+  - Disabled: 40% opacity.
+- **Animation:** Thumb position and track color transition with Spring.Fast.
+
+### 6.4 Slider
+
+- **Purpose:** Select a value from a range.
+- **Appearance:** Track 4px height, rounded. Thumb 16px circle. Label showing current value.
+- **States:**
+  - Normal: track `Border.Default`, thumb `Text.Primary`.
+  - Active (dragging): thumb grows to 20px, track `Accent.Primary`.
+- **Animation:** Thumb position uses Spring.Normal; value label fades.
+
+### 6.5 Dropdown / ComboBox
+
+- **Purpose:** Select from a list.
+- **Appearance:** Button with chevron (▼). Expanded list: `Glass.Elevated` panel, 8px corner radius, items with hover highlight.
+- **Animation:** Panel scales down from top (Spring.Fast).
+
+### 6.6 Gallery / GridView
+
+- **Purpose:** Display items in a responsive grid.
+- **Appearance:** Items laid out in columns with 12px gap. Each item is a Card or thumbnail.
+- **Scroll:** Smooth, with spring at boundaries.
+- **Animation:** Items fade and slide up on first load (staggered).
+
+### 6.7 Table
+
+- **Purpose:** Display structured data.
+- **Appearance:** Headers with `Overline` style, rows alternating subtle background. Sortable columns have arrow indicator.
+- **Hover:** Row highlights.
+- **Selection:** Row gets `Accent.Primary` left border.
+- **Scroll:** Virtualized for large datasets.
+
+### 6.8 TreeView
+
+- **Purpose:** Hierarchical navigation.
+- **Appearance:** Indented items, chevron for expand/collapse, `Overline` for category headers.
+- **Animation:** Children expand/collapse with height spring.
+
+### 6.9 PropertyGrid
+
+- **Purpose:** Display label-value pairs.
+- **Appearance:** Two columns (label 40%, value 60%), rows 28px height. Editable fields show an underline when focused.
+- **Edit:** Click on value → it becomes an inline text field. Enter or blur commits.
+
+### 6.10 ProgressBar
+
+- **Purpose:** Show completion.
+- **Appearance:** Track 4px rounded, fill `Accent.Primary`. Indeterminate: sliding gradient.
+- **Animation:** Fill width uses Spring.Normal.
+
+### 6.11 Dialog / Modal
+
+- **Purpose:** Modal overlay for confirmation or input.
+- **Appearance:** Backdrop dark overlay (50% opacity, 8px blur). Dialog panel: `Glass.Elevated`, 16px corner radius, 560px max width.
+- **Animation:** Backdrop fades in; panel scales from 0.95 to 1.0 (Spring.Slow).
+- **Focus:** Traps keyboard focus while open; see §13.
+
+### 6.12 Toast / Notification
+
+- **Purpose:** Non-blocking feedback.
+- **Appearance:** Small card in bottom-right corner, 8px radius, icon + title + message. Color-coded by type using the Status.* tokens in §14.3 (success, warning, error, info).
+- **Animation:** Slides in from right (Spring.Normal), auto-dismiss after 5s (fade out).
+- **Announcement:** Announced via a polite live region for screen readers; does not steal focus. See §13.
+
+### 6.13 ContextMenu
+
+- **Purpose:** Right-click actions.
+- **Appearance:** Floating `Glass.Elevated` panel, 8px radius, items with icon + label, separators.
+- **Animation:** Fade in + slight scale.
+
+### 6.14 Tooltip
+
+- **Purpose:** Hover info.
+- **Appearance:** Small dark panel, 4px radius, 12px font, appears after 500ms hover.
+- **Animation:** Fade in.
+
+### 6.15 Tabs
+
+- **Purpose:** Switch between views.
+- **Appearance:** Row of labels. Active tab has an animated underline indicator (2px height, `Accent.Primary`).
+- **Animation:** Underline slides with Spring.Normal.
+- **Usage note:** Also used for the multi-monitor tab strips in Wallpaper Studio (§5.2) and the Widgets Page (§5.3).
+
+### 6.16 Badge / StatusChip
+
+- **Purpose:** Small status indicator.
+- **Appearance:** Pill shape (20px height), colored background, white text, 10px corner radius.
+- **Colors:** Accent, Success, Warning, Error, Neutral — mapped to the Status.* tokens defined in §14.3.
+- **Usage note:** Also used for Marketplace "Verified" / "Community" trust indicators (§11.5) and crashed-widget error states (§11.3).
+
+### 6.17 Skeleton
+
+- **Purpose:** Loading placeholder.
+- **Appearance:** Rounded rects with shimmer animation (gradient sweep).
+- **Animation:** Continuous shimmer at 1.5s period.
+- **Usage note:** Also used as the fallback tile for a crashed or unresponsive widget (§11.3), paired with an Error Badge and a "Restart" action rather than a shimmer in that case.
+
+### 6.18 SearchBar
+
+- See §4.1.
+
+### 6.19 SplitView
+
+- **Purpose:** Resizable two-pane layout.
+- **Appearance:** Divider line (2px, `Border.Default`), draggable.
+- **Animation:** Panes resize smoothly during drag.
+
+### 6.20 Breadcrumb
+
+- **Purpose:** Show path hierarchy.
+- **Appearance:** Horizontal text items separated by "›". Last item is `Text.Primary`, others are `Text.Secondary` and clickable.
+
+### 6.21 StatusBar
+
+- See §2.4.
+
+### 6.22 Toolbar
+
+- See §2.
+
+### 6.23 ColorPicker
+
+- **Purpose:** Choose a color.
+- **Appearance:** Grid of 12 swatches (30×30px, 6px radius) + hex input field.
+- **Selection:** 2px white border on selected swatch.
+
+### 6.24 KeybindRecorder
+
+- **Purpose:** Record keyboard shortcut.
+- **Appearance:** Input field that captures next key combination. Shows current shortcut.
+- **Conflict handling:** See §15 for conflict-detection rules when a chosen combination is already bound.
+
+---
+
+## 7. Liquid Glass Visual Language
+
+All glass surfaces follow the layering model:
+
+```
+Layer 0: Desktop Wallpaper (visible through)
+Layer 1: Glass.Base (Background Acrylic, 60px blur, 60% tint, 2% noise)
+Layer 2: Glass.Surface (Cards, Sidebar, etc., 40px blur, 75% tint, 1.5% noise)
+Layer 3: Glass.Elevated (Dialogs, Dropdowns, 80px blur, 85% tint, 2.5% noise)
+Layer 4: Content (Text, Icons, Controls — fully opaque, crisp)
+```
+
+**Edge Highlight:** Every glass surface has a 1px inner stroke on the top and left edges, using `Glass.EdgeHighlight` color (rgba(255,255,255,0.15)).
+
+**Dynamic Tint:** The glass tint shifts slightly based on the average color of the underlying wallpaper. Cooler during the day, warmer at night (controlled by theme tokens). Disabled under Reduced Motion — see §13.
+
+**Noise Texture:** A pre-generated Perlin noise image is overlaid on glass surfaces at low opacity to simulate frosted glass texture.
+
+**Parallax Effect:** On mouse movement, the glass blur origin shifts 2-4px to create a sense of depth. Disabled under Reduced Motion — see §13.
+
+**Contrast Floor:** Because glass tint is translucent, the color behind it (wallpaper, other windows) can push text contrast below readable levels. Any text rendered directly over a `Glass.*` surface must meet the minimum contrast ratio defined in §13.1; the shell compensates automatically by increasing local tint opacity behind text-bearing regions rather than leaving contrast to chance.
+
+---
+
+## 8. Motion & Physics System
+
+### 8.1 Spring Parameters
+
+| Preset   | Stiffness | Damping | Mass | Usage                       |
+|----------|-----------|---------|------|-----------------------------|
+| Fast     | 500       | 30      | 1    | Button presses, toggles     |
+| Normal   | 300       | 25      | 1    | Hover lifts, card selections|
+| Slow     | 150       | 20      | 1    | Panel transitions, dialogs  |
+| Bouncy   | 200       | 10      | 1    | Toast notifications         |
+
+### 8.2 Standard Durations
+
+| Type      | Duration | Easing        |
+|-----------|----------|---------------|
+| Micro     | 150ms    | Spring.Fast   |
+| Standard  | 250ms    | Spring.Normal |
+| Large     | 400ms    | Spring.Slow   |
+
+### 8.3 Common Animations
+
+| Element            | Animation                                    |
+|--------------------|----------------------------------------------|
+| Button press       | Scale 1.0 → 0.96 → 1.0 (Spring.Fast)       |
+| Card hover         | Lift 4px, shadow grow (Spring.Normal)        |
+| Dialog open        | Backdrop fade + panel scale 0.95→1.0 (Slow)  |
+| Page transition    | Cross-fade 200ms + slide 8px right            |
+| Sidebar collapse   | Width animates (Spring.Normal)                |
+| Toast appear       | Slide from bottom-right + overshoot (Bouncy)  |
+| Progress bar fill  | Width spring (Normal)                         |
+| Toggle switch      | Thumb position (Fast)                         |
+
+All spring-driven animations in this table are disabled under Reduced Motion (§13), becoming instant state changes.
+
+---
+
+## 9. Responsive Breakpoints & Layout Sizing
+
+This section is the **single source of truth** for Sidebar and Inspector widths. Any percentage figures mentioned elsewhere in this document (e.g., §1, §2) are illustrative shorthand only — the pixel values below are authoritative and are what should be implemented as fixed-width XAML Grid columns, with the Workspace column left star-sized (`*`) to absorb the remainder.
+
+| Width Range | Sidebar (expanded) | Sidebar (collapsed) | Inspector | Gallery Columns |
+|-------------|---------------------|----------------------|-----------|------------------|
+| <1366px     | Hidden by default (temporary overlay via `Ctrl+B`) | 64px | Hidden by default (togglable) | 1 |
+| 1366–1440px | 240px | 64px | 280px | 2 |
+| 1441–1600px | 260px | 64px | 320px | 3 |
+| 1601–1920px | 260px | 64px | 320px | 4 |
+| >1920px     | 280px | 64px | 360px | 5 |
+
+- The Workspace region always receives whatever width remains after Sidebar and Inspector are subtracted from the window width — it is never given a fixed or percentage value of its own.
+- Gallery columns (§6.6) reflow automatically based on available Workspace width, independent of the breakpoint table, but the table above gives expected defaults at common resolutions.
+- Fonts and spacing remain constant across breakpoints; elements reflow rather than scale down.
+
+---
+
+## 10. Multi-Monitor Support
+
+**Purpose:** REX is a desktop customization tool; multi-monitor setups are a primary use case, not an edge case, so this section defines how monitor topology surfaces across the shell.
+
+### 10.1 Monitor Topology View
+- Located in Settings > Display (§5.6), and reachable from the Top Bar Monitor Selector (§10.4).
+- Renders each detected display as a simplified rectangle, arranged to match the physical arrangement configured in Windows, labeled "Monitor 1", "Monitor 2", etc., with resolution and a "Primary" indicator on the primary display.
+- Purely informational in Phase 0/1 — dragging monitors to rearrange them is deferred to the native Windows display settings (linked from this view) rather than duplicated here.
+
+### 10.2 Per-Monitor Wallpaper Assignment (Wallpaper Studio)
+- The Inspector (§5.2) includes an "Assigned Monitor" dropdown: **All Monitors**, **Monitor 1**, **Monitor 2**, … or **Span Across All** (a single scene stretched across the combined virtual canvas).
+- The thumbnail context menu's "Apply to Monitor >" submenu mirrors the same options.
+- When more than one display is detected, the Live Preview shows a tab strip — **[All] [Monitor 1] [Monitor 2]** — so the user can preview what each specific display will show.
+
+### 10.3 Per-Monitor Widget Placement (Widgets Page)
+- The Desktop Preview (§5.3) becomes tabbed by monitor when multiple displays are detected: **[Monitor 1] [Monitor 2] … [All (overview)]**.
+- Widget placement always happens on one monitor's tab. The "All (overview)" tab is read-only, showing a combined layout for reference.
+- The widget Inspector's "Position" field includes the monitor index alongside coordinates (e.g., "Monitor 2 — 100, 200").
+
+### 10.4 Top Bar Monitor Selector
+- Appears in the Top Bar (§2.1, right section) only when more than one display is detected.
+- Clicking it opens a popover with a compact version of the Monitor Topology view and a shortcut link to Settings > Display.
+
+### 10.5 Hot-Plug Behavior
+- Disconnecting a monitor does not delete its assigned wallpapers or widgets. They are marked **"Offline"** in their respective Inspectors and automatically restored when a monitor with a matching identity (via EDID) reconnects.
+- A toast notifies the user on disconnect, e.g., "Monitor 2 disconnected — its wallpaper and widgets are paused."
+
+---
+
+## 11. Widget & Marketplace Content Rendering (Trust Boundary)
+
+**Purpose:** Widgets and web/shader wallpapers involve third-party code. This section defines exactly when content is a static asset versus live, sandboxed execution, since it directly affects how the Marketplace, Widgets Page, and Wallpaper Studio must be implemented against the per-process Job Object sandboxing architecture.
+
+### 11.1 Marketplace Product Cards & Detail Panel
+- Grid thumbnails and Detail panel preview media (§5.4) are static assets (images or short video clips) supplied by the author at publish time and served from the marketplace CDN.
+- No third-party code executes while browsing the Marketplace — this holds even for unreviewed ("Community") listings.
+
+### 11.2 Widget Library Cards (Pre-Install)
+- Widget Library cards on the Widgets Page (§5.3), shown before installation, reuse the same static preview assets as the Marketplace. No sandboxed process is spawned until a widget is actually placed or installed.
+
+### 11.3 Installed Widgets — Live Rendering
+- Once placed on the Desktop Preview or the real desktop, a widget runs as live TypeScript/V8 in its own sandboxed process (per-process Job Object, per the locked ADR).
+- The Desktop Preview canvas renders the widget's actual live output through the same IPC/compositor path used on the real desktop — what's shown in Preview is what the user gets, not a mock.
+- If a widget process crashes or exceeds its resource quota, its tile shows a Skeleton (§6.17) with an Error Badge (§6.16) and a "Restart" action instead of disappearing.
+
+### 11.4 Wallpapers — Live Rendering
+- Video and Image wallpaper types are decoded and rendered directly (no sandboxing needed — no arbitrary code).
+- Web and Shader/Scene wallpaper types execute in a sandboxed renderer process. The Wallpaper Studio Live Preview (§5.2) reflects this sandboxed output, matching real-desktop behavior.
+
+### 11.5 Trust Indicators
+- The Marketplace Detail panel (§5.4) shows a **Verified** or **Community** Badge (§6.16) so users can make an informed choice before installing third-party code. "Verified" indicates the listing passed REX's review process; "Community" indicates it has not.
+
+---
+
+## 12. Drag-and-Drop Behavior
+
+### 12.1 Importing Wallpapers
+- Image/video files can be dragged from Windows Explorer directly onto the Wallpaper Studio Library Strip or Live Preview.
+- A dashed drop-zone outline appears on drag-enter. Dropping imports the file(s) into the "Local" collection and selects the first imported item.
+
+### 12.2 Installing Widgets from the Marketplace
+- Marketplace product cards (§5.4) are draggable. Dropping a card directly onto the real desktop (outside the app window) triggers an install-and-place flow: the widget installs, then is placed at the drop coordinates on the appropriate monitor.
+- Dropping a card onto the Widgets Page Desktop Preview (§5.3) behaves identically but keeps the user inside the app.
+
+### 12.3 Placing Widgets from the Library
+- Dragging a card from the Widget Library strip (§5.3) onto the Desktop Preview places that widget.
+- A dashed highlight rectangle previews the widget's footprint before release, snapping to an 8px soft grid.
+
+### 12.4 General Drag Affordances
+- Any draggable item shows a semi-transparent "ghost" of itself following the cursor, with a 4px drop-shadow.
+- Valid drop targets highlight with a 2px dashed `Accent.Primary` border on drag-enter; invalid targets show a "no-drop" cursor and do not highlight.
+- Drops are cancelable via `Esc` while dragging.
+
+---
+
+## 13. Accessibility
+
+### 13.1 Contrast
+- Any text rendered over a `Glass.*` surface must meet a minimum **4.5:1 contrast ratio (WCAG AA)** against the effective blended color — tint plus whatever is visible behind it — not just the nominal tint color in isolation.
+- Where dynamic wallpaper content could push contrast below this floor (see §7, Contrast Floor), the shell automatically increases tint opacity behind text-bearing regions until the floor is restored.
+
+### 13.2 Keyboard Navigation
+- All interactive elements are in the tab order. Focus indicators are 2px `Accent.Primary` outlines.
+- Dialogs (§6.11), the Command Palette (§4.2), and the Notification Center (§4.3) trap keyboard focus while open: `Tab`/`Shift+Tab` cycle only within the overlay, and focus returns to the triggering element on close.
+
+### 13.3 Screen Readers
+- All components have accessible names (equivalent to `aria-label` in native code). Module pages use proper heading hierarchy.
+- Toasts (§6.12) and newly-arrived Notification Center items (§4.3) are announced via a polite live region, so screen reader users are informed without their current reading being interrupted.
+
+### 13.4 High Contrast Mode
+- Glass effects are replaced with solid colors from the high contrast system palette.
+
+### 13.5 Reduced Motion
+- All spring-driven animations listed in §8 are disabled; transitions become instant.
+- This also includes the **Parallax Effect** and **Dynamic Tint** shift described in §7 — both are motion effects even though they don't route through the spring system, and are disabled under this setting as well.
+
+### 13.6 Font Scaling
+- Respects the system font scale setting; all typography tokens scale proportionally.
+
+---
+
+## 14. Theming
+
+### 14.1 Dark Theme (Default)
+- Backgrounds: dark charcoal (#0C0C0D)
+- Glass: dark tint, high blur
+- Text: white primary, gray secondary
+- Accent: cyan (#60CDFF)
+
+### 14.2 Light Theme
+- Backgrounds: light gray (#F3F3F3)
+- Glass: light tint, same blur radii
+- Text: dark primary, medium secondary
+- Accent: blue (#0078D4)
+
+### 14.3 Semantic Status Colors
+
+| Token             | Dark Theme | Light Theme | Usage                                                   |
+|--------------------|------------|-------------|----------------------------------------------------------|
+| `Status.Success`   | #6CCB5F    | #107C10     | Success toasts, badges, completed states                 |
+| `Status.Warning`   | #FCE100    | #9D5D00     | Warning toasts, badges, degraded states                   |
+| `Status.Error`     | #FF6161    | #C42B1C     | Error toasts, badges, crashed-widget indicator (§11.3)     |
+| `Status.Info`      | #60CDFF    | #0078D4     | Informational toasts, neutral badges                       |
+
+All `Status.*` tokens are contrast-checked against both `Glass.Surface` and `Glass.Elevated` backgrounds at their respective blur/tint settings, to satisfy the contrast floor defined in §13.1.
+
+### 14.4 Custom Themes
+Users can create themes by overriding token values in a JSON file. Themes support inheritance. The Theme Editor (Phase 2) will provide a visual interface.
+
+---
+
+## 15. Default Keyboard Shortcuts (Canonical Reference)
+
+| Shortcut       | Action                                             | Scope            |
+|----------------|-----------------------------------------------------|------------------|
+| `Ctrl+1`–`Ctrl+9` | Jump to module (flat sidebar index)              | Global           |
+| `Ctrl+B`       | Toggle sidebar collapse                             | Global           |
+| `Ctrl+F`       | Focus search bar                                    | Global           |
+| `Ctrl+P`       | Open Command Palette                                | Global           |
+| `Esc`          | Close overlay / clear search / cancel drag          | Contextual       |
+| `Ctrl+I`       | Import wallpaper                                    | Home / Wallpaper Studio |
+| Arrow keys     | Navigate sidebar items (when focused)               | Sidebar          |
+| `Enter`        | Execute selected Command Palette entry              | Command Palette  |
+
+**Remapping & conflicts:** All shortcuts above are remappable via the KeybindRecorder (§6.24), found in Settings > Commands (§5.6). Assigning a combination already in use prompts the user to reassign or cancel. Two active bindings may never share the same combination within an overlapping scope: Global bindings conflict with every other binding; module-scoped bindings only conflict with other bindings inside that same module.
+
+---
+
+## 16. UI Workflows
+
+### 16.1 Apply a Wallpaper
+1. Navigate to Wallpapers.
+2. Browse library or search.
+3. Click a thumbnail → preview updates.
+4. Click "Apply" or double-click.
+5. Toast: "Wallpaper applied".
+6. Wallpaper engine loads and plays the scene.
+
+### 16.2 Install a Widget from Marketplace
+1. Open Marketplace.
+2. Filter by Widgets category.
+3. Click a widget card.
+4. Click "Install".
+5. Progress bar shows download.
+6. On completion, widget appears on desktop and toast confirms.
+
+### 16.3 Create a Profile
+1. Go to Profiles.
+2. Click "+ New".
+3. Name the profile (e.g., "Gaming").
+4. Optionally set triggers (e.g., launch "game.exe").
+5. Profile snapshots current wallpaper, widgets, theme.
+6. Toast: "Profile 'Gaming' created".
+
+### 16.4 Change Taskbar Transparency
+1. Navigate to Personalization > Taskbar.
+2. Toggle "Transparent" to On.
+3. Preview updates instantly.
+4. Click "Apply" to save permanently.
+
+### 16.5 Search for a Setting
+1. Press `Ctrl+F` or click the search bar.
+2. Type "dark mode".
+3. Results show the setting "Appearance > Theme".
+4. Click the result → Settings page opens with that setting highlighted.
+
+### 16.6 Assign a Wallpaper to a Specific Monitor
+1. In Wallpaper Studio, select a wallpaper.
+2. In the Inspector, open the "Assigned Monitor" dropdown.
+3. Choose a specific monitor, "All Monitors", or "Span Across All".
+4. The Live Preview tab strip updates to reflect the assignment.
+5. Toast: "Aurora.mp4 assigned to Monitor 2".
+
+### 16.7 Import a Wallpaper via Drag-and-Drop
+1. Drag an image or video file from Explorer over the Wallpaper Studio window.
+2. A drop-zone outline appears on the Library Strip.
+3. Release to drop; the file imports into "Local" and is auto-selected.
+4. Toast: "Imported Aurora.mp4".
+
+---
+
+## 17. Changelog
+
+### v1.1 (2026-07-27)
+- **Fixed:** Reconciled conflicting Sidebar/Inspector width figures across §1, §2, and §9. §9 (renamed "Responsive Breakpoints & Layout Sizing") is now the single authoritative source; percentages elsewhere are marked illustrative only.
+- **Added:** §10 Multi-Monitor Support — topology view, per-monitor wallpaper assignment, per-monitor widget placement, top bar monitor selector, hot-plug behavior.
+- **Added:** §11 Widget & Marketplace Content Rendering (Trust Boundary) — clarifies static vs. sandboxed-live content for Marketplace, Widget Library, installed widgets, and Web/Shader wallpapers; adds Verified/Community trust badges.
+- **Added:** §12 Drag-and-Drop Behavior — wallpaper import, Marketplace install-by-drop, widget placement drop affordances, general drag conventions.
+- **Expanded:** §13 Accessibility — contrast floor for text over glass, focus trapping for overlays, live-region announcements for toasts/notifications, explicit Reduced Motion scope (parallax + dynamic tint).
+- **Added:** §14.3 Semantic Status Colors — Success/Warning/Error/Info tokens for both themes, referenced by Badge and Toast components.
+- **Added:** §15 Default Keyboard Shortcuts (Canonical Reference) — consolidated keymap plus remapping/conflict rules.
+- **Added:** §16.6–16.7 workflows for monitor assignment and drag-and-drop import.
+- **Updated:** Notification Center (§4.3) — per-item dismiss, live-region announcement, explicit "known gap" note for per-category filtering (deferred to Phase 2).
+- **Updated:** Performance Page (§5.8) — added a "Reduce visual effects" toggle targeting shell chrome rendering cost, distinct from the existing wallpaper-pause toggles.
+
+### v1.0 (2025-07-27)
+- Initial complete specification.
+
+---
+
+*This UI Specification is the definitive guide for all visual and interactive aspects of REX. Every pixel, animation, and interaction must conform to this document.*

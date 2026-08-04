@@ -10,10 +10,9 @@
 #include "ConfigurationStore.hpp"
 #include "ModuleLoader.hpp"
 #include "PluginManifest.hpp"
+#include "UpdateManager.hpp"
 
 namespace rex::modules {
-
-class UpdateManager;
 
 class ModuleOrchestrator {
 public:

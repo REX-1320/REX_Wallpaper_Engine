@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
 
 # ─── vcpkg ────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,7 @@ set(GRAPHICS_SOURCES
     src/graphics/renderer/CommandQueue.cpp
     src/graphics/animation/animation_engine.cpp
     src/graphics/effects/effect_renderer.cpp
+    src/graphics/effects/NoiseTexture.cpp
     # Phase 1: GPU resource management
     src/graphics/resource/TextureCache.cpp
 )
@@ -119,6 +121,10 @@ set(SEARCH_SOURCES
     src/modules/Search/semantic/SemanticIndex.cpp
 )
 
+set(PROFILES_SOURCES
+    src/profiles/services/ProfileManager.cpp
+)
+
 set(NOTIFICATION_SOURCES
     src/modules/Notification/NotificationModule.cpp
     src/modules/Notification/services/NotificationService.cpp
@@ -131,12 +137,6 @@ set(NOTIFICATION_SOURCES
 )
 
 set(UI_SOURCES
-    src/modules/UI/UIModule.cpp
-    src/modules/UI/services/ThemeRegistry.cpp
-    src/modules/UI/services/TokenManager.cpp
-    src/modules/UI/services/ComponentRegistry.cpp
-    src/modules/UI/services/StyleResolver.cpp
-    src/modules/UI/services/ThemeService.cpp
 )
 
 set(SETTINGS_SOURCES
@@ -168,6 +168,29 @@ set(DESKTOP_PERSONALIZATION_SOURCES
     src/desktop_personalization/services/SettingsManager.cpp
 )
 
+set(WIDGET_SOURCES
+    src/modules/Widgets/WidgetModule.cpp
+    src/modules/Widgets/services/WidgetRegistry.cpp
+    src/modules/Widgets/services/WidgetHost.cpp
+    src/modules/Widgets/services/WidgetService.cpp
+    src/modules/Widgets/services/WidgetRuntime.cpp
+)
+
+set(PERSONALIZATION_SOURCES
+    src/modules/Personalization/PersonalizationModule.cpp
+    src/modules/Personalization/services/PersonalizationService.cpp
+    src/modules/Personalization/platform/WinTaskbarAdapter.cpp
+    src/modules/Personalization/platform/WinExplorerAdapter.cpp
+    src/modules/Personalization/platform/WinStartMenuAdapter.cpp
+)
+
+set(SYNC_SOURCES
+    src/modules/Sync/crypto/CryptoService.cpp
+    src/modules/Sync/storage/SyncStore.cpp
+    src/modules/Sync/transport/SyncRestClient.cpp
+    src/modules/Sync/engine/SyncEngine.cpp
+)
+
 add_executable(rex-core
     src/main.cpp
     ${PLATFORM_WINDOWS_SOURCES}
@@ -177,11 +200,14 @@ add_executable(rex-core
     ${IPC_SOURCES}
     ${MODULE_SOURCES}
     ${DESKTOP_PERSONALIZATION_SOURCES}
+    ${PROFILES_SOURCES}
     ${SETTINGS_SOURCES}
-    ${UI_SOURCES}
     ${NOTIFICATION_SOURCES}
     ${COMMAND_SOURCES}
     ${SEARCH_SOURCES}
+    ${WIDGET_SOURCES}
+    ${PERSONALIZATION_SOURCES}
+    ${SYNC_SOURCES}
 )
 
 set_target_properties(rex-core PROPERTIES
@@ -199,6 +225,10 @@ target_link_libraries(rex-core
         rex-shared
         fmt::fmt
         spdlog::spdlog
+        d2d1
+        dwrite
+        d3d11
+        dcomp
         d3d12
         dxgi
         dxguid
@@ -210,6 +240,7 @@ target_link_libraries(rex-core
         runtimeobject
         dwmapi
         winmm
+        crypt32
 )
 
 if(REX_ENABLE_MARKETPLACE)
@@ -220,6 +251,8 @@ if(REX_ENABLE_SIGNATURES)
     target_compile_definitions(rex-core PRIVATE REX_USE_OPENSSL)
     target_link_libraries(rex-core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif()
+
+target_compile_options(rex-core PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/Z7>)
 
 target_compile_definitions(rex-core
     PRIVATE
@@ -576,45 +609,6 @@ if(BUILD_TESTING)
     )
 
     gtest_discover_tests(rex-search-tests)
-
-    # UI module tests
-    set(UI_TEST_SOURCES
-        tests/ui/test_ui.cpp
-        src/modules/UI/services/ThemeRegistry.cpp
-        src/modules/UI/services/TokenManager.cpp
-        src/modules/UI/services/ComponentRegistry.cpp
-        src/modules/UI/services/StyleResolver.cpp
-        src/modules/UI/services/ThemeService.cpp
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest_main.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-assertion-result.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-death-test.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-filepath.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-matchers.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-port.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-printers.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-test-part.cc
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/src/gtest-typed-test.cc
-    )
-
-    add_executable(rex-ui-tests
-        ${UI_TEST_SOURCES}
-    )
-
-    target_include_directories(rex-ui-tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/include
-    )
-
-    target_link_libraries(rex-ui-tests PRIVATE
-        rex-shared
-        fmt::fmt
-        spdlog::spdlog
-    )
-
-    gtest_discover_tests(rex-ui-tests)
 endif()
 
 # ─── Install ───────────────────────────────────────────────────────────────
