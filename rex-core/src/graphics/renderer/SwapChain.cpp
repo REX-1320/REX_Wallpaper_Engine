@@ -67,8 +67,6 @@ shared::Result<void> SwapChain::Initialize(
             hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
     }
 
-    m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
-
     // Create RTV heap and render target views
     auto rtvResult = CreateRenderTargetViews(device);
     if (rtvResult.IsError()) {
@@ -118,8 +116,6 @@ shared::Result<void> SwapChain::Resize(
         return shared::Result<void>(shared::ErrorCode::DriverError,
                                     "ResizeBuffers failed");
     }
-
-    m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
     auto rtvResult = CreateRenderTargetViews(device);
     if (rtvResult.IsError()) {

@@ -32,6 +32,8 @@ private:
     HWND CreateRenderWindow(HWND parent, int width, int height);
     void ReparentToWorkerW(HWND renderWindow, HWND workerW);
     void MonitorExplorer();
+    bool ReacquireWorkerW();
+    bool VerifyWallpaperLayer();
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 

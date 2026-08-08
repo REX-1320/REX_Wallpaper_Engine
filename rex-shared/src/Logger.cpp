@@ -17,9 +17,10 @@ void Logger::Initialize(const std::string& logFilePath, LogLevel level) {
     if (m_initialized) return;
 
     try {
-        // Create console sink
+        // Create console sink (stdout is owned by the runtime frame protocol
+        // when running as a persistent runtime, so it must be skippable).
         auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        consoleSink->set_level(spdlog::level::trace);
+        consoleSink->set_level(m_consoleEnabled ? spdlog::level::trace : spdlog::level::off);
 
         // Create file sink
         auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logFilePath, true);
@@ -63,7 +64,14 @@ void Logger::SetLevel(LogLevel level) {
 }
 
 void Logger::SetConsoleOutput(bool enabled) {
-    // Handled by sinks
+    m_consoleEnabled = enabled;
+    if (!m_logger) return;
+    // Toggle the console sink level for post-init changes.
+    for (const auto& sink : m_logger->sinks()) {
+        if (dynamic_cast<spdlog::sinks::stdout_color_sink_mt*>(sink.get())) {
+            sink->set_level(enabled ? spdlog::level::trace : spdlog::level::off);
+        }
+    }
 }
 
 void Logger::SetFileOutput(bool enabled) {

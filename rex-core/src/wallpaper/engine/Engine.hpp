@@ -13,6 +13,7 @@
 #include "platform/windows/IDesktopHost.hpp"
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "wallpaper/playback/PlaybackController.hpp"
+#include <rex/wallpaper/IRendererAdapter.hpp>
 
 namespace rex::wallpaper {
 
@@ -23,7 +24,7 @@ public:
 
     shared::Result<void> Initialize(const WallpaperConfig& config) override;
     shared::Result<void> Shutdown() override;
-    EngineState GetState() const override { return m_state; }
+    EngineState GetState() const override { return m_state.load(std::memory_order_acquire); }
 
     shared::Result<void> LoadScene(const SceneInfo& scene) override;
     shared::Result<void> UnloadScene() override;
@@ -49,10 +50,15 @@ public:
     shared::Result<void> SetLoop(bool loop) override;
     shared::Result<void> SetSpeed(float speed) override;
 
+    shared::Result<void> SetProperty(const std::string& property, const std::string& value) override;
+    std::vector<std::string> GetSupportedProperties() const override;
+    std::string GetRendererType() const override;
+
     shared::Result<void> EnableAudioReactive(bool enable) override;
     shared::Result<void> SetAudioSensitivity(float sensitivity) override;
 
     void DumpStats() const override;
+    void GetTelemetry(EngineTelemetry& out) const override;
     shared::UUID GetSessionId() const override { return m_sessionId; }
 
 private:
@@ -62,7 +68,9 @@ private:
     shared::Result<void> ReinitializeRenderer();
     void CheckDisplayChanges();
 
-    EngineState m_state = EngineState::Uninitialized;
+    // Atomic so the render thread can safely read it while the command
+    // thread swaps scenes (UnloadScene/LoadScene) under the mutex.
+    std::atomic<EngineState> m_state{EngineState::Uninitialized};
     std::atomic<bool> m_playing{false};
     std::atomic<bool> m_loop{true};
     std::atomic<float> m_speed{1.0f};
@@ -86,16 +94,17 @@ private:
     int m_lastPrimaryWidth = 0;
     int m_lastPrimaryHeight = 0;
 
+    // Scene lifecycle counters (for the memory-retention diagnostics)
+    std::atomic<uint64_t> m_scenesLoaded{0};
+    std::atomic<uint64_t> m_scenesReleased{0};
+
     std::unique_ptr<rex::platform::windows::IDesktopHost> m_desktopHost;
     std::unique_ptr<D3D12Renderer> m_renderer;
     std::unique_ptr<PlaybackController> m_playback;
+    std::unique_ptr<IRendererAdapter> m_adapter;
     std::thread m_renderThread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_recoveryNeeded{false};
-
-    // Video frame pixel buffer — persists between render frames to avoid
-    // re-allocation on every Tick -> UpdateTexturePixels call.
-    std::vector<uint8_t> m_videoFramePixels;
 };
 
 } // namespace rex::wallpaper

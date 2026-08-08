@@ -1,6 +1,7 @@
 # Build outputs
 build/
 rex-core/build/
+rex-core/.build/
 rex-core/src/generated/
 **/bin/
 **/obj/

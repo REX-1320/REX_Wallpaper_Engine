@@ -12,7 +12,7 @@ PlaybackController::~PlaybackController() {
     Close();
 }
 
-shared::Result<void> PlaybackController::Open(std::string_view path) {
+shared::Result<void> PlaybackController::Open(std::string_view path, bool useHardware) {
     std::lock_guard lock(m_threadMutex);
 
     if (m_decoder->IsOpen()) {
@@ -23,7 +23,7 @@ shared::Result<void> PlaybackController::Open(std::string_view path) {
         m_decoder->Close();
     }
 
-    auto result = m_decoder->Open(path);
+    auto result = m_decoder->Open(path, useHardware);
     if (result.IsError()) {
         return result;
     }
@@ -46,6 +46,9 @@ shared::Result<void> PlaybackController::Open(std::string_view path) {
         m_ring[i].rowPitch   = m_width * 4;
         m_ring[i].format     = DXGI_FORMAT_R8G8B8A8_UNORM;
     }
+
+    m_telemetry.ringSlotCount = kNumRingSlots;
+    m_telemetry.ringBytes = static_cast<uint64_t>(kNumRingSlots) * frameBytes;
 
     REX_LOG_INFO("Playback", "Opened video: {}x{} @ {:.2f} fps, {:.2f}s, {}B/frame",
                  m_width, m_height, m_frameRate, m_duration, frameBytes);
@@ -83,6 +86,8 @@ void PlaybackController::Play() {
 
     // Reset telemetry for new playback session
     m_telemetry = PlaybackTelemetry{};
+    m_telemetry.ringSlotCount = kNumRingSlots;
+    m_telemetry.ringBytes     = static_cast<uint64_t>(kNumRingSlots) * m_width * m_height * 4;
     m_decoderFrameCount  = 0;
     m_consumerFrameCount = 0;
     m_fpsStartTime = Clock::now();
@@ -130,13 +135,13 @@ double PlaybackController::GetPosition() const {
 
 // ─── Consumer (render thread) ────────────────────────────────────────────
 
-DecodedFrame PlaybackController::Tick() {
+const DecodedFrame* PlaybackController::Tick() {
     uint64_t wc = m_writeCount.load(std::memory_order_acquire);
 
     if (wc == 0 || wc == m_lastReadCount) {
         // No new frame since last Tick (SPSC invariant: this means the
         // producer hasn't written to our slot yet).
-        return DecodedFrame{};
+        return nullptr;
     }
 
     // ── Track dropped frames ──────────────────────────────────────────────
@@ -150,16 +155,10 @@ DecodedFrame PlaybackController::Tick() {
     // Read slot (wc - 1) % kNumRingSlots — guaranteed distinct from the
     // producer's current slot (wc % 3) under the SPSC invariant.
     uint64_t slot = (wc - 1) % kNumRingSlots;
-    const DecodedFrame& src = m_ring[slot];
-
-    // Deep-copy pixel data (~8 MB for 1080p). The caller (Engine render
-    // loop) must memcpy this into a GPU upload buffer anyway, so the
-    // extra copy is unavoidable at this architecture level.
-    DecodedFrame result = src;
+    m_lastReadCount = wc;
 
     m_telemetry.framesConsumed++;
     m_consumerFrameCount++;
-    m_lastReadCount = wc;
 
     // Update consumer FPS (periodically)
     auto now = Clock::now();
@@ -172,7 +171,7 @@ DecodedFrame PlaybackController::Tick() {
         m_fpsStartTime = now;
     }
 
-    return result;
+    return &m_ring[slot];
 }
 
 shared::Result<void> PlaybackController::Seek(double seconds) {
@@ -239,15 +238,22 @@ void PlaybackController::DecoderThread() {
         lastFrameTime = now;
 
         // ── Decode one frame ───────────────────────────────────────────
-        VideoFrame videoFrame = m_decoder->ReadFrame();
+        // Decode directly into the ring slot we are about to publish.
+        // DecodedFrame& dst below is pre-reserved in Open(); the decoder
+        // writes into dst.pixels without any intermediate allocation, so
+        // this is a true zero-copy handoff (MF sample → CPU convert →
+        // ring slot → GPU upload).
+        uint64_t wc = m_writeCount.load(std::memory_order_relaxed);
+        int slot = static_cast<int>(wc % kNumRingSlots);
+        DecodedFrame& dst = m_ring[slot];
 
-        if (!videoFrame.valid) {
+        if (!m_decoder->ReadFrame(dst)) {
             // EOF — restart or stop
             if (m_looping.load(std::memory_order_relaxed)) {
                 m_decoder->Seek(0.0);
-                videoFrame = m_decoder->ReadFrame();
-                if (!videoFrame.valid) {
+                if (!m_decoder->ReadFrame(dst)) {
                     REX_LOG_WARN("Playback", "EOF loop: decoder returned invalid frame");
+                    dst.valid = false;
                     continue;
                 }
             } else {
@@ -261,19 +267,11 @@ void PlaybackController::DecoderThread() {
         // Under the SPSC invariant, the producer writes to slot (wc % 3)
         // while the consumer only reads from slot ((wc - 1) % 3), so
         // these indices are always distinct. No atomic CAS needed.
-        uint64_t wc = m_writeCount.load(std::memory_order_relaxed);
-        int slot = static_cast<int>(wc % kNumRingSlots);
-
         {
-            DecodedFrame& dst = m_ring[slot];
-
-            // Move pixel data — avoids a large vector reallocation
-            dst.pixels       = std::move(videoFrame.pixels);
-            dst.width        = videoFrame.width;
-            dst.height       = videoFrame.height;
-            dst.rowPitch     = videoFrame.rowPitch;
-            dst.format       = videoFrame.format;
-            dst.timestampHns = videoFrame.timestampHns;
+            dst.width        = m_decoder->GetWidth();
+            dst.height       = m_decoder->GetHeight();
+            dst.rowPitch     = m_decoder->GetWidth() * 4;
+            dst.format       = DXGI_FORMAT_R8G8B8A8_UNORM;
             dst.valid        = true;
 
             if (dst.pixels.empty() && dst.width > 0 && dst.height > 0) {
@@ -286,7 +284,7 @@ void PlaybackController::DecoderThread() {
         m_writeCount.store(wc + 1, std::memory_order_release);
 
         // Track current position in seconds (from 100-ns timestamp)
-        double posSec = static_cast<double>(videoFrame.timestampHns) / 10000000.0;
+        double posSec = static_cast<double>(dst.timestampHns) / 10000000.0;
         m_currentPosition.store(posSec, std::memory_order_relaxed);
 
         m_telemetry.framesDecoded++;

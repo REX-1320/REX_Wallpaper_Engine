@@ -219,7 +219,11 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
                                     "Invalid pixel data");
     }
 
-    std::lock_guard<std::mutex> lock(m_renderMutex);
+    // NOTE: no m_renderMutex lock here on purpose. The only caller
+    // (Engine::RenderLoop) invokes this between BeginFrame() and
+    // EndFrame(), which already hold the mutex for the whole frame.
+    // Recursive locking on the render thread would throw
+    // std::system_error (MSVC detects the re-lock) and abort the process.
     ID3D12Device* dev = m_device.Get();
 
     if (!m_texture || m_texWidth != width || m_texHeight != height) {
@@ -228,6 +232,7 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
             m_texture.Reset();
             m_textureUploadBuffer.Reset();
         }
+        m_textureRecreations++;
 
         D3D12_HEAP_PROPERTIES heapProps = {};
         heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -250,7 +255,15 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
                                         "Failed to create video texture");
         }
 
-        UINT64 uploadSize = static_cast<UINT64>(rowPitch) * height;
+        // Row pitch of a buffer -> texture copy must be aligned to
+        // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT (256). Decoder row pitches
+        // (e.g. 2706*4 = 10824) rarely are, so pad each row in the
+        // upload buffer and use the aligned pitch in the footprint.
+        const UINT64 alignedPitch =
+            (static_cast<UINT64>(rowPitch) + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1)
+            & ~(static_cast<UINT64>(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) - 1);
+
+        UINT64 uploadSize = alignedPitch * height;
         uploadSize = (uploadSize + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1)
                    & ~(static_cast<UINT64>(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT) - 1);
 
@@ -287,6 +300,9 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
         m_texWidth  = width;
         m_texHeight = height;
         m_hasTexture = true;
+
+        m_textureBytes = static_cast<uint64_t>(width) * height * 4;
+        m_uploadBytes  = uploadSize;
     }
 
     // Copy pixels to upload buffer
@@ -300,10 +316,13 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     {
         const uint8_t* src = pixels;
         uint8_t* dst = static_cast<uint8_t*>(mapped);
+        const UINT64 alignedPitch =
+            (static_cast<UINT64>(rowPitch) + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1)
+            & ~(static_cast<UINT64>(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) - 1);
         for (int row = 0; row < height; ++row) {
             memcpy(dst, src, static_cast<size_t>(rowPitch));
             src += rowPitch;
-            dst += rowPitch;
+            dst += alignedPitch;
         }
     }
     m_textureUploadBuffer->Unmap(0, nullptr);
@@ -336,7 +355,10 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     srcLoc.PlacedFootprint.Footprint.Width    = static_cast<UINT>(width);
     srcLoc.PlacedFootprint.Footprint.Height   = static_cast<UINT>(height);
     srcLoc.PlacedFootprint.Footprint.Depth    = 1;
-    srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
+    srcLoc.PlacedFootprint.Footprint.RowPitch =
+        static_cast<UINT>((static_cast<UINT64>(rowPitch)
+            + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1)
+            & ~(static_cast<UINT64>(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) - 1));
 
     copyList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
 
@@ -351,6 +373,8 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     copyList->Close();
     m_commandQueue.Execute(copyList.Get());
     m_commandQueue.WaitForGPU();
+
+    m_uploads++;
 
     return shared::Result<void>();
 }
@@ -458,6 +482,12 @@ void D3D12Renderer::EndFrame() {
     } else if (hr != S_OK) {
         REX_LOG_INFO("D3D12", "Present returned non-S_OK: 0x{:08x}",
                     static_cast<unsigned long>(hr));
+    } else {
+        static thread_local int s_presentCount = 0;
+        s_presentCount++;
+        if (s_presentCount == 1 || s_presentCount % 600 == 0) {
+            REX_LOG_INFO("D3D12", "Present OK (frame count: {})", s_presentCount);
+        }
     }
 
     m_commandQueue.Signal();

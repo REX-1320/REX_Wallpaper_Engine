@@ -5,7 +5,11 @@
   "description": "REX UI framework — Phase 1: Surface System (architecture only)",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev": "pnpm --dir app dev",
+    "build": "pnpm --dir app build",
+    "preview": "pnpm --dir app preview",
+    "lint": "pnpm --dir app lint"
   },
   "dependencies": {
     "react": "^19.1.0",

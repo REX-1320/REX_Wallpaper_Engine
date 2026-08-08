@@ -91,6 +91,38 @@ struct WallpaperConfig {
     float audioSensitivity    = 0.5f;
 };
 
+// ─── EngineTelemetry ────────────────────────────────────────────────────────
+//
+// Live counters for diagnosing memory/CPU retention in the native runtime.
+// All values are snapshots of atomics/counters; nothing here blocks.
+
+struct EngineTelemetry {
+    // Decoder / playback pipeline
+    uint64_t framesDecoded   = 0;
+    uint64_t framesConsumed  = 0;
+    uint64_t framesDropped   = 0;
+    double   decoderFps      = 0.0;
+    double   renderFps       = 0.0;
+    int      videoWidth      = 0;
+    int      videoHeight     = 0;
+    uint64_t ringSlotCount   = 0;
+    uint64_t ringBytes       = 0;  // sum of ring slot pixel capacities
+
+    // GPU (D3D12)
+    uint64_t textureBytes    = 0;  // video texture committed bytes
+    uint64_t uploadBytes     = 0;  // upload buffer bytes
+    uint64_t textureRecreations = 0;  // texture re-creations (size changes)
+    uint64_t uploads         = 0;  // total texture uploads performed
+    uint64_t allocatorsPerFrame = 0; // command allocators created per upload
+
+    // Scenes
+    uint64_t scenesLoaded    = 0;
+    uint64_t scenesReleased  = 0;
+
+    // Process
+    double   privateBytesMB  = 0.0;
+};
+
 // ─── IWallpaperEngine ──────────────────────────────────────────────────────
 
 class IWallpaperEngine : public IRuntime {
@@ -128,12 +160,30 @@ public:
     virtual shared::Result<void> SetLoop(bool loop) = 0;
     virtual shared::Result<void> SetSpeed(float speed) = 0;
 
+    // ─── Renderer Adapter ────────────────────────────────────────────────
+    /// Applies a runtime property ("fillMode", "volume", "speed", "loop",
+    /// ...) to the active renderer adapter. Returns an error when the
+    /// property is unknown or unsupported by the active renderer, so
+    /// callers never silently no-op.
+    virtual shared::Result<void> SetProperty(const std::string& property, const std::string& value) = 0;
+
+    /// Properties the active renderer can apply (empty when no scene loaded).
+    virtual std::vector<std::string> GetSupportedProperties() const = 0;
+
+    /// Active renderer type name ("static", "video", ... or "none").
+    virtual std::string GetRendererType() const = 0;
+
     // ─── Audio ───────────────────────────────────────────────────────────
     virtual shared::Result<void> EnableAudioReactive(bool enable) = 0;
     virtual shared::Result<void> SetAudioSensitivity(float sensitivity) = 0;
 
     // ─── Debug ────────────────────────────────────────────────────────────
     virtual void DumpStats() const = 0;
+
+    // ─── Telemetry ────────────────────────────────────────────────────────
+    /// Snapshot of live allocation counters (decoder/ring/GPU/scenes).
+    /// Cheap and non-blocking; safe to call from any thread.
+    virtual void GetTelemetry(EngineTelemetry& out) const = 0;
 };
 
 // ─── Factory ───────────────────────────────────────────────────────────────

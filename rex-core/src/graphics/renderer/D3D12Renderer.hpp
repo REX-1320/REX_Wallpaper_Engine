@@ -10,6 +10,7 @@
 #include <rex/wallpaper/IWallpaperEngine.hpp>
 
 #include <mutex>
+#include <atomic>
 #include <string_view>
 
 namespace rex::wallpaper {
@@ -51,6 +52,13 @@ public:
 
     bool IsInitialized()   const { return m_initialized; }
     bool IsDeviceRemoved() const { return m_deviceRemoved; }
+
+    // ─── Telemetry counters (for the memory-retention diagnostics) ─────
+    uint64_t GetTextureBytes()        const { return m_textureBytes; }
+    uint64_t GetUploadBytes()         const { return m_uploadBytes; }
+    uint64_t GetTextureRecreations()  const { return m_textureRecreations; }
+    uint64_t GetUploadCount()         const { return m_uploads; }
+    uint64_t GetAllocatorsPerUpload() const { return m_allocatorsPerUpload; }
 
     // ─── Access to shared graphics primitives ──────────────────────────
     graphics::Device&       GetDevice()       { return m_device; }
@@ -105,6 +113,13 @@ private:
 
     // ─── Thread safety ────────────────────────────────────────────────
     mutable std::mutex m_renderMutex;
+
+    // ─── Telemetry ─────────────────────────────────────────────────────
+    std::atomic<uint64_t> m_textureBytes{0};
+    std::atomic<uint64_t> m_uploadBytes{0};
+    std::atomic<uint64_t> m_textureRecreations{0};
+    std::atomic<uint64_t> m_uploads{0};
+    std::atomic<uint64_t> m_allocatorsPerUpload{2}; // copy list + render frame
 
     // ─── Vertex layout ────────────────────────────────────────────────
     struct Vertex { float x, y, u, v; };

@@ -1,0 +1,68 @@
+.mica-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+}
+
+.mica-blobs {
+  position: absolute;
+  inset: 0;
+}
+
+.mica-blob {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, var(--mica-blob), transparent 70%);
+  filter: blur(40px);
+}
+
+.mica-blob:nth-child(1) {
+  width: 60vmax;
+  height: 60vmax;
+  left: -15vmax;
+  top: -15vmax;
+}
+
+.mica-blob:nth-child(2) {
+  width: 55vmax;
+  height: 55vmax;
+  right: -10vmax;
+  top: 5vmax;
+}
+
+.mica-blob:nth-child(3) {
+  width: 50vmax;
+  height: 50vmax;
+  left: 20vmax;
+  bottom: -20vmax;
+}
+
+.mica-blob:nth-child(4) {
+  width: 40vmax;
+  height: 40vmax;
+  right: 20vmax;
+  bottom: -10vmax;
+}
+
+.mica-frost {
+  position: absolute;
+  inset: 0;
+  backdrop-filter: blur(48px) saturate(150%);
+  -webkit-backdrop-filter: blur(48px) saturate(150%);
+  background: var(--mica-tint);
+  opacity: var(--mica-tint-opacity, 0.55);
+}
+
+.mica-backdrop.acrylic .mica-frost {
+  backdrop-filter: blur(72px) saturate(180%);
+  -webkit-backdrop-filter: blur(72px) saturate(180%);
+}
+
+.mica-noise {
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+}

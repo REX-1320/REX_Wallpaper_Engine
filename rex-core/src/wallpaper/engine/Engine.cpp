@@ -3,6 +3,8 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include <cstdlib>
+#include <psapi.h>
 
 namespace rex::wallpaper {
 
@@ -116,6 +118,7 @@ shared::Result<void> Engine::Shutdown() {
 
     m_playback.reset();
     m_renderer.reset();
+    m_adapter.reset();
     m_desktopHost->Release();
     m_desktopHost.reset();
 
@@ -162,6 +165,10 @@ shared::Result<void> Engine::ReinitializeRenderer() {
         return result;
     }
 
+    // LoadScene only accepts Initialized/Stopped states; the engine is in
+    // Error during recovery, so move to Initialized before reloading.
+    SetState(EngineState::Initialized);
+
     // Reload scene
     if (!m_currentScene.sourcePath.empty()) {
         auto loadResult = LoadScene(m_currentScene);
@@ -186,8 +193,14 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
     REX_LOG_INFO("Engine", "Loading scene: {} (type: {}, path: {})",
                  scene.name.c_str(), scene.type.c_str(), scene.sourcePath.c_str());
 
+    m_scenesLoaded.fetch_add(1, std::memory_order_relaxed);
     m_currentScene = scene;
     m_currentPosition = 0.0;
+
+    // Activate the renderer adapter for this scene type. Every later
+    // SetProperty call is gated by what the adapter supports, so
+    // unsupported properties fail loudly instead of silently no-oping.
+    m_adapter = CreateRendererAdapter(scene.type);
 
     // Load texture / video based on scene type
     if (scene.type == "static" && m_renderer && !scene.sourcePath.empty()) {
@@ -198,11 +211,16 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
         }
     } else if (scene.type == "video" && !scene.sourcePath.empty()) {
         m_playback = std::make_unique<PlaybackController>();
-        auto videoResult = m_playback->Open(scene.sourcePath);
+        auto videoResult = m_playback->Open(scene.sourcePath,
+                                            m_config.enableHardwareAcceleration);
         if (videoResult.IsError()) {
             REX_LOG_WARN("Engine", "Failed to open video '{}': {}",
                          scene.sourcePath.c_str(), videoResult.Error().message);
             m_playback.reset();
+        } else {
+            // Apply scene-level playback settings immediately.
+            m_playback->SetLoop(scene.loop);
+            m_playback->SetSpeed(std::clamp(scene.speed, 0.25f, 4.0f));
         }
     }
 
@@ -215,6 +233,8 @@ shared::Result<void> Engine::UnloadScene() {
 
     REX_LOG_INFO("Engine", "Unloading scene");
 
+    m_scenesReleased.fetch_add(1, std::memory_order_relaxed);
+
     if (m_playback) {
         m_playback->Close();
         m_playback.reset();
@@ -224,6 +244,7 @@ shared::Result<void> Engine::UnloadScene() {
         m_renderer->ClearTexture();
     }
 
+    m_adapter.reset();
     m_playing = false;
     m_currentScene = SceneInfo{};
     m_currentPosition = 0.0;
@@ -418,6 +439,9 @@ shared::Result<void> Engine::SetVolume(float value) {
 shared::Result<void> Engine::SetLoop(bool loop) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_loop = loop;
+    if (m_playback) {
+        m_playback->SetLoop(loop);
+    }
     REX_LOG_DEBUG("Engine", "Loop set to {}", loop ? "true" : "false");
     return shared::Result<void>();
 }
@@ -425,8 +449,65 @@ shared::Result<void> Engine::SetLoop(bool loop) {
 shared::Result<void> Engine::SetSpeed(float speed) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_speed = std::clamp(speed, 0.25f, 4.0f);
+    if (m_playback) {
+        m_playback->SetSpeed(m_speed.load());
+    }
     REX_LOG_DEBUG("Engine", "Speed set to {:.2f}", m_speed.load());
     return shared::Result<void>();
+}
+
+// ─── Renderer Adapter ────────────────────────────────────────────────────
+
+shared::Result<void> Engine::SetProperty(const std::string& property, const std::string& value) {
+    bool supported = false;
+    std::string rendererType;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_adapter) {
+            return shared::Result<void>(shared::ErrorCode::InvalidState,
+                "No scene loaded; no renderer adapter active");
+        }
+        supported = m_adapter->Supports(property);
+        rendererType = std::string(m_adapter->GetType());
+    }
+
+    if (!supported) {
+        return shared::Result<void>(shared::ErrorCode::UnsupportedFormat,
+            "Property '" + property + "' is not supported by the " + rendererType + " renderer");
+    }
+
+    if (property == "fillMode") {
+        auto mode = ParseFillMode(value);
+        if (!mode) {
+            return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+                "Unknown fill mode: " + value);
+        }
+        return SetFillMode(*mode);
+    }
+    if (property == "volume") {
+        return SetVolume(static_cast<float>(std::atof(value.c_str())));
+    }
+    if (property == "speed") {
+        return SetSpeed(static_cast<float>(std::atof(value.c_str())));
+    }
+    if (property == "loop") {
+        return SetLoop(value == "true" || value == "1");
+    }
+
+    return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+        "Unknown property: " + property);
+}
+
+std::vector<std::string> Engine::GetSupportedProperties() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_adapter) return {};
+    return m_adapter->GetSupportedProperties();
+}
+
+std::string Engine::GetRendererType() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_adapter) return "none";
+    return std::string(m_adapter->GetType());
 }
 
 shared::Result<void> Engine::EnableAudioReactive(bool enable) {
@@ -443,11 +524,50 @@ shared::Result<void> Engine::SetAudioSensitivity(float sensitivity) {
     return shared::Result<void>();
 }
 
+void Engine::GetTelemetry(EngineTelemetry& out) const {
+    out = EngineTelemetry{};
+
+    if (m_playback) {
+        PlaybackTelemetry pt = m_playback->GetTelemetry();
+        out.framesDecoded  = pt.framesDecoded;
+        out.framesConsumed = pt.framesConsumed;
+        out.framesDropped  = pt.framesDropped;
+        out.decoderFps     = pt.decoderFps;
+        out.renderFps      = pt.renderFps;
+        out.ringSlotCount  = pt.ringSlotCount;
+        out.ringBytes      = pt.ringBytes;
+    }
+    if (m_renderer) {
+        out.textureBytes    = m_renderer->GetTextureBytes();
+        out.uploadBytes     = m_renderer->GetUploadBytes();
+        out.textureRecreations = m_renderer->GetTextureRecreations();
+        out.uploads         = m_renderer->GetUploadCount();
+        out.allocatorsPerFrame = m_renderer->GetAllocatorsPerUpload();
+    }
+
+    out.videoWidth   = 0;
+    out.videoHeight  = 0;
+    if (m_playback && m_currentScene.type == "video") {
+        out.videoWidth  = m_playback->GetWidth();
+        out.videoHeight = m_playback->GetHeight();
+    }
+
+    out.scenesLoaded   = m_scenesLoaded.load(std::memory_order_relaxed);
+    out.scenesReleased = m_scenesReleased.load(std::memory_order_relaxed);
+
+    PROCESS_MEMORY_COUNTERS_EX pmc = {};
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(),
+            reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&pmc), sizeof(pmc))) {
+        out.privateBytesMB = static_cast<double>(pmc.PrivateUsage)
+                           / (1024.0 * 1024.0);
+    }
+}
+
 void Engine::DumpStats() const {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     REX_LOG_INFO("Engine", "=== Engine Stats ===");
-    REX_LOG_INFO("Engine", "  State:           {}", static_cast<int>(m_state));
+    REX_LOG_INFO("Engine", "  State:           {}", static_cast<int>(m_state.load(std::memory_order_acquire)));
     REX_LOG_INFO("Engine", "  Playing:         {}", m_playing ? "true" : "false");
     REX_LOG_INFO("Engine", "  Loop:            {}", m_loop ? "true" : "false");
     REX_LOG_INFO("Engine", "  Speed:           {:.2f}", m_speed.load());
@@ -530,7 +650,7 @@ void Engine::CheckDisplayChanges() {
 }
 
 void Engine::SetState(EngineState state) {
-    m_state = state;
+    m_state.store(state, std::memory_order_release);
     REX_LOG_DEBUG("Engine", "State changed to {}", static_cast<int>(state));
 }
 
@@ -559,11 +679,13 @@ void Engine::RenderLoop() {
         // contention.
         if (m_recoveryNeeded.exchange(false)) {
             REX_LOG_INFO("Engine", "WorkerW recovery requested, reinitializing...");
+            bool wasPlaying = m_playing.load();
             SetState(EngineState::Error);
             m_recoveryCount++;
 
             auto recoveryResult = ReinitializeRenderer();
             if (recoveryResult.IsSuccess()) {
+                if (wasPlaying) Play();
                 m_frameCount = 0;
             }
             continue;
@@ -588,26 +710,28 @@ void Engine::RenderLoop() {
             m_renderer->BeginFrame();
 
             // ── Video frame update ──────────────────────────────────────
+            // Tick() returns a pointer into the playback ring buffer
+            // (SPSC-guaranteed valid until the producer wraps around);
+            // the pixel data is uploaded synchronously before the pointer
+            // is dropped, so no per-frame copies are needed.
             if (m_state == EngineState::Running && m_playback
                 && m_currentScene.type == "video") {
-                DecodedFrame frame = m_playback->Tick();
-                if (frame.valid && m_renderer) {
+                const DecodedFrame* frame = m_playback->Tick();
+                if (frame && frame->valid && m_renderer) {
                     m_renderer->UpdateTexturePixels(
-                        frame.pixels.data(),
-                        frame.width,
-                        frame.height,
-                        frame.rowPitch);
+                        frame->pixels.data(),
+                        frame->width,
+                        frame->height,
+                        frame->rowPitch);
                 }
             }
 
-            // ── Clear color (animated when no texture loaded) ─────────
+            // ── Clear color (static dark until texture is loaded) ──────
+            // Previously animated RGB here produced the "different colors"
+            // the user saw instead of the video. Keep it static/neutral.
             if (m_state == EngineState::Running
                 && !m_renderer->HasTexture()) {
-                float time = static_cast<float>(GetPosition());
-                float r = 0.1f + 0.4f * (0.5f + 0.5f * sin(time * 0.5f));
-                float g = 0.1f + 0.4f * (0.5f + 0.5f * sin(time * 0.7f + 1.0f));
-                float b = 0.1f + 0.4f * (0.5f + 0.5f * sin(time * 0.9f + 2.0f));
-                m_renderer->SetClearColor(r, g, b);
+                m_renderer->SetClearColor(0.02f, 0.02f, 0.02f);
             }
 
             m_renderer->RenderFrame();

@@ -51,8 +51,10 @@ public:
     /// Returns immediately if the waitable object was not created.
     void WaitForFrame() const;
 
-    /// Get current back buffer index.
-    UINT GetCurrentIndex() const { return m_frameIndex; }
+    /// Get current back buffer index (queried live from the swap chain).
+    UINT GetCurrentIndex() const {
+        return m_swapChain ? m_swapChain->GetCurrentBackBufferIndex() : 0;
+    }
 
     /// Get the current back buffer resource.
     ID3D12Resource* GetBuffer(UINT index) const {
@@ -80,7 +82,6 @@ private:
 
     HANDLE  m_frameLatencyWaitable = nullptr;
     UINT    m_bufferCount = 3;
-    UINT    m_frameIndex = 0;
     bool    m_initialized = false;
 };
 

@@ -4,11 +4,13 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <d3d11.h>
 #include <wrl/client.h>
 
 #include <shared/Result.hpp>
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -18,13 +20,18 @@
 
 namespace rex::wallpaper {
 
-// ─── VideoFrame (CPU-backed RGBA8) ─────────────────────────────────────────
+// ─── DecodedFrame (CPU-backed RGBA8) ────────────────────────────────────────
 //
-// Metadata fields (format, timestampHns) are preserved through the decode
-// pipeline so that downstream consumers can handle HDR, tone-mapping,
-// or audio sync without re-probing the source stream.
+// Canonical decoded frame used across the wallpaper pipeline (decoder →
+// playback ring buffer → renderer). Metadata fields (format, timestampHns)
+// are preserved so downstream consumers can handle HDR, tone-mapping, or
+// audio sync without re-probing the source stream.
+//
+// Memory contract: `pixels` is pre-reserved by the playback controller's
+// ring slots. The decoder writes directly into the slot buffer and never
+// allocates per frame, keeping steady-state memory flat.
 
-struct VideoFrame {
+struct DecodedFrame {
     std::vector<uint8_t> pixels;
     int         width       = 0;
     int         height      = 0;
@@ -49,12 +56,14 @@ public:
     MediaFoundationDecoder();
     ~MediaFoundationDecoder();
 
-    shared::Result<void> Open(std::string_view path);
+    shared::Result<void> Open(std::string_view path, bool useHardware = true);
     void Close();
 
-    /// Read next frame. Returns valid=false at EOF.
-    /// The caller is responsible for looping (seeking to 0).
-    VideoFrame ReadFrame();
+    /// Decodes the next frame directly into `out` (its pixel buffer must
+    /// be pre-reserved; it is resized to fit if needed). Returns true on
+    /// success, false at EOF or on failure — on failure `out.valid` is
+    /// cleared. The caller is responsible for looping (seeking to 0).
+    bool ReadFrame(DecodedFrame& out);
 
     shared::Result<void> Seek(double seconds);
 
@@ -65,7 +74,34 @@ public:
     bool   IsOpen()       const { return m_open; }
 
 private:
+    /// Copies a DXGI-backed sample (D3D11 GPU texture) into `out` via a
+    /// staging texture + CPU readback. Used when DXVA is active.
+    bool CopyDxvaSampleToRGBA(IMFDXGIBuffer* dxgiBuffer, DecodedFrame& out,
+                              LONGLONG timestamp);
+
+    /// Reopens the current file in pure software mode (no D3D manager,
+    /// MF_SOURCE_READER_DISABLE_DXVA). Used once when DXVA turns out to be
+    /// unavailable or unstable (driver crashes, lock failures, samples that
+    /// never materialize as DXGI buffers). Safe to call from the decoder
+    /// thread: it only resets COM state owned by this decoder.
+    shared::Result<void> ReopenSoftware();
+
     Microsoft::WRL::ComPtr<IMFSourceReader> m_sourceReader;
+
+    // DXVA (hardware decode) state. The D3D11 device exists solely to let
+    // Media Foundation allocate decoder surfaces in VRAM; all rendering
+    // stays on D3D12.
+    Microsoft::WRL::ComPtr<ID3D11Device>          m_d3d11Device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext>   m_d3d11Context;
+    Microsoft::WRL::ComPtr<IMFDXGIDeviceManager>  m_dxgiManager;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>       m_stagingTexture;
+    UINT  m_stagingWidth  = 0;
+    UINT  m_stagingHeight = 0;
+    DXGI_FORMAT m_stagingFormat = DXGI_FORMAT_UNKNOWN;
+    bool  m_dxvaActive    = false;
+    bool  m_dxvaFallbackDone = false;
+    int   m_dxvaCpuSamples = 0;
+    int   m_retryDepth    = 0;
 
     bool   m_open       = false;
     double m_duration    = 0.0;
@@ -73,9 +109,13 @@ private:
     int    m_width       = 0;
     int    m_height      = 0;
     DWORD  m_streamIndex = 0;
-
-    // Pre-allocated RGBA8 conversion buffer
-    std::vector<uint8_t> m_rgbaBuffer;
+    GUID   m_outputSubtype = {};
+    int    m_outputStride  = 0;
+    std::string m_lastPath;
+    /// >0: ask the reader (via AVP) for output scaled to this height.
+    /// Shrinks the decoder's CPU sample pool (large for 4K60 software
+    /// decode). 0 = native resolution.
+    int    m_maxDecodeHeight = 0;
 };
 
 } // namespace rex::wallpaper

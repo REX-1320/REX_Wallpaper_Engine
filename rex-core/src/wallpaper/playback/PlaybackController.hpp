@@ -26,22 +26,16 @@ struct PlaybackTelemetry {
     double   uploadLatencyMs = 0.0; // time from decode → GPU upload start
     uint32_t recoveryCount   = 0;
     uint32_t deviceResets    = 0;
+    uint64_t ringSlotCount   = 0;  // number of ring slots
+    uint64_t ringBytes       = 0;  // sum of slot pixel buffer capacities
 };
 
 // ─── DecodedFrame ─────────────────────────────────────────────────────────
 //
-// Metadata is preserved from the decoder so downstream consumers can
-// handle HDR, tone-mapping, or a/v sync without re-probing the source.
-
-struct DecodedFrame {
-    std::vector<uint8_t> pixels;
-    int         width       = 0;
-    int         height      = 0;
-    int         rowPitch    = 0;
-    DXGI_FORMAT format      = DXGI_FORMAT_UNKNOWN;
-    int64_t     timestampHns = 0;  // 100-ns units
-    bool        valid       = false;
-};
+// Defined in MediaFoundationDecoder.hpp (the canonical frame type across
+// the decode → ring → render pipeline). Metadata is preserved from the
+// decoder so downstream consumers can handle HDR, tone-mapping, or a/v
+// sync without re-probing the source.
 
 // ─── PlaybackController ──────────────────────────────────────────────────
 //
@@ -85,7 +79,7 @@ public:
     ~PlaybackController();
 
     // ─── Lifecycle ──────────────────────────────────────────────────────
-    shared::Result<void> Open(std::string_view path);
+    shared::Result<void> Open(std::string_view path, bool useHardware = true);
     void Close();
 
     // ─── Playback Control ───────────────────────────────────────────────
@@ -93,10 +87,20 @@ public:
     void Pause();
     void Stop();
 
+    // ─── Runtime Adjustments ────────────────────────────────────────────
+    // Thread-safe: consumed by the decoder thread via atomics.
+    void SetSpeed(float speed) { m_speed.store(speed, std::memory_order_relaxed); }
+    void SetLoop(bool loop) { m_looping.store(loop, std::memory_order_relaxed); }
+
     // ─── Frame Tick ─────────────────────────────────────────────────────
-    /// Returns the latest decoded frame, or an invalid frame if no new
-    /// frame has been decoded since the last call. Never blocks.
-    DecodedFrame Tick();
+    /// Returns a pointer to the latest decoded frame, or nullptr if no
+    /// new frame has been decoded since the last call. Never blocks.
+    ///
+    /// Lifetime: the returned pointer references a ring-buffer slot that
+    /// the producer will not write again until three more frames are
+    /// published (SPSC guarantee). The caller must consume it
+    /// synchronously (e.g. GPU upload) before the next Tick().
+    const DecodedFrame* Tick();
 
     shared::Result<void> Seek(double seconds);
 

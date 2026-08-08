@@ -1,0 +1,92 @@
+{
+  "name": "pg",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "electron": "vite build && electron .",
+    "dist:win": "vite build && node scripts/package-win.cjs"
+  },
+  "build": {
+    "appId": "com.rex.tools",
+    "productName": "REX",
+    "files": [
+      "dist/**",
+      "electron/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../rex-core/.build/Release/rex-wallpaper-cli.exe",
+        "to": "bin/rex-wallpaper-cli.exe"
+      },
+      {
+        "from": "../rex-core/.build/Release/spdlog.dll",
+        "to": "bin/spdlog.dll"
+      },
+      {
+        "from": "../rex-core/.build/Release/fmt.dll",
+        "to": "bin/fmt.dll"
+      }
+    ],
+    "directories": {
+      "output": "dist-exe"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ]
+    },
+    "portable": {
+      "artifactName": "REX.exe"
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-winstaller"
+    ]
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.6.0",
+    "@hookform/resolvers": "^5.7.1",
+    "@shadcn/react": "^0.2.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "date-fns": "^4.4.0",
+    "embla-carousel-react": "^8.6.0",
+    "input-otp": "^1.4.2",
+    "lucide-react": "^1.28.0",
+    "motion": "^12.43.0",
+    "next-themes": "^0.4.6",
+    "ogl": "^1.0.11",
+    "radix-ui": "^1.6.7",
+    "react": "^19.2.8",
+    "react-day-picker": "^10.0.1",
+    "react-dom": "^19.2.8",
+    "react-hook-form": "^7.84.0",
+    "react-resizable-panels": "^4.12.2",
+    "recharts": "3.8.0",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
+    "vaul": "^1.1.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "oxlint": "^1.75.0",
+    "vite": "^8.2.0"
+  }
+}

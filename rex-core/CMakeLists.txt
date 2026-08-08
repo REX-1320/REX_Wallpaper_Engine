@@ -51,6 +51,7 @@ set(WALLPAPER_SOURCES
     src/wallpaper/playback/PlaybackController.cpp
     src/wallpaper/loader/ImageLoader.cpp
     src/wallpaper/scene/StaticImageScene.cpp
+    src/wallpaper/runtime/RendererAdapters.cpp
 )
 
 set(GRAPHICS_SOURCES
@@ -610,6 +611,41 @@ if(BUILD_TESTING)
 
     gtest_discover_tests(rex-search-tests)
 endif()
+
+# ─── Wallpaper CLI ──────────────────────────────────────────────────────────
+
+add_executable(rex-wallpaper-cli
+    src/wallpaper_cli_main.cpp
+    ${PLATFORM_WINDOWS_SOURCES}
+    ${WALLPAPER_SOURCES}
+    ${GRAPHICS_SOURCES}
+    ${IPC_SOURCES}
+    ${CORE_SOURCES}
+    ${MODULE_SOURCES}
+)
+
+target_include_directories(rex-wallpaper-cli PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(rex-wallpaper-cli PRIVATE
+    rex-shared
+    fmt::fmt
+    spdlog::spdlog
+    d3d11
+    d3d12
+    dxgi
+    dxguid
+    d3dcompiler
+    windowscodecs
+    mfplat
+    mfreadwrite
+    mfuuid
+    runtimeobject
+    dwmapi
+    winmm
+)
 
 # ─── Install ───────────────────────────────────────────────────────────────
 
