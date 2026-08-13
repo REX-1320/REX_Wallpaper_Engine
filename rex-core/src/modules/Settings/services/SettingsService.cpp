@@ -1,6 +1,9 @@
 #include "SettingsService.hpp"
 #include "../interfaces/ISettingsProvider.hpp"
+#include <cstdio>
+#include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace rex::settings {
 
@@ -145,8 +148,192 @@ void SettingsService::rollbackTransaction(std::unique_ptr<SettingsTransaction> t
     pendingUndos_.clear();
 }
 
-void SettingsService::persistSetting(const std::string& id) {
-    (void)id;
+void SettingsService::persistSetting(const std::string& /*id*/) {
+    // Persist the whole registry (few settings; avoids per-key writes).
+    // The payload is a JSON object of id -> value, stored on the
+    // "rex.settings" module config through the ConfigurationStore.
+    std::ostringstream out;
+    out << "{";
+    bool first = true;
+    for (const auto& s : registry_->getAllSettings()) {
+        std::string val = valueToJson(s.currentValue);
+        if (val.empty()) continue;
+        if (!first) out << ",";
+        first = false;
+        out << "\"" << jsonEscape(s.id) << "\":" << val;
+    }
+    out << "}";
+
+    try {
+        rex::modules::ModuleConfig cfg = configStore_.loadModule("rex.settings");
+        cfg.settingsJson = out.str();
+        configStore_.saveModule(cfg);
+    } catch (const std::exception& e) {
+        // Persistence is best-effort; a failing write must not break the
+        // caller (settings are already applied in-memory).
+        (void)e;
+    }
+}
+
+void SettingsService::hydrateSettings() {
+    rex::modules::ModuleConfig cfg;
+    try {
+        cfg = configStore_.loadModule("rex.settings");
+    } catch (const std::exception&) {
+        return;
+    }
+    if (cfg.settingsJson.empty()) return;
+
+    for (auto& [id, value] : parseSettingsObject(cfg.settingsJson)) {
+        Setting s;
+        s.id = id;
+        s.name = id;
+        s.type = typeOf(value);
+        s.defaultValue = value;
+        registry_->addSetting(s); // ignored when already registered
+    }
+}
+
+std::string SettingsService::valueToJson(const SettingValue& value) {
+    if (std::holds_alternative<bool>(value)) {
+        return std::get<bool>(value) ? "true" : "false";
+    }
+    if (std::holds_alternative<int64_t>(value)) {
+        return std::to_string(std::get<int64_t>(value));
+    }
+    if (std::holds_alternative<double>(value)) {
+        std::ostringstream os;
+        os << std::get<double>(value);
+        return os.str();
+    }
+    if (std::holds_alternative<std::string>(value)) {
+        return "\"" + jsonEscape(std::get<std::string>(value)) + "\"";
+    }
+    if (std::holds_alternative<std::vector<std::string>>(value)) {
+        std::ostringstream os;
+        os << "[";
+        bool first = true;
+        for (const auto& item : std::get<std::vector<std::string>>(value)) {
+            if (!first) os << ",";
+            first = false;
+            os << "\"" << jsonEscape(item) << "\"";
+        }
+        os << "]";
+        return os.str();
+    }
+    return ""; // vector<uint8_t> blobs are not JSON-serializable here
+}
+
+namespace {
+
+// Index of the first unescaped '"' at/after `from` in a JSON string scan.
+size_t findUnescapedQuote(const std::string& s, size_t from) {
+    for (size_t i = from; i < s.size(); ++i) {
+        if (s[i] == '\\') {
+            ++i;
+            continue;
+        }
+        if (s[i] == '"') return i;
+    }
+    return std::string::npos;
+}
+
+} // namespace
+
+std::vector<std::pair<std::string, SettingValue>> SettingsService::parseSettingsObject(
+    const std::string& json) {
+    std::vector<std::pair<std::string, SettingValue>> out;
+    size_t i = 0;
+    while (i < json.size()) {
+        // Skip to the next quoted key.
+        auto keyStart = json.find('"', i);
+        if (keyStart == std::string::npos) break;
+        auto keyEnd = findUnescapedQuote(json, keyStart + 1);
+        if (keyEnd == std::string::npos) break;
+        std::string key = jsonUnescape(json.substr(keyStart + 1,
+                                                   keyEnd - keyStart - 1));
+        i = keyEnd + 1;
+        auto colon = json.find(':', i);
+        if (colon == std::string::npos) break;
+        i = colon + 1;
+        while (i < json.size() && (json[i] == ' ' || json[i] == '\t')) ++i;
+        if (i >= json.size()) break;
+
+        if (json[i] == '"') {
+            auto vEnd = findUnescapedQuote(json, i + 1);
+            if (vEnd == std::string::npos) break;
+            out.emplace_back(key, SettingValue(
+                jsonUnescape(json.substr(i + 1, vEnd - i - 1))));
+            i = vEnd + 1;
+        } else if (json.compare(i, 4, "true") == 0) {
+            out.emplace_back(key, SettingValue(true));
+            i += 4;
+        } else if (json.compare(i, 5, "false") == 0) {
+            out.emplace_back(key, SettingValue(false));
+            i += 5;
+        } else {
+            // Number: consume until , or }.
+            auto vEnd = json.find_first_of(",}", i);
+            if (vEnd == std::string::npos) vEnd = json.size();
+            std::string num = json.substr(i, vEnd - i);
+            try {
+                size_t pos = 0;
+                long long ll = std::stoll(num, &pos);
+                if (pos == num.size()) {
+                    out.emplace_back(key, SettingValue(static_cast<int64_t>(ll)));
+                } else {
+                    out.emplace_back(key, SettingValue(std::stod(num)));
+                }
+            } catch (const std::exception&) {
+                // Unparsable token: skip.
+            }
+            i = vEnd;
+        }
+    }
+    return out;
+}
+
+std::string SettingsService::jsonEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+std::string SettingsService::jsonUnescape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '\\' || i + 1 >= s.size()) {
+            out += s[i];
+            continue;
+        }
+        switch (s[++i]) {
+            case '"':  out += '"';  break;
+            case '\\': out += '\\'; break;
+            case 'n':  out += '\n'; break;
+            case 'r':  out += '\r'; break;
+            case 't':  out += '\t'; break;
+            default:   out += s[i];
+        }
+    }
+    return out;
 }
 
 void SettingsService::publishEvent(const std::string& id) {

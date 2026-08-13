@@ -23,12 +23,18 @@ namespace rex::graphics {
 class Device {
 public:
     Device() = default;
-    ~Device() = default;
+    ~Device();
 
     /// Create the D3D12 device with debug layer in Debug builds.
     /// @param minimumFeatureLevel Minimum feature level (default 11_0).
     shared::Result<void> Initialize(
         D3D_FEATURE_LEVEL minimumFeatureLevel = D3D_FEATURE_LEVEL_11_0);
+
+    /// Adopt an existing D3D12 device (shared with other components).
+    /// Guarantees every renderer uses the SAME device — required for
+    /// cross-device shared handles (video pool textures/fence) to stay
+    /// valid, regardless of adapter topology.
+    shared::Result<void> InitializeAdopted(ID3D12Device* device);
 
     /// Returns the maximum supported feature level.
     D3D_FEATURE_LEVEL MaxFeatureLevel() const { return m_maxFeatureLevel; }

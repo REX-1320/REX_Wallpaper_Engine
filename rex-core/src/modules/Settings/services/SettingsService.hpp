@@ -58,6 +58,10 @@ public:
     bool redo();
     void discoverProviders(rex::modules::IModuleContext* context);
 
+    /// Load persisted settings (the "rex.settings" config blob) into the
+    /// registry. Idempotent: already-registered ids are left untouched.
+    void hydrateSettings();
+
     bool createBackup() override;
     bool restoreBackup(const std::string& timestamp = "") override;
     std::string exportSettings(const std::vector<std::string>& ids = {}) override;
@@ -72,6 +76,13 @@ private:
     void rollbackPending();
     void persistSetting(const std::string& id);
     void publishEvent(const std::string& id);
+
+    // ─── Persistence helpers ────────────────────────────────────────────
+    static std::string valueToJson(const SettingValue& value);
+    static std::vector<std::pair<std::string, SettingValue>>
+        parseSettingsObject(const std::string& json);
+    static std::string jsonEscape(const std::string& s);
+    static std::string jsonUnescape(const std::string& s);
 
     std::unique_ptr<SettingsRegistry> registry_;
     std::unique_ptr<ValidationEngine> validator_;

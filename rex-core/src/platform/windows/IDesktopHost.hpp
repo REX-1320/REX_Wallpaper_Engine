@@ -23,6 +23,11 @@ public:
 
     virtual std::string_view GetHostType() const = 0;
 
+    /// Wallpaper layer window (parent of the render window), when the host
+    /// exposes one. nullptr otherwise — per-monitor compositing is only
+    /// available through a layer the engine can parent windows into.
+    virtual HWND GetWallpaperLayerWindow() const { return nullptr; }
+
     virtual void StartMonitor(std::function<void()> /*onRecovery*/) {}
     virtual void StopMonitor() {}
 };

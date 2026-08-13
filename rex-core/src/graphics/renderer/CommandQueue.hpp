@@ -37,6 +37,11 @@ public:
     /// Block until the GPU has completed all submitted work.
     void WaitForGPU();
 
+    /// Insert a GPU-side wait: the queue blocks until the given fence
+    /// reaches `value` before executing subsequent work (orders D3D11
+    /// video-engine writes before D3D12 sampling).
+    void WaitForFence(ID3D12Fence* fence, UINT64 value);
+
     /// Signal the fence, returning the new fence value.
     UINT64 Signal();
 

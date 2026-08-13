@@ -86,3 +86,59 @@ TEST(UIModelGeneratorTest, CarriesUiMetadata) {
     EXPECT_EQ(controls[0].group, "Advanced");
     EXPECT_EQ(controls[0].order, 5);
 }
+
+TEST(SettingsPersistenceTest, RoundTripAcrossServiceInstances) {
+    const std::string path = "test_settings_persistence.json";
+    std::remove(path.c_str());
+
+    // The service stores references to the bus/store, so keep them in a
+    // holder that outlives the service (same pattern as the runtime CLI).
+    struct ServiceHolder {
+        rex::modules::EventBus bus;
+        std::shared_ptr<rex::modules::ConfigurationStore> store;
+        std::unique_ptr<SettingsService> service;
+    };
+
+    auto makeService = [&path]() {
+        auto h = std::make_shared<ServiceHolder>();
+        h->store = std::make_shared<rex::modules::ConfigurationStore>(path);
+        auto reg = std::make_unique<SettingsRegistry>();
+        auto val = std::make_unique<ValidationEngine>();
+        auto srch = std::make_unique<SettingsSearch>(*reg);
+        auto hist = std::make_unique<SettingsHistory>();
+        auto backup = std::make_unique<BackupManager>(h->store);
+        auto schema = std::make_unique<SchemaManager>();
+        auto io = std::make_unique<ImportExportManager>(*reg, *val);
+        h->service = std::make_unique<SettingsService>(
+            std::move(reg), std::move(val), std::move(srch), std::move(hist),
+            std::move(backup), std::move(schema), std::move(io),
+            h->bus, *h->store);
+        h->service->hydrateSettings();
+        return h;
+    };
+
+    {
+        auto h = makeService();
+        Setting s;
+        s.id = "monitor.wallpaper.ABC";
+        s.type = SettingType::String;
+        s.defaultValue = std::string("");
+        ASSERT_TRUE(h->service->registerSetting(s));
+        ASSERT_TRUE(h->service->setValue("monitor.wallpaper.ABC",
+                                         std::string("D:\\w1\\a\"b\\c.png")));
+    }
+
+    {
+        auto h = makeService();
+        Setting s;
+        s.id = "monitor.wallpaper.ABC";
+        s.type = SettingType::String;
+        s.defaultValue = std::string("");
+        h->service->registerSetting(s);
+        auto val = h->service->getValue("monitor.wallpaper.ABC");
+        ASSERT_TRUE(val.has_value());
+        EXPECT_EQ(std::get<std::string>(*val), "D:\\w1\\a\"b\\c.png");
+    }
+
+    std::remove(path.c_str());
+}

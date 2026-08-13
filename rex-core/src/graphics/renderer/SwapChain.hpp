@@ -72,8 +72,24 @@ public:
     UINT GetBufferCount() const { return m_bufferCount; }
     bool IsValid() const { return m_swapChain != nullptr; }
 
+    /// True when the swap chain targets an HDR10 output and presents in
+    /// R16G16B16A16_FLOAT + PQ (ST.2084) / BT.2020.
+    bool IsHDR() const { return m_isHdr; }
+    DXGI_FORMAT GetBackBufferFormat() const { return m_format; }
+
+    /// Display luminance capability (nits) as reported by DXGI_OUTPUT_DESC1.
+    /// Valid only when IsHDRActive() (falls back to 0 otherwise).
+    float GetDisplayMaxNits() const { return m_displayMaxNits; }
+    float GetDisplayMinNits() const { return m_displayMinNits; }
+    /// True when HDR10 presentation is actually active on this swap chain.
+    bool IsHDRActive() const { return m_hdrActive; }
+
 private:
     shared::Result<void> CreateRenderTargetViews(ID3D12Device* device);
+    /// Queries the output the swap chain is currently on and picks the
+    /// back-buffer format + color space (HDR10 vs SDR). No-op if the
+    /// selection matches the current one.
+    void UpdateHdrSelection();
 
     Microsoft::WRL::ComPtr<IDXGISwapChain4>     m_swapChain;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
@@ -82,6 +98,11 @@ private:
 
     HANDLE  m_frameLatencyWaitable = nullptr;
     UINT    m_bufferCount = 3;
+    DXGI_FORMAT m_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    bool    m_isHdr = false;
+    float   m_displayMaxNits = 0.0f;
+    float   m_displayMinNits = 0.0f;
+    bool    m_hdrActive = false;
     bool    m_initialized = false;
 };
 

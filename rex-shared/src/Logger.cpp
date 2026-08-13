@@ -36,6 +36,12 @@ void Logger::Initialize(const std::string& logFilePath, LogLevel level) {
         // Set level
         m_logger->set_level(static_cast<spdlog::level::level_enum>(level));
 
+        // Flush after every message. Without this the file sink's 4 KB
+        // CRT buffer only hits disk when it fills (~9 s of runtime logging),
+        // which makes a healthy process look frozen — logs must be a live
+        // instrument for diagnosing hangs.
+        m_logger->flush_on(spdlog::level::trace);
+
         m_initialized = true;
 
         Info("Logger", "Logger initialized (file: " + logFilePath + ")");

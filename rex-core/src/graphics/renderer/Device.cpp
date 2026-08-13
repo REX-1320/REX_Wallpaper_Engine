@@ -3,6 +3,8 @@
 
 namespace rex::graphics {
 
+Device::~Device() = default;
+
 shared::Result<void> Device::Initialize(D3D_FEATURE_LEVEL minimumFeatureLevel) {
     if (m_device) {
         return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
@@ -83,6 +85,49 @@ shared::Result<void> Device::Initialize(D3D_FEATURE_LEVEL minimumFeatureLevel) {
                  (m_maxFeatureLevel >> 8) & 0xF);
 
     m_device->SetName(L"REX D3D12 Device");
+    return shared::Result<void>();
+}
+
+shared::Result<void> Device::InitializeAdopted(ID3D12Device* device) {
+    if (m_device) {
+        return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
+                                    "Device already initialized");
+    }
+    if (!device) {
+        return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+                                    "Adopted device is null");
+    }
+
+    m_device = device;
+
+    // Query the adapter and max feature level for telemetry parity with
+    // self-created devices.
+    Microsoft::WRL::ComPtr<IDXGIDevice4> dxgiDevice;
+    if (SUCCEEDED(m_device.As(&dxgiDevice))) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+        if (SUCCEEDED(dxgiDevice->GetAdapter(&adapter))) {
+            adapter.As(&m_adapter);
+        }
+    }
+
+    D3D12_FEATURE_DATA_FEATURE_LEVELS featLevels = {};
+    // SDK 26100+: feature levels use the shared D3D_FEATURE_LEVEL enum
+    // (D3D12_FEATURE_LEVEL no longer exists).
+    D3D_FEATURE_LEVEL levels[] = {
+        D3D_FEATURE_LEVEL_12_2, D3D_FEATURE_LEVEL_12_1,
+        D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0
+    };
+    featLevels.NumFeatureLevels = ARRAYSIZE(levels);
+    featLevels.pFeatureLevelsRequested = levels;
+    if (SUCCEEDED(m_device->CheckFeatureSupport(
+            D3D12_FEATURE_FEATURE_LEVELS, &featLevels, sizeof(featLevels)))) {
+        m_maxFeatureLevel = featLevels.MaxSupportedFeatureLevel;
+    }
+
+    REX_LOG_INFO("Device", "Adopted D3D12 device (max feature level: {}.{})",
+                 (m_maxFeatureLevel >> 12) & 0xF,
+                 (m_maxFeatureLevel >> 8) & 0xF);
     return shared::Result<void>();
 }
 

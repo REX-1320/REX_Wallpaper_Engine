@@ -4,6 +4,15 @@
   "dependencies": [
     "fmt",
     "spdlog",
-    "gtest"
+    "gtest",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "swscale"
+      ]
+    }
   ]
 }

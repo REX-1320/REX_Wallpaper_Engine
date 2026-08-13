@@ -55,6 +55,9 @@ public:
     std::string_view GetType() const override { return "static"; }
     StaticImageAdapter() {
         m_supported.insert("fillMode");
+        m_supported.insert("rotation");
+        m_supported.insert("flipH");
+        m_supported.insert("flipV");
     }
 };
 
@@ -67,6 +70,9 @@ public:
         m_supported.insert("fillMode");
         m_supported.insert("speed");
         m_supported.insert("loop");
+        m_supported.insert("rotation");
+        m_supported.insert("flipH");
+        m_supported.insert("flipV");
     }
 };
 

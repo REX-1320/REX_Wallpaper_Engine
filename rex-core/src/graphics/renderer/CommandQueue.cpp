@@ -1,10 +1,17 @@
 #include "CommandQueue.hpp"
 #include <shared/Logger.hpp>
+#include <exception>
 
 namespace rex::graphics {
 
 CommandQueue::~CommandQueue() {
-    Shutdown();
+    try {
+        Shutdown();
+    } catch (const std::exception& ex) {
+        REX_LOG_ERROR("CommandQueue", "~CommandQueue exception: {}", ex.what());
+    } catch (...) {
+        REX_LOG_ERROR("CommandQueue", "~CommandQueue unknown exception");
+    }
 }
 
 shared::Result<void> CommandQueue::Initialize(ID3D12Device* device) {
@@ -58,7 +65,6 @@ void CommandQueue::Shutdown() {
     }
 
     m_fenceValue = 0;
-    REX_LOG_INFO("CommandQueue", "Shutdown");
 }
 
 void CommandQueue::Execute(ID3D12CommandList* const* lists, UINT count) {
@@ -84,6 +90,11 @@ void CommandQueue::WaitForGPU() {
             WaitForSingleObject(m_fenceEvent, INFINITE);
         }
     }
+}
+
+void CommandQueue::WaitForFence(ID3D12Fence* fence, UINT64 value) {
+    if (!m_queue || !fence) return;
+    m_queue->Wait(fence, value);
 }
 
 UINT64 CommandQueue::Signal() {

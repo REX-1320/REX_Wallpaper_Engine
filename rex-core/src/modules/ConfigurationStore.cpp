@@ -1,10 +1,67 @@
 #include "ConfigurationStore.hpp"
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <iostream>
 
 namespace rex::modules {
+
+namespace {
+
+// Escape a string for embedding inside a JSON string literal (the settings
+// payload is a nested JSON object stored escaped in the config array).
+std::string jsonEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+std::string jsonUnescape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '\\' || i + 1 >= s.size()) {
+            out += s[i];
+            continue;
+        }
+        switch (s[++i]) {
+            case '"':  out += '"';  break;
+            case '\\': out += '\\'; break;
+            case 'n':  out += '\n'; break;
+            case 'r':  out += '\r'; break;
+            case 't':  out += '\t'; break;
+            case 'u':
+                if (i + 4 < s.size()) {
+                    out += static_cast<char>(std::stoi(s.substr(i + 1, 4),
+                                                       nullptr, 16));
+                    i += 4;
+                }
+                break;
+            default: out += s[i];
+        }
+    }
+    return out;
+}
+
+} // namespace
 
 static std::string serializeConfigs(const std::vector<ModuleConfig>& configs) {
     std::ostringstream out;
@@ -15,8 +72,11 @@ static std::string serializeConfigs(const std::vector<ModuleConfig>& configs) {
         out << "    \"moduleId\": \"" << cfg.moduleId << "\",\n";
         out << "    \"enabled\": " << (cfg.enabled ? "true" : "false") << ",\n";
         out << "    \"autoStart\": " << (cfg.autoStart ? "true" : "false") << ",\n";
-        out << "    \"restartCount\": " << cfg.restartCount << "\n";
-        out << "  }";
+        out << "    \"restartCount\": " << cfg.restartCount;
+        if (!cfg.settingsJson.empty()) {
+            out << ",\n    \"settings\": \"" << jsonEscape(cfg.settingsJson) << "\"";
+        }
+        out << "\n  }";
         if (i < configs.size() - 1) out << ",";
         out << "\n";
     }
@@ -24,28 +84,75 @@ static std::string serializeConfigs(const std::vector<ModuleConfig>& configs) {
     return out.str();
 }
 
+// Index of the closing quote for the string starting at openQuote+1,
+// honoring backslash escapes. Returns npos if unterminated.
+static size_t findStringEnd(const std::string& s, size_t openQuote) {
+    size_t i = openQuote + 1;
+    while (i < s.size()) {
+        if (s[i] == '\\') {
+            i += 2;
+            continue;
+        }
+        if (s[i] == '"') return i;
+        ++i;
+    }
+    return std::string::npos;
+}
+
+// Split a top-level array into its brace-delimited objects. Braces inside
+// quoted strings (e.g. an escaped settings payload) are ignored.
+static std::vector<std::string> splitObjects(const std::string& text) {
+    std::vector<std::string> objs;
+    size_t i = 0;
+    while (i < text.size()) {
+        if (text[i] != '{') {
+            ++i;
+            continue;
+        }
+        size_t start = i;
+        bool inString = false;
+        size_t j = start + 1;
+        for (; j < text.size(); ++j) {
+            char c = text[j];
+            if (inString) {
+                if (c == '\\') {
+                    ++j;
+                    continue;
+                }
+                if (c == '"') inString = false;
+            } else if (c == '"') {
+                inString = true;
+            } else if (c == '}') {
+                break;
+            }
+        }
+        if (j >= text.size()) break;
+        objs.push_back(text.substr(start, j - start + 1));
+        i = j + 1;
+    }
+    return objs;
+}
+
 static std::vector<ModuleConfig> deserializeConfigs(const std::string& text) {
     std::vector<ModuleConfig> result;
-    size_t pos = 0;
-    while (true) {
-        auto objStart = text.find('{', pos);
-        if (objStart == std::string::npos) break;
-        auto objEnd = text.find('}', objStart);
-        if (objEnd == std::string::npos) break;
-
-        std::string obj = text.substr(objStart, objEnd - objStart + 1);
-        pos = objEnd + 1;
-
+    for (const auto& obj : splitObjects(text)) {
         ModuleConfig cfg;
+
         auto findField = [&](const std::string& key) -> std::string {
             auto kpos = obj.find('"' + key + '"');
             if (kpos == std::string::npos) return {};
-            auto vstart = obj.find('"', kpos + key.size() + 3);
-            if (vstart == std::string::npos) return {};
-            ++vstart;
-            auto vend = obj.find('"', vstart);
-            if (vend == std::string::npos) return {};
-            return obj.substr(vstart, vend - vstart);
+            auto colon = obj.find(':', kpos + key.size() + 2);
+            if (colon == std::string::npos) return {};
+            auto vpos = colon + 1;
+            while (vpos < obj.size() && (obj[vpos] == ' ' || obj[vpos] == '\t')) ++vpos;
+            if (vpos < obj.size() && obj[vpos] == '"') {
+                auto vend = findStringEnd(obj, vpos);
+                if (vend == std::string::npos) return {};
+                return obj.substr(vpos + 1, vend - vpos - 1);
+            }
+            auto vend = obj.find_first_of(",}", vpos);
+            if (vend == std::string::npos) vend = obj.size();
+            return obj.substr(vpos, vend - vpos);
         };
 
         auto findBool = [&](const std::string& key, bool def) -> bool {
@@ -82,6 +189,7 @@ static std::vector<ModuleConfig> deserializeConfigs(const std::string& text) {
         cfg.enabled = findBool("enabled", true);
         cfg.autoStart = findBool("autoStart", false);
         cfg.restartCount = findInt("restartCount", 0);
+        cfg.settingsJson = jsonUnescape(findField("settings"));
 
         result.push_back(cfg);
     }

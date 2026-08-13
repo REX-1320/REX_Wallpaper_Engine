@@ -42,6 +42,10 @@ bool SettingsModule::initialize(rex::modules::IModuleContext* context) {
         *bus_,
         *configStore_);
 
+    // Load persisted settings (id -> value blob) into the registry so
+    // getValue() returns them from the first call.
+    service_->hydrateSettings();
+
     state_ = rex::modules::ModuleState::Initialized;
     return true;
 }

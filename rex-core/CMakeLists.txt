@@ -20,6 +20,11 @@ add_subdirectory(../rex-shared ${CMAKE_BINARY_DIR}/rex-shared)
 find_package(fmt CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
+# FFmpeg (GPU-native video decode: D3D11VA primary, software fallback).
+# vcpkg's ffmpeg port ships a find-module (FindFFMPEG.cmake) that sets
+# FFMPEG_LIBRARIES / FFMPEG_INCLUDE_DIRS (no imported targets).
+find_package(FFMPEG REQUIRED)
+
 option(REX_ENABLE_MARKETPLACE "Enable marketplace client (requires curl)" OFF)
 option(REX_BUILD_SAMPLE_PLUGINS "Build sample plugins" OFF)
 option(REX_ENABLE_SIGNATURES "Enable OpenSSL signature verification" OFF)
@@ -41,14 +46,20 @@ set(PLATFORM_WINDOWS_SOURCES
     src/platform/windows/WorkerWHost.cpp
     src/platform/windows/ProgmanHost.cpp
     src/platform/windows/DesktopHostFactory.cpp
+    src/platform/windows/MultiMonitorDesktopHost.cpp
+    src/platform/windows/MonitorEdid.cpp
 )
 
 set(WALLPAPER_SOURCES
     src/wallpaper/engine/Engine.cpp
     src/wallpaper/engine/EngineFactory.cpp
     src/wallpaper/decoder/WICTextureLoader.cpp
-    src/wallpaper/decoder/MediaFoundationDecoder.cpp
-    src/wallpaper/playback/PlaybackController.cpp
+    src/wallpaper/decoder/FfmpegVideoDecoder.cpp
+    src/wallpaper/playback/FrameScheduler.cpp
+    src/wallpaper/playback/VideoPlaybackController.cpp
+    src/wallpaper/audio/AudioPlayer.cpp
+    src/wallpaper/video/VideoManager.cpp
+    src/wallpaper/monitor/MonitorCompositor.cpp
     src/wallpaper/loader/ImageLoader.cpp
     src/wallpaper/scene/StaticImageScene.cpp
     src/wallpaper/runtime/RendererAdapters.cpp
@@ -219,6 +230,7 @@ target_include_directories(rex-core
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FFMPEG_INCLUDE_DIRS}
 )
 
 target_link_libraries(rex-core
@@ -231,17 +243,19 @@ target_link_libraries(rex-core
         d3d11
         dcomp
         d3d12
+
         dxgi
         dxguid
         d3dcompiler
         windowscodecs
-        mfplat
-        mfreadwrite
-        mfuuid
         runtimeobject
         dwmapi
         winmm
+        mmdevapi
+        ole32
+        uuid
         crypt32
+        ${FFMPEG_LIBRARIES}
 )
 
 if(REX_ENABLE_MARKETPLACE)
@@ -302,13 +316,11 @@ if(BUILD_TESTING)
         fmt::fmt
         spdlog::spdlog
         d3d12
+
         dxgi
         dxguid
         d3dcompiler
         windowscodecs
-        mfplat
-        mfreadwrite
-        mfuuid
         runtimeobject
         dwmapi
         winmm
@@ -326,6 +338,7 @@ if(BUILD_TESTING)
         fmt::fmt
         spdlog::spdlog
         d3d12
+
         dxgi
         dxguid
         d3dcompiler
@@ -343,6 +356,11 @@ if(BUILD_TESTING)
     # Wallpaper engine integration tests
     add_executable(rex-wallpaper-tests
         tests/wallpaper/test_engine.cpp
+        tests/wallpaper/test_video_pipeline.cpp
+        tests/wallpaper/test_multi_monitor.cpp
+        tests/wallpaper/test_stress.cpp
+        tests/wallpaper/test_resource_leak.cpp
+        tests/wallpaper/test_soak.cpp
         ${PLATFORM_WINDOWS_SOURCES}
         ${WALLPAPER_SOURCES}
         ${GRAPHICS_SOURCES}
@@ -354,25 +372,27 @@ if(BUILD_TESTING)
     target_include_directories(rex-wallpaper-tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FFMPEG_INCLUDE_DIRS}
     )
 
     target_link_libraries(rex-wallpaper-tests PRIVATE
         rex-shared
         fmt::fmt
         spdlog::spdlog
+        d3d11
         d3d12
+
         dxgi
         dxguid
         d3dcompiler
         windowscodecs
-        mfplat
-        mfreadwrite
-        mfuuid
         runtimeobject
         dwmapi
         winmm
+        ${FFMPEG_LIBRARIES}
         GTest::gtest
         GTest::gtest_main
+        psapi
     )
 
     gtest_add_tests(TARGET rex-wallpaper-tests)
@@ -612,9 +632,13 @@ if(BUILD_TESTING)
     gtest_discover_tests(rex-search-tests)
 endif()
 
-# ─── Wallpaper CLI ──────────────────────────────────────────────────────────
+# ─── Wallpaper Runtime / CLI ────────────────────────────────────────────────
+#
+# rex-wallpaper-runtime: persistent native runtime (stdin/stdout JSON frames)
+# plus the `--benchmark` mode (FFmpeg D3D11VA -> D3D12 interop performance
+# harness). Later receives IPC commands from any REX UI.
 
-add_executable(rex-wallpaper-cli
+add_executable(rex-wallpaper-runtime
     src/wallpaper_cli_main.cpp
     ${PLATFORM_WINDOWS_SOURCES}
     ${WALLPAPER_SOURCES}
@@ -622,14 +646,16 @@ add_executable(rex-wallpaper-cli
     ${IPC_SOURCES}
     ${CORE_SOURCES}
     ${MODULE_SOURCES}
+    ${SETTINGS_SOURCES}
 )
 
-target_include_directories(rex-wallpaper-cli PRIVATE
+target_include_directories(rex-wallpaper-runtime PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${FFMPEG_INCLUDE_DIRS}
 )
 
-target_link_libraries(rex-wallpaper-cli PRIVATE
+target_link_libraries(rex-wallpaper-runtime PRIVATE
     rex-shared
     fmt::fmt
     spdlog::spdlog
@@ -639,16 +665,20 @@ target_link_libraries(rex-wallpaper-cli PRIVATE
     dxguid
     d3dcompiler
     windowscodecs
-    mfplat
-    mfreadwrite
-    mfuuid
     runtimeobject
     dwmapi
     winmm
+    ${FFMPEG_LIBRARIES}
 )
 
-# ─── Install ───────────────────────────────────────────────────────────────
+# ─── Dev tool: synthetic MP4 generator ─────────────────────────────────────
+# Writes a short MPEG4+AAC test video (see tools/GenTestMedia.cpp) so the
+# runtime's decode / audio / preview surfaces can be exercised without media.
+add_executable(rex-gen-media tools/GenTestMedia.cpp)
+target_include_directories(rex-gen-media PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(rex-gen-media PRIVATE ${FFMPEG_LIBRARIES})
 
+# ─── Install ───────────────────────────────────────────────────────────────
 install(TARGETS rex-core RUNTIME DESTINATION bin)
 
 install(FILES

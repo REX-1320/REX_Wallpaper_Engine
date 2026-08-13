@@ -101,6 +101,11 @@ WIC — Windows Imaging Component, native, no third-party decode library needed)
   concrete reason RES-Rendering-Layer §3 exists as a cross-cutting scheduler
   rather than being widget-specific.
 
+> **Current limitation:** One shared decoder per runtime. A monitor assigned a
+> different video than the main scene cannot play concurrently; it will fall
+> back to a static image load with a warning log. Full per-monitor independent
+> video decoding requires a future N-controller architecture.
+
 ### 3.3 Web
 
 Same rendering approach as widgets/interactive wallpapers — WebView2 instance

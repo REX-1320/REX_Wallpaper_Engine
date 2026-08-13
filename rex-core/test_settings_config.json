@@ -70,5 +70,12 @@
     "enabled": true,
     "autoStart": false,
     "restartCount": 0
+  },
+  {
+    "moduleId": "rex.settings",
+    "enabled": true,
+    "autoStart": false,
+    "restartCount": 0,
+    "settings": "{\"test.volume\":75}"
   }
 ]

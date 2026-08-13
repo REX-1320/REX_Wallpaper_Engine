@@ -8,6 +8,8 @@
 #include <memory>
 #include <optional>
 
+namespace rex::settings { class ISettingsService; }
+
 namespace rex::wallpaper {
 
 // ─── Forward Declarations ──────────────────────────────────────────────────
@@ -79,6 +81,9 @@ struct MonitorInfo {
     int     height     = 0;
     bool    isPrimary  = false;
     float   dpiScale   = 1.0f;
+    bool    connected  = true;
+    // Stable identity across disconnects (EDID hash; 0 = not available).
+    uint64_t edidHash  = 0;
 };
 
 // ─── WallpaperConfig ───────────────────────────────────────────────────────
@@ -89,6 +94,13 @@ struct WallpaperConfig {
     int   targetMonitor = 0;
     bool  enableAudioReactive = false;
     float audioSensitivity    = 0.5f;
+    // Desktop host strategy. Empty = auto (best available, single-monitor
+    // WorkerW/Progman). "MultiMonitor" = per-monitor wallpaper compositing.
+    std::string desktopHost;
+    // Auto-pause the wallpaper while a full-screen application has the
+    // foreground, and resume when it closes. Detection is monitor-aware:
+    // a window covering >=95% of its monitor counts as full-screen.
+    bool pauseOnFullscreen = true;
 };
 
 // ─── EngineTelemetry ────────────────────────────────────────────────────────
@@ -118,6 +130,14 @@ struct EngineTelemetry {
     // Scenes
     uint64_t scenesLoaded    = 0;
     uint64_t scenesReleased  = 0;
+
+    // Adaptive resolution (selected stream size)
+    int  decodeWidth  = 0;
+    int  decodeHeight = 0;
+
+    // HDR output
+    bool  hdrActive      = false;
+    float displayMaxNits = 0.0f;
 
     // Process
     double   privateBytesMB  = 0.0;
@@ -151,12 +171,22 @@ public:
     virtual MonitorInfo GetCurrentMonitor() const = 0;
     virtual std::vector<MonitorInfo> EnumerateMonitors() const = 0;
 
+    // ─── Per-monitor wallpapers ─────────────────────────────────────────
+    /// Pin a wallpaper to a monitor (EDID-keyed, persisted via the
+    /// settings service). Empty path clears the override.
+    virtual shared::Result<void> SetPerMonitorWallpaper(
+        const std::string& monitorId, const std::string& path) = 0;
+    /// Provide the settings service used to persist/restore assignments.
+    virtual void SetSettingsService(
+        std::shared_ptr<rex::settings::ISettingsService> settings) = 0;
+
     // ─── Settings ─────────────────────────────────────────────────────────
     virtual shared::Result<void> SetFillMode(FillMode mode) = 0;
     virtual shared::Result<void> SetBrightness(float value) = 0;
     virtual shared::Result<void> SetContrast(float value) = 0;
     virtual shared::Result<void> SetSaturation(float value) = 0;
     virtual shared::Result<void> SetVolume(float value) = 0;
+    virtual shared::Result<void> SetMute(bool mute) = 0;
     virtual shared::Result<void> SetLoop(bool loop) = 0;
     virtual shared::Result<void> SetSpeed(float speed) = 0;
 
@@ -179,6 +209,29 @@ public:
 
     // ─── Debug ────────────────────────────────────────────────────────────
     virtual void DumpStats() const = 0;
+
+    // ─── Frame surface (preview / cross-process sharing) ─────────────────
+    /// Snapshot of the currently published video frame surface. `available`
+    /// is false when no video is open. Handle values are PROCESS-LOCAL
+    /// NT handles; a host process must have them duplicated into its own
+    /// address space (see the runtime's SET_CLIENT_PID / GET_FRAME_SURFACE
+    /// protocol) before calling ID3D12Device::OpenSharedHandle.
+    struct FrameSurface {
+        bool available = false;
+        uint64_t fenceHandle = 0;   // NT handle of the shared D3D12 fence
+        uint64_t adapterLuid = 0;   // adapter LUID (LowPart | HighPart<<32)
+        uint32_t slotCount = 0;     // pool slots (stable per video open)
+        uint32_t currentSlot = 0;   // slot of the last published frame
+        uint64_t currentFenceValue = 0;  // fence value to wait for
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint64_t frameIndex = 0;    // monotonic decode counter (change detector)
+        uint64_t generation = 0;    // bumped per video open/close (re-dup key)
+    };
+    /// Latest published frame surface (safe from any thread; cheap).
+    virtual FrameSurface GetFrameSurface() const = 0;
+    /// Process-local NT handle of a pool slot texture (0..slotCount-1).
+    virtual uint64_t GetFrameSlotHandle(uint32_t slot) const = 0;
 
     // ─── Telemetry ────────────────────────────────────────────────────────
     /// Snapshot of live allocation counters (decoder/ring/GPU/scenes).

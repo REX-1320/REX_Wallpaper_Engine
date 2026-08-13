@@ -1,6 +1,7 @@
 #include "DesktopHostFactory.hpp"
 #include "WorkerWHost.hpp"
 #include "ProgmanHost.hpp"
+#include "MultiMonitorDesktopHost.hpp"
 #include <shared/Logger.hpp>
 
 namespace rex::platform::windows {
@@ -8,6 +9,23 @@ namespace rex::platform::windows {
 std::unique_ptr<IDesktopHost> DesktopHostFactory::CreateBestAvailable() {
     REX_LOG_INFO("DesktopHost",
         "Searching for available desktop host strategy...");
+
+    // Multi-monitor setups get per-monitor wallpaper compositing
+    // automatically; no manual config needed.
+    int monitorCount = GetSystemMetrics(SM_CMONITORS);
+    if (monitorCount > 1) {
+        REX_LOG_INFO("DesktopHost",
+            "{} monitors detected, trying MultiMonitor...", monitorCount);
+        auto multiHost = std::make_unique<MultiMonitorDesktopHost>();
+        if (multiHost->Acquire().IsSuccess()) {
+            REX_LOG_INFO("DesktopHost",
+                "\xe2\x9c\x93 MultiMonitor strategy succeeded ({}x{})",
+                multiHost->GetWidth(), multiHost->GetHeight());
+            return multiHost;
+        }
+        REX_LOG_WARN("DesktopHost",
+            "\xe2\x9c\x97 MultiMonitor failed, falling back to single-monitor hosts");
+    }
 
     {
         REX_LOG_INFO("DesktopHost", "Trying WorkerW...");
@@ -61,6 +79,9 @@ std::unique_ptr<IDesktopHost> DesktopHostFactory::Create(
     }
     if (type == "Progman") {
         return std::make_unique<ProgmanHost>();
+    }
+    if (type == "MultiMonitor") {
+        return std::make_unique<MultiMonitorDesktopHost>();
     }
 
     REX_LOG_ERROR("DesktopHost",

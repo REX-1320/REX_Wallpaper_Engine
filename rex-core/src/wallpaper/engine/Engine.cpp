@@ -1,5 +1,6 @@
 #include "Engine.hpp"
 #include "platform/windows/DesktopHostFactory.hpp"
+#include "platform/windows/MonitorEdid.hpp"
 #include <iostream>
 #include <chrono>
 #include <algorithm>
@@ -36,9 +37,20 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
         REX_LOG_INFO("Engine", "Hardware acceleration disabled");
     }
 
-    // Acquire desktop host (tries WorkerW → Progman → error)
-    // Use a temporary unique_ptr so the host is released on any early return.
-    auto host = rex::platform::windows::DesktopHostFactory::CreateBestAvailable();
+    // Acquire desktop host. "MultiMonitor" is the explicit opt-in for
+    // per-monitor wallpapers; anything else auto-picks the single-monitor
+    // strategy (WorkerW → Progman → error).
+    std::unique_ptr<rex::platform::windows::IDesktopHost> host;
+    if (config.desktopHost == "MultiMonitor") {
+        host = rex::platform::windows::DesktopHostFactory::Create("MultiMonitor");
+        if (!host) {
+            REX_LOG_WARN("Engine",
+                "MultiMonitor host unavailable, falling back to auto selection");
+            host = rex::platform::windows::DesktopHostFactory::CreateBestAvailable();
+        }
+    } else {
+        host = rex::platform::windows::DesktopHostFactory::CreateBestAvailable();
+    }
     if (!host) {
         REX_LOG_ERROR("Engine", "Failed to create desktop host");
         return shared::Result<void>(shared::ErrorCode::UnknownError,
@@ -60,8 +72,26 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
         return result;
     }
 
+    // Video backend (FFmpeg D3D11VA -> D3D12 shared textures). Non-fatal:
+    // video scenes simply won't play if this fails.
+    m_videoManager = std::make_unique<VideoManager>();
+    auto vmResult = m_videoManager->Initialize(m_config, m_renderer->GetDevice().Get());
+    if (vmResult.IsError()) {
+        REX_LOG_WARN("Engine", "VideoManager init failed: {} (video scenes will not play)",
+                     vmResult.Error().message);
+        m_videoManager.reset();
+    }
+
     // Success — transfer ownership to member
     m_desktopHost = std::move(host);
+
+    // Multi-monitor mode: one compositor per monitor inside the wallpaper
+    // layer + restore persisted per-monitor assignments.
+    if (m_videoManager) {
+        m_videoManager->SetWallpaperHostWindow(
+            m_desktopHost->GetWallpaperLayerWindow());
+    }
+    SetupMonitorCompositors();
 
     // Start shell monitor for desktop host recovery
     // The callback runs on a background thread — it only sets a flag.
@@ -93,31 +123,48 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
 }
 
 shared::Result<void> Engine::Shutdown() {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-    if (m_state == EngineState::Uninitialized) {
-        // Defensive: clean up anything that may have been allocated during
-        // a failed Initialize (e.g. renderer failure after host acquisition).
-        if (m_desktopHost) {
-            m_desktopHost->Release();
-            m_desktopHost.reset();
+        if (m_state == EngineState::Uninitialized) {
+            // Defensive: clean up anything that may have been allocated during
+            // a failed Initialize (e.g. renderer failure after host acquisition).
+            if (m_desktopHost) {
+                m_desktopHost->Release();
+                m_desktopHost.reset();
+            }
+            m_renderer.reset();
+            return shared::Result<void>();
         }
-        m_renderer.reset();
-        return shared::Result<void>();
-    }
 
-    REX_LOG_INFO("Engine", "Shutting down...");
+        REX_LOG_INFO("Engine", "Shutting down...");
 
-    SetState(EngineState::ShuttingDown);
+        SetState(EngineState::ShuttingDown);
+        m_desktopHost->StopMonitor();
+        m_running = false;
+        // NOTE: m_mutex is intentionally released here (end of scope) before
+        // joining the render thread. The render thread calls GetPosition() /
+        // CheckFullScreenPause() internally which both re-enter m_mutex —
+        // joining while holding the lock is a guaranteed deadlock.
+    } // <── m_mutex released here
 
-    m_desktopHost->StopMonitor();
-    m_running = false;
+    // The render thread may still be executing its current frame; wait for
+    // it to observe m_running==false and exit cleanly.
     if (m_renderThread.joinable()) {
         m_renderThread.join();
     }
 
-    m_playback.reset();
+    // Render thread is fully stopped — no further concurrent access to
+    // m_videoManager / m_renderer / m_desktopHost; no lock needed.
+    REX_LOG_INFO("Engine", "Shutdown: video teardown begin");
+    if (m_videoManager) {
+        m_videoManager->ShutdownMonitorCompositors();
+        m_videoManager->Shutdown();
+        m_videoManager.reset();
+    }
+    REX_LOG_INFO("Engine", "Shutdown: video teardown done");
     m_renderer.reset();
+    REX_LOG_INFO("Engine", "Shutdown: renderer destroyed");
     m_adapter.reset();
     m_desktopHost->Release();
     m_desktopHost.reset();
@@ -136,8 +183,12 @@ shared::Result<void> Engine::Shutdown() {
 shared::Result<void> Engine::ReinitializeRenderer() {
     REX_LOG_INFO("Engine", "Reinitializing renderer...");
 
-    // Destroy old renderer
-    m_playback.reset();
+    // Destroy old renderer (and the video backend that borrowed its device)
+    if (m_videoManager) {
+        m_videoManager->ShutdownMonitorCompositors();
+        m_videoManager->Shutdown();
+        m_videoManager.reset();
+    }
     if (m_renderer) {
         m_renderer->Shutdown();
     }
@@ -165,20 +216,82 @@ shared::Result<void> Engine::ReinitializeRenderer() {
         return result;
     }
 
+    // Recreate the video backend on the new device.
+    m_videoManager = std::make_unique<VideoManager>();
+    auto vmResult = m_videoManager->Initialize(m_config, m_renderer->GetDevice().Get());
+    if (vmResult.IsError()) {
+        REX_LOG_WARN("Engine", "VideoManager re-init failed: {} (video scenes will not play)",
+                     vmResult.Error().message);
+        m_videoManager.reset();
+    }
+
+    // Rebuild per-monitor compositors (device changed) and restore
+    // persisted assignments.
+    if (m_videoManager) {
+        m_videoManager->SetWallpaperHostWindow(
+            m_desktopHost->GetWallpaperLayerWindow());
+    }
+    SetupMonitorCompositors();
+
     // LoadScene only accepts Initialized/Stopped states; the engine is in
-    // Error during recovery, so move to Initialized before reloading.
+    // Error during recovery, so move to Initialized before the caller
+    // (HandleDeviceLoss) reloads the scene.
     SetState(EngineState::Initialized);
 
-    // Reload scene
-    if (!m_currentScene.sourcePath.empty()) {
-        auto loadResult = LoadScene(m_currentScene);
+    REX_LOG_INFO("Engine", "Renderer reinitialized successfully");
+    return shared::Result<void>();
+}
+
+// ─── Device-loss recovery ─────────────────────────────────────────────────
+
+shared::Result<void> Engine::HandleDeviceLoss() {
+    REX_LOG_INFO("Engine", "Handling device loss...");
+
+    // 1. Save playback state (before any teardown invalidates it).
+    const bool wasPlaying = m_playing.load();
+    const SceneInfo savedScene = m_currentScene;
+    double savedPosition = 0.0;
+    if (m_videoManager && m_videoManager->IsOpen()) {
+        savedPosition = m_videoManager->GetPosition();
+    }
+
+    // 2. Recreate the renderer (new device/swap chain), reacquire the
+    //    desktop host if needed, and rebuild the video backend on the new
+    //    device. ReinitializeRenderer tears down and recreates
+    //    m_videoManager internally — it must not touch the old one.
+    auto result = ReinitializeRenderer();
+    if (result.IsError()) {
+        REX_LOG_ERROR("Engine", "Device-loss recovery failed at renderer: {}",
+                      result.Error().message);
+        return result;
+    }
+
+    // 3. Reload the scene (LoadScene is the single entry point: it opens
+    //    the video / texture and applies scene settings).
+    if (!savedScene.sourcePath.empty()) {
+        auto loadResult = LoadScene(savedScene);
         if (loadResult.IsError()) {
-            REX_LOG_WARN("Engine", "Failed to reload scene after recovery: {}",
+            REX_LOG_WARN("Engine", "Reload scene after recovery failed: {}",
                          loadResult.Error().message);
+        }
+        // Seek to the saved position for video.
+        if (savedScene.type == "video" && m_videoManager &&
+            m_videoManager->IsOpen()) {
+            m_videoManager->Seek(savedPosition);
         }
     }
 
-    REX_LOG_INFO("Engine", "Renderer reinitialized successfully");
+    // 4. Restore the playing state.
+    if (wasPlaying && !savedScene.sourcePath.empty()) {
+        auto playResult = Play();
+        if (playResult.IsError()) {
+            REX_LOG_WARN("Engine", "Resume after recovery failed: {}",
+                         playResult.Error().message);
+        }
+    }
+
+    REX_LOG_INFO("Engine", "Device-loss recovery complete (resumed at {:.2f}s)",
+                 savedPosition);
     return shared::Result<void>();
 }
 
@@ -209,19 +322,53 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
             REX_LOG_WARN("Engine", "Failed to load texture '{}': {}",
                          scene.sourcePath.c_str(), texResult.Error().message);
         }
-    } else if (scene.type == "video" && !scene.sourcePath.empty()) {
-        m_playback = std::make_unique<PlaybackController>();
-        auto videoResult = m_playback->Open(scene.sourcePath,
-                                            m_config.enableHardwareAcceleration);
-        if (videoResult.IsError()) {
-            REX_LOG_WARN("Engine", "Failed to open video '{}': {}",
-                         scene.sourcePath.c_str(), videoResult.Error().message);
-            m_playback.reset();
-        } else {
-            // Apply scene-level playback settings immediately.
-            m_playback->SetLoop(scene.loop);
-            m_playback->SetSpeed(std::clamp(scene.speed, 0.25f, 4.0f));
+        // Per-monitor compositors without an override mirror the main scene.
+        if (m_videoManager) {
+            m_videoManager->SetSharedStaticWallpaper(scene.sourcePath);
         }
+    } else if (scene.type == "video" && !scene.sourcePath.empty()) {
+        if (!m_videoManager) {
+            REX_LOG_WARN("Engine", "VideoManager not available, video will not play");
+        } else {
+            auto videoResult = m_videoManager->OpenVideo(scene.sourcePath);
+            if (videoResult.IsError()) {
+                REX_LOG_WARN("Engine", "Failed to open video '{}': {}",
+                             scene.sourcePath.c_str(), videoResult.Error().message);
+            } else {
+                // Apply scene-level playback settings immediately.
+                m_videoManager->SetLoop(scene.loop);
+                m_videoManager->SetSpeed(std::clamp(scene.speed, 0.25f, 4.0f));
+                // Adaptive resolution: pick the stream that best fits the
+                // target monitor. A stream switch may rebuild the pool with
+                // new NT handles; the ClearVideoFrame() below drops the
+                // renderer's stale slot cache.
+                if (m_desktopHost) {
+                    m_videoManager->SetTargetResolution(m_desktopHost->GetWidth(),
+                                                        m_desktopHost->GetHeight());
+                }
+            }
+        }
+    }
+
+    // Push scene-level video adjustments to the renderer (and compositors).
+    if (m_renderer) {
+        m_renderer->SetVideoAdjustments(m_currentScene.brightness,
+                                        m_currentScene.contrast,
+                                        m_currentScene.saturation);
+    }
+    if (m_videoManager) {
+        m_videoManager->ApplyVideoAdjustments(m_currentScene.brightness,
+                                              m_currentScene.contrast,
+                                              m_currentScene.saturation);
+        m_videoManager->ApplyFillMode(m_currentScene.fillMode);
+    }
+
+    // Push the transform (rotation/flip) to the renderer and compositors.
+    ApplyTransform();
+
+    // Drop any GPU frames from a previous video scene.
+    if (m_renderer) {
+        m_renderer->ClearVideoFrame();
     }
 
     SetState(EngineState::Stopped);
@@ -235,13 +382,14 @@ shared::Result<void> Engine::UnloadScene() {
 
     m_scenesReleased.fetch_add(1, std::memory_order_relaxed);
 
-    if (m_playback) {
-        m_playback->Close();
-        m_playback.reset();
+    if (m_videoManager) {
+        m_videoManager->Close();
+        m_videoManager->ClearVideoFrames();
     }
 
     if (m_renderer) {
         m_renderer->ClearTexture();
+        m_renderer->ClearVideoFrame();
     }
 
     m_adapter.reset();
@@ -262,8 +410,8 @@ shared::Result<void> Engine::Play() {
 
     REX_LOG_INFO("Engine", "Play requested");
 
-    if (m_playback && m_currentScene.type == "video") {
-        m_playback->Play();
+    if (m_videoManager && m_currentScene.type == "video") {
+        m_videoManager->Play();
     }
 
     m_playing = true;
@@ -282,8 +430,8 @@ shared::Result<void> Engine::Pause() {
 
     REX_LOG_INFO("Engine", "Pause requested");
 
-    if (m_playback) {
-        m_playback->Pause();
+    if (m_videoManager) {
+        m_videoManager->Pause();
     }
 
     m_playing = false;
@@ -298,8 +446,8 @@ shared::Result<void> Engine::Stop() {
 
     REX_LOG_INFO("Engine", "Stop requested");
 
-    if (m_playback) {
-        m_playback->Stop();
+    if (m_videoManager) {
+        m_videoManager->Stop();
     }
 
     m_playing = false;
@@ -319,8 +467,8 @@ double Engine::GetPosition() const {
 }
 
 double Engine::GetDuration() const {
-    if (m_playback && m_playback->IsOpen()) {
-        return m_playback->GetDuration();
+    if (m_videoManager && m_videoManager->IsOpen()) {
+        return m_videoManager->GetDuration();
     }
     return 0.0;
 }
@@ -390,6 +538,9 @@ std::vector<MonitorInfo> Engine::EnumerateMonitors() const {
             UINT dpiX = 96, dpiY = 96;
             info.dpiScale = static_cast<float>(dpiX) / 96.0f;
 
+            // Stable identity across disconnects (EDID descriptor hash).
+            info.edidHash = rex::platform::windows::GetMonitorEdidHash(hMon);
+
             vec->push_back(std::move(info));
             return TRUE;
         },
@@ -404,6 +555,9 @@ shared::Result<void> Engine::SetFillMode(FillMode mode) {
     if (m_renderer) {
         m_renderer->SetFillMode(mode);
     }
+    if (m_videoManager) {
+        m_videoManager->ApplyFillMode(mode);
+    }
     REX_LOG_DEBUG("Engine", "Fill mode set to {}", static_cast<int>(mode));
     return shared::Result<void>();
 }
@@ -411,6 +565,16 @@ shared::Result<void> Engine::SetFillMode(FillMode mode) {
 shared::Result<void> Engine::SetBrightness(float value) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_currentScene.brightness = std::clamp(value, 0.0f, 2.0f);
+    if (m_renderer) {
+        m_renderer->SetVideoAdjustments(m_currentScene.brightness,
+                                        m_currentScene.contrast,
+                                        m_currentScene.saturation);
+    }
+    if (m_videoManager) {
+        m_videoManager->ApplyVideoAdjustments(m_currentScene.brightness,
+                                              m_currentScene.contrast,
+                                              m_currentScene.saturation);
+    }
     REX_LOG_DEBUG("Engine", "Brightness set to {:.2f}", m_currentScene.brightness);
     return shared::Result<void>();
 }
@@ -418,6 +582,16 @@ shared::Result<void> Engine::SetBrightness(float value) {
 shared::Result<void> Engine::SetContrast(float value) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_currentScene.contrast = std::clamp(value, 0.0f, 2.0f);
+    if (m_renderer) {
+        m_renderer->SetVideoAdjustments(m_currentScene.brightness,
+                                        m_currentScene.contrast,
+                                        m_currentScene.saturation);
+    }
+    if (m_videoManager) {
+        m_videoManager->ApplyVideoAdjustments(m_currentScene.brightness,
+                                              m_currentScene.contrast,
+                                              m_currentScene.saturation);
+    }
     REX_LOG_DEBUG("Engine", "Contrast set to {:.2f}", m_currentScene.contrast);
     return shared::Result<void>();
 }
@@ -425,6 +599,16 @@ shared::Result<void> Engine::SetContrast(float value) {
 shared::Result<void> Engine::SetSaturation(float value) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_currentScene.saturation = std::clamp(value, 0.0f, 2.0f);
+    if (m_renderer) {
+        m_renderer->SetVideoAdjustments(m_currentScene.brightness,
+                                        m_currentScene.contrast,
+                                        m_currentScene.saturation);
+    }
+    if (m_videoManager) {
+        m_videoManager->ApplyVideoAdjustments(m_currentScene.brightness,
+                                              m_currentScene.contrast,
+                                              m_currentScene.saturation);
+    }
     REX_LOG_DEBUG("Engine", "Saturation set to {:.2f}", m_currentScene.saturation);
     return shared::Result<void>();
 }
@@ -432,15 +616,28 @@ shared::Result<void> Engine::SetSaturation(float value) {
 shared::Result<void> Engine::SetVolume(float value) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_currentScene.volume = std::clamp(value, 0.0f, 1.0f);
+    if (m_videoManager) {
+        m_videoManager->SetVolume(m_currentScene.volume);
+    }
     REX_LOG_DEBUG("Engine", "Volume set to {:.2f}", m_currentScene.volume);
+    return shared::Result<void>();
+}
+
+shared::Result<void> Engine::SetMute(bool mute) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_muted = mute;
+    if (m_videoManager) {
+        m_videoManager->SetMute(mute);
+    }
+    REX_LOG_DEBUG("Engine", "Mute set to {}", mute ? "true" : "false");
     return shared::Result<void>();
 }
 
 shared::Result<void> Engine::SetLoop(bool loop) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_loop = loop;
-    if (m_playback) {
-        m_playback->SetLoop(loop);
+    if (m_videoManager) {
+        m_videoManager->SetLoop(loop);
     }
     REX_LOG_DEBUG("Engine", "Loop set to {}", loop ? "true" : "false");
     return shared::Result<void>();
@@ -449,8 +646,8 @@ shared::Result<void> Engine::SetLoop(bool loop) {
 shared::Result<void> Engine::SetSpeed(float speed) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_speed = std::clamp(speed, 0.25f, 4.0f);
-    if (m_playback) {
-        m_playback->SetSpeed(m_speed.load());
+    if (m_videoManager) {
+        m_videoManager->SetSpeed(m_speed.load());
     }
     REX_LOG_DEBUG("Engine", "Speed set to {:.2f}", m_speed.load());
     return shared::Result<void>();
@@ -487,11 +684,28 @@ shared::Result<void> Engine::SetProperty(const std::string& property, const std:
     if (property == "volume") {
         return SetVolume(static_cast<float>(std::atof(value.c_str())));
     }
+    if (property == "mute") {
+        return SetMute(value == "true" || value == "1");
+    }
     if (property == "speed") {
         return SetSpeed(static_cast<float>(std::atof(value.c_str())));
     }
     if (property == "loop") {
         return SetLoop(value == "true" || value == "1");
+    }
+    if (property == "rotation") {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_sceneRotation = static_cast<float>(std::atof(value.c_str()));
+        ApplyTransform();
+        return shared::Result<void>();
+    }
+    if (property == "flipH" || property == "flipV") {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const bool on = (value == "true" || value == "1");
+        if (property == "flipH") m_sceneFlipH = on;
+        else                     m_sceneFlipV = on;
+        ApplyTransform();
+        return shared::Result<void>();
     }
 
     return shared::Result<void>(shared::ErrorCode::InvalidArgument,
@@ -524,20 +738,47 @@ shared::Result<void> Engine::SetAudioSensitivity(float sensitivity) {
     return shared::Result<void>();
 }
 
+IWallpaperEngine::FrameSurface Engine::GetFrameSurface() const {
+    FrameSurface s;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_videoManager || !m_videoManager->IsOpen()) {
+        return s;
+    }
+    const auto last = m_videoManager->GetLastFrame();
+    s.available = true;
+    s.fenceHandle = reinterpret_cast<uint64_t>(m_videoManager->GetFenceHandle());
+    s.adapterLuid = m_videoManager->GetAdapterLuid();
+    s.slotCount = m_videoManager->GetSlotCount();
+    s.currentSlot = last.slot;
+    s.currentFenceValue = last.fenceValue;
+    s.width = last.width;
+    s.height = last.height;
+    s.frameIndex = last.frameIndex;
+    s.generation = m_videoManager->GetSurfaceGeneration();
+    return s;
+}
+
+uint64_t Engine::GetFrameSlotHandle(uint32_t slot) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_videoManager || !m_videoManager->IsOpen()) {
+        return 0;
+    }
+    return reinterpret_cast<uint64_t>(m_videoManager->GetSlotHandle(slot));
+}
+
 void Engine::GetTelemetry(EngineTelemetry& out) const {
     out = EngineTelemetry{};
 
-    if (m_playback) {
-        PlaybackTelemetry pt = m_playback->GetTelemetry();
-        out.framesDecoded  = pt.framesDecoded;
-        out.framesConsumed = pt.framesConsumed;
-        out.framesDropped  = pt.framesDropped;
-        out.decoderFps     = pt.decoderFps;
-        out.renderFps      = pt.renderFps;
-        out.ringSlotCount  = pt.ringSlotCount;
-        out.ringBytes      = pt.ringBytes;
-    }
-    if (m_renderer) {
+    if (m_videoManager) {
+        VideoPlaybackTelemetry vt = m_videoManager->GetTelemetry();
+        out.framesDecoded  = vt.framesDecoded;
+        out.framesConsumed = vt.framesConsumed;
+        out.framesDropped  = vt.framesDropped;
+        out.decoderFps     = vt.decoderFps;
+        out.renderFps      = vt.renderFps;
+        out.ringSlotCount  = vt.ringSlotCount;
+        out.ringBytes      = vt.ringBytes;
+    }    if (m_renderer) {
         out.textureBytes    = m_renderer->GetTextureBytes();
         out.uploadBytes     = m_renderer->GetUploadBytes();
         out.textureRecreations = m_renderer->GetTextureRecreations();
@@ -547,9 +788,19 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
 
     out.videoWidth   = 0;
     out.videoHeight  = 0;
-    if (m_playback && m_currentScene.type == "video") {
-        out.videoWidth  = m_playback->GetWidth();
-        out.videoHeight = m_playback->GetHeight();
+    if (m_videoManager && m_currentScene.type == "video") {
+        out.videoWidth  = m_videoManager->GetWidth();
+        out.videoHeight = m_videoManager->GetHeight();
+    }
+
+    // Adaptive resolution: size of the stream actually being decoded.
+    if (m_videoManager && m_videoManager->IsOpen()) {
+        out.decodeWidth  = m_videoManager->GetWidth();
+        out.decodeHeight = m_videoManager->GetHeight();
+    }
+    if (m_renderer) {
+        out.hdrActive      = m_renderer->IsHDRActive();
+        out.displayMaxNits = m_renderer->GetDisplayMaxNits();
     }
 
     out.scenesLoaded   = m_scenesLoaded.load(std::memory_order_relaxed);
@@ -581,8 +832,8 @@ void Engine::DumpStats() const {
                  m_currentMonitor.id.c_str(),
                  m_currentMonitor.width, m_currentMonitor.height);
 
-    if (m_playback) {
-        auto tel = m_playback->GetTelemetry();
+    if (m_videoManager) {
+        auto tel = m_videoManager->GetTelemetry();
         REX_LOG_INFO("Engine", "  ── Playback ──────");
         REX_LOG_INFO("Engine", "  Frames decoded:  {}", tel.framesDecoded);
         REX_LOG_INFO("Engine", "  Frames consumed: {}", tel.framesConsumed);
@@ -599,12 +850,16 @@ void Engine::Update(double deltaTime) {
     m_frameTime = deltaTime;
 
     if (m_playing) {
-        double elapsed = GetPosition();
-        m_currentPosition = elapsed;
+        // Read the stopwatch directly — this method runs on the render
+        // thread which owns m_stopwatch and m_currentPosition. Calling
+        // GetPosition() here would try to acquire m_mutex from the render
+        // thread, creating a deadlock with Shutdown() holding m_mutex and
+        // waiting for the render thread to exit.
+        m_currentPosition = m_stopwatch.ElapsedSeconds();
 
         if (m_frameCount % 60 == 0) {
             REX_LOG_DEBUG("Engine", "Frame {}: {:.2f} s, {:.2f} ms",
-                          m_frameCount, elapsed, deltaTime);
+                          m_frameCount, m_currentPosition, deltaTime);
         }
     }
 }
@@ -635,6 +890,46 @@ void Engine::CheckDisplayChanges() {
     m_lastPrimaryWidth  = primaryW;
     m_lastPrimaryHeight = primaryH;
 
+    // Multi-monitor mode: reconcile compositors with the new topology
+    // (add connected, remove disconnected, update moved/resized).
+    if (IsMultiMonitorMode() && m_videoManager) {
+        auto active = m_videoManager->GetActiveMonitors();
+
+        for (const auto& a : active) {
+            bool found = false;
+            for (const auto& m : monitors) {
+                if (m.id != a.id) continue;
+                found = true;
+                if (m.width != a.width || m.height != a.height ||
+                    m.x != a.x || m.y != a.y) {
+                    m_videoManager->UpdateMonitor(m);
+                }
+                break;
+            }
+            if (!found) {
+                auto rm = m_videoManager->RemoveMonitor(a.id);
+                if (rm.IsError()) {
+                    REX_LOG_WARN("Engine", "RemoveMonitor failed: {}",
+                                 rm.Error().message);
+                }
+            }
+        }
+
+        for (const auto& m : monitors) {
+            bool found = false;
+            for (const auto& a : active) {
+                if (a.id == m.id) { found = true; break; }
+            }
+            if (!found) {
+                auto am = m_videoManager->AddMonitor(m);
+                if (am.IsError()) {
+                    REX_LOG_WARN("Engine", "AddMonitor failed: {}",
+                                 am.Error().message);
+                }
+            }
+        }
+    }
+
     // Update the assigned monitor dimensions if it was the primary
     if (m_currentMonitor.isPrimary) {
         m_currentMonitor.width  = primaryW;
@@ -654,6 +949,62 @@ void Engine::SetState(EngineState state) {
     REX_LOG_DEBUG("Engine", "State changed to {}", static_cast<int>(state));
 }
 
+void Engine::ApplyTransform() {
+    if (m_renderer) {
+        m_renderer->SetRotation(m_sceneRotation);
+        m_renderer->SetFlip(m_sceneFlipH, m_sceneFlipV);
+    }
+    if (m_videoManager) {
+        m_videoManager->ApplyTransform(m_sceneRotation, m_sceneFlipH,
+                                       m_sceneFlipV);
+    }
+}
+
+void Engine::CheckFullScreenPause() {
+    if (!m_config.pauseOnFullscreen) return;
+
+    // A foreground window that covers >=95% of its monitor's bounds is
+    // treated as full-screen. Monitor-aware: a game on a secondary monitor
+    // must not be judged against the whole virtual desktop.
+    bool fullScreen = false;
+    HWND fg = GetForegroundWindow();
+    if (fg && IsWindowVisible(fg) && !IsIconic(fg)) {
+        RECT fgRect;
+        if (GetWindowRect(fg, &fgRect) && fgRect.right > fgRect.left &&
+            fgRect.bottom > fgRect.top) {
+            MONITORINFO mi = {};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST),
+                                &mi)) {
+                RECT inter;
+                IntersectRect(&inter, &fgRect, &mi.rcMonitor);
+                const int iw = inter.right - inter.left;
+                const int ih = inter.bottom - inter.top;
+                const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+                const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                fullScreen = (static_cast<int64_t>(iw) * ih * 100 >=
+                              static_cast<int64_t>(mw) * mh * 95);
+            }
+        }
+    }
+
+    // IMPORTANT: Do NOT call Pause()/Play() directly here. Both methods
+    // acquire m_mutex, and this function runs on the render thread. If
+    // Shutdown() is concurrently holding m_mutex and waiting for the render
+    // thread to exit, calling Pause()/Play() here would deadlock.
+    // Instead, post an atomic signal that the render loop services before
+    // the next GPU submit — fully lock-free on the render thread.
+    if (fullScreen && !m_fullScreenPaused && m_state == EngineState::Running) {
+        m_fullScreenPaused = true;
+        REX_LOG_INFO("Engine", "Full-screen app detected — requesting wallpaper pause");
+        m_fullScreenRequest.store(1, std::memory_order_release);
+    } else if (!fullScreen && m_fullScreenPaused) {
+        m_fullScreenPaused = false;
+        REX_LOG_INFO("Engine", "Full-screen app closed — requesting wallpaper resume");
+        m_fullScreenRequest.store(-1, std::memory_order_release);
+    }
+}
+
 void Engine::RenderLoop() {
     using namespace std::chrono;
 
@@ -668,6 +1019,36 @@ void Engine::RenderLoop() {
     while (m_running) {
         auto frameStart = high_resolution_clock::now();
 
+        // ── Auto-pause behind full-screen apps (throttled) ──────────────
+        if (m_frameCount % 30 == 0) {
+            CheckFullScreenPause();
+        }
+
+        // ── Service fullscreen pause/resume request (lock-free) ─────────
+        // CheckFullScreenPause() posts 1 (pause) or -1 (resume) to avoid
+        // calling the locking Pause()/Play() APIs from the render thread.
+        // We service the request here, at the top of the frame, before any
+        // GPU work begins.
+        if (const int req = m_fullScreenRequest.exchange(0, std::memory_order_acq_rel)) {
+            if (req == 1 && m_state == EngineState::Running) {
+                // Pause: stop video + mark engine paused (no m_mutex needed;
+                // render thread exclusively owns these during normal operation)
+                if (m_videoManager) m_videoManager->Pause();
+                m_playing = false;
+                m_stopwatch.Stop();
+                SetState(EngineState::Paused);
+                REX_LOG_INFO("Engine", "Full-screen pause applied");
+            } else if (req == -1 && m_state == EngineState::Paused) {
+                // Resume: restart video + mark engine running
+                if (m_videoManager) m_videoManager->Play();
+                m_playing = true;
+                m_stopwatch.Start();
+                SetState(EngineState::Running);
+                REX_LOG_INFO("Engine", "Full-screen resume applied");
+            }
+        }
+
+
         // ── Periodically check for display topology changes ─────────────
         if (m_frameCount % 120 == 0) {
             CheckDisplayChanges();
@@ -679,13 +1060,11 @@ void Engine::RenderLoop() {
         // contention.
         if (m_recoveryNeeded.exchange(false)) {
             REX_LOG_INFO("Engine", "WorkerW recovery requested, reinitializing...");
-            bool wasPlaying = m_playing.load();
             SetState(EngineState::Error);
             m_recoveryCount++;
 
-            auto recoveryResult = ReinitializeRenderer();
+            auto recoveryResult = HandleDeviceLoss();
             if (recoveryResult.IsSuccess()) {
-                if (wasPlaying) Play();
                 m_frameCount = 0;
             }
             continue;
@@ -698,9 +1077,8 @@ void Engine::RenderLoop() {
             m_deviceResetCount++;
             m_recoveryCount++;
 
-            auto recoveryResult = ReinitializeRenderer();
+            auto recoveryResult = HandleDeviceLoss();
             if (recoveryResult.IsSuccess()) {
-                if (m_playing) Play();
                 m_frameCount = 0;
             }
             continue;
@@ -710,19 +1088,24 @@ void Engine::RenderLoop() {
             m_renderer->BeginFrame();
 
             // ── Video frame update ──────────────────────────────────────
-            // Tick() returns a pointer into the playback ring buffer
-            // (SPSC-guaranteed valid until the producer wraps around);
-            // the pixel data is uploaded synchronously before the pointer
-            // is dropped, so no per-frame copies are needed.
-            if (m_state == EngineState::Running && m_playback
+            // Tick() returns a pointer into the scheduler ring (SPSC:
+            // stable until the next Tick()); the frame stays valid until
+            // then. DrawVideoFrame registers the pool slot + fence wait;
+            // actual sampling happens in RenderFrame() after the queue
+            // has waited for the D3D11 blt to finish.
+            if (m_state == EngineState::Running && m_videoManager
+                && m_videoManager->IsOpen()
                 && m_currentScene.type == "video") {
-                const DecodedFrame* frame = m_playback->Tick();
+                const VideoFrame* frame = m_videoManager->Tick(GetPosition());
                 if (frame && frame->valid && m_renderer) {
-                    m_renderer->UpdateTexturePixels(
-                        frame->pixels.data(),
-                        frame->width,
-                        frame->height,
-                        frame->rowPitch);
+                    m_renderer->DrawVideoFrame(*frame,
+                                               m_videoManager->GetSharedFence());
+                }
+                // Multi-monitor mode: the same ticked frame goes to every
+                // monitor compositor (each does its own Begin/Draw/Render/
+                // End on the shared device).
+                if (frame && frame->valid && IsMultiMonitorMode()) {
+                    m_videoManager->PresentToAllMonitors(*frame);
                 }
             }
 
@@ -748,6 +1131,37 @@ void Engine::RenderLoop() {
     }
 
     REX_LOG_INFO("Engine", "Render loop ended");
+}
+
+// ─── Per-monitor wallpapers (Phase 5) ─────────────────────────────────────
+
+void Engine::SetupMonitorCompositors() {
+    if (!m_videoManager || !IsMultiMonitorMode()) return;
+
+    for (const auto& info : EnumerateMonitors()) {
+        auto result = m_videoManager->AddMonitor(info);
+        if (result.IsError()) {
+            REX_LOG_WARN("Engine", "Failed to add compositor for monitor '{}': {}",
+                         info.id.c_str(), result.Error().message);
+        }
+    }
+    m_videoManager->RestoreMonitorAssignments();
+}
+
+shared::Result<void> Engine::SetPerMonitorWallpaper(const std::string& monitorId,
+                                                    const std::string& path) {
+    if (!m_videoManager) {
+        return shared::Result<void>(shared::ErrorCode::NotInitialized,
+                                    "video manager not initialized");
+    }
+    return m_videoManager->SetPerMonitorWallpaper(monitorId, path);
+}
+
+void Engine::SetSettingsService(
+    std::shared_ptr<rex::settings::ISettingsService> settings) {
+    if (m_videoManager) {
+        m_videoManager->SetSettingsService(std::move(settings));
+    }
 }
 
 } // namespace rex::wallpaper
