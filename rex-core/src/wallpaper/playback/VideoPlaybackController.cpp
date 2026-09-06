@@ -61,7 +61,35 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     m_framesDecoded.store(0, std::memory_order_relaxed);
     m_framesConsumed.store(0, std::memory_order_relaxed);
     m_framesDropped.store(0, std::memory_order_relaxed);
-    m_decoderFrameCount = 0;
+
+    // ── Prewarm (items 5+6): decode + publish the first frame HERE ─────
+    // Two wins: the surface pool is built synchronously inside Open()
+    // (resolution is known from the real frame — no lazy mid-playback
+    // rebuild), and Play() can present instantly without waiting a full
+    // decoder interval for frame #1.
+    if (m_prewarmEnabled) {
+        VideoFrame warm;
+        {
+            std::lock_guard lock(m_decodeMutex);
+            if (m_decoder->DecodeFrame(warm)) {
+                m_scheduler.Push(warm);
+                m_decoderFrameCount = 1;
+                m_framesDecoded.store(1, std::memory_order_relaxed);
+                m_position.store(warm.pts, std::memory_order_release);
+                std::lock_guard lastLock(m_lastFrameMutex);
+                m_lastFrame.slot       = warm.slot;
+                m_lastFrame.fenceValue = warm.fenceValue;
+                m_lastFrame.width      = warm.width;
+                m_lastFrame.height     = warm.height;
+                m_lastFrame.frameIndex = warm.frameIndex;
+            } else {
+                REX_LOG_WARN("VideoPlaybackController",
+                             "prewarm decode failed; first frame will arrive "
+                             "from the decode thread");
+            }
+        }
+    }
+
     m_consumerFrameCount = 0;
     m_fpsStartTime = Clock::now();
 
@@ -222,6 +250,12 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
         t.gpuToCpuCopies = d.gpuToCpuCopies;
         t.cpuToGpuCopies = d.cpuToGpuCopies;
         t.uploadLatencyMs = d.lastDecodeMs;
+        t.decodeMsP50 = d.decodeMsP50;
+        t.decodeMsP95 = d.decodeMsP95;
+        t.decodeMsP99 = d.decodeMsP99;
+        t.vpMsP50     = d.vpMsP50;
+        t.vpMsP95     = d.vpMsP95;
+        t.vpMsP99     = d.vpMsP99;
         t.recoveryCount = d.recoveryCount;
         t.deviceResets = d.deviceResets;
     }

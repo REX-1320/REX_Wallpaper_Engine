@@ -101,6 +101,9 @@ struct WallpaperConfig {
     // foreground, and resume when it closes. Detection is monitor-aware:
     // a window covering >=95% of its monitor counts as full-screen.
     bool pauseOnFullscreen = true;
+    // --force-sdr diagnostic: override hdrOutput to 0 in the shader so SDR
+    // video always goes through the simple BT.709 + sRGB path.
+    bool forceSdr = false;
 };
 
 // ─── EngineTelemetry ────────────────────────────────────────────────────────
@@ -141,6 +144,25 @@ struct EngineTelemetry {
 
     // Process
     double   privateBytesMB  = 0.0;
+
+    // Presents (P16): actual Present() calls — should track content rate
+    // (min(decoderFps, maxFps)), NOT the display refresh rate.
+    uint64_t presentCount = 0;
+
+    // P13 per-stage decode-pipeline percentiles (ms, last 128 frames).
+    double decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
+    double vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;
+
+    // GPU memory (adapter of the D3D12 renderer)
+    uint64_t gpuDedicatedBytes = 0;  // LOCAL segment current usage
+    uint64_t gpuSharedBytes    = 0;  // NON_LOCAL segment current usage
+    uint64_t gpuBudgetBytes    = 0;  // LOCAL segment budget
+
+    // Adapter topology (0 = unknown)
+    bool     decoderRendererSameAdapter  = false;
+    bool     rendererDisplaySameAdapter  = false;
+    uint64_t decoderAdapterLuid  = 0;
+    uint64_t rendererAdapterLuid = 0;
 };
 
 // ─── IWallpaperEngine ──────────────────────────────────────────────────────

@@ -60,6 +60,7 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE m_gpuStart{};
 
     std::vector<UINT> m_freeList;       // stack of free indices
+    std::vector<bool> m_allocated;      // true if index is currently allocated
     mutable std::mutex m_mutex;
 };
 

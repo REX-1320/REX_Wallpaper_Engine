@@ -12,14 +12,14 @@ ModuleManager::~ModuleManager() = default;
 bool ModuleManager::initialize() { orchestrator_->initialize(); return true; }
 
 bool ModuleManager::startAll() {
-    for (auto* mod : orchestrator_->getRegistry().getAllModules()) {
+    for (auto mod : orchestrator_->getRegistry().getAllModules()) {
         orchestrator_->startModule(mod->getMetadata().id);
     }
     return true;
 }
 
 void ModuleManager::stopAll() {
-    for (auto* mod : orchestrator_->getRegistry().getAllModules()) {
+    for (auto mod : orchestrator_->getRegistry().getAllModules()) {
         orchestrator_->stopModule(mod->getMetadata().id);
     }
 }

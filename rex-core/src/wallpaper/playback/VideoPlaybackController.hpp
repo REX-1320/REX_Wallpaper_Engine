@@ -33,6 +33,9 @@ struct VideoPlaybackTelemetry {
     double   decoderFps      = 0.0;
     double   renderFps       = 0.0;
     double   uploadLatencyMs = 0.0;
+    // P13 per-stage percentiles (see DecoderDiagnostics).
+    double   decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
+    double   vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;
     uint32_t recoveryCount   = 0;
     uint32_t deviceResets    = 0;
     uint64_t ringSlotCount   = 0;
@@ -121,6 +124,9 @@ private:
     FrameScheduler m_scheduler;
 
     std::mutex m_decodeMutex;  // serializes DecodeFrame vs Seek
+    // P13 item 6: decode + publish frame #1 synchronously inside Open()
+    // (also builds the surface pool before the decode thread starts).
+    bool m_prewarmEnabled = true;
 
     // ─── Shared state ───────────────────────────────────────────────────
     std::atomic<bool> m_open{false};

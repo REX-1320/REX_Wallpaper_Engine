@@ -1,6 +1,6 @@
 #include "ShaderRenderer.hpp"
 #include "graphics/compositor/compositor.h"
-#include <cstdio>
+#include <shared/Logger.hpp>
 #include <cstdarg>
 #include <cmath>
 #include <fstream>
@@ -14,13 +14,6 @@ struct ShaderCB {
     float time, sinTime, cosTime, pad0;
     float width, height, invWidth, invHeight;
 };
-
-static void Log(const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
-}
 
 ShaderRenderer::ShaderRenderer() = default;
 ShaderRenderer::~ShaderRenderer() { unload(); }
@@ -44,18 +37,18 @@ bool ShaderRenderer::load(const SceneInfo& scene, ::Compositor& compositor) {
     m_width = static_cast<int>(compositor.GetViewportWidth());
     m_height = static_cast<int>(compositor.GetViewportHeight());
 
-    if (!InitD3D12()) { Log("[ShaderRenderer] D3D12 init failed\n"); return false; }
-    if (!CompileShaders(hlsl)) { Log("[ShaderRenderer] shader compile failed\n"); return false; }
-    if (!CreateRootSignature()) { Log("[ShaderRenderer] root sig failed\n"); return false; }
-    if (!CreatePipelineState()) { Log("[ShaderRenderer] PSO failed\n"); return false; }
-    if (!CreateSharedResources(m_width, m_height)) { Log("[ShaderRenderer] shared resources failed\n"); return false; }
+    if (!InitD3D12()) { REX_LOG_ERROR("ShaderRenderer", "D3D12 init failed"); return false; }
+    if (!CompileShaders(hlsl)) { REX_LOG_ERROR("ShaderRenderer", "shader compile failed"); return false; }
+    if (!CreateRootSignature()) { REX_LOG_ERROR("ShaderRenderer", "root sig failed"); return false; }
+    if (!CreatePipelineState()) { REX_LOG_ERROR("ShaderRenderer", "PSO failed"); return false; }
+    if (!CreateSharedResources(m_width, m_height)) { REX_LOG_ERROR("ShaderRenderer", "shared resources failed"); return false; }
 
     compositor.SubmitLayer({ LAYER_ID, 0, nullptr,
         { 0, 0, static_cast<float>(m_width), static_cast<float>(m_height) },
         1.0f, 0, true });
 
     m_playing.store(true);
-    Log("[ShaderRenderer] loaded (%dx%d)\n", m_width, m_height);
+    REX_LOG_INFO("ShaderRenderer", "loaded ({}x{})", m_width, m_height);
     return true;
 }
 
@@ -193,14 +186,14 @@ bool ShaderRenderer::CompileShaders(const std::string& hlslSource) {
     ComPtr<ID3DBlob> err;
     if (FAILED(D3DCompile(vsSrc, strlen(vsSrc), nullptr, nullptr, nullptr,
         "mainVS", "vs_5_0", 0, 0, &m_vsBlob, &err))) {
-        Log("[ShaderRenderer] VS compile failed: %s\n",
+        REX_LOG_ERROR("ShaderRenderer", "VS compile failed: {}",
             err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
 
     if (FAILED(D3DCompile(hlslSource.c_str(), hlslSource.size(), nullptr, nullptr, nullptr,
         "mainPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &m_psBlob, &err))) {
-        Log("[ShaderRenderer] PS compile failed: %s\n",
+        REX_LOG_ERROR("ShaderRenderer", "PS compile failed: {}",
             err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
@@ -223,7 +216,7 @@ bool ShaderRenderer::CreateRootSignature() {
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,
         &sig, &err))) {
-        Log("[ShaderRenderer] serialize root sig failed\n");
+        REX_LOG_ERROR("ShaderRenderer", "serialize root sig failed");
         return false;
     }
     if (FAILED(m_device->CreateRootSignature(0, sig->GetBufferPointer(),

@@ -1,5 +1,5 @@
 #include "SceneLoader.hpp"
-#include <cstdio>
+#include <shared/Logger.hpp>
 #include <vector>
 #include <filesystem>
 
@@ -10,7 +10,7 @@ namespace rex::wallpaper {
 
 bool SceneLoader::Load(const std::string& path, ECS& ecs, RenderPipeline& pipeline) {
     if (!std::filesystem::exists(path)) {
-        printf("[SceneLoader] File not found: %s\n", path.c_str());
+        REX_LOG_WARN("SceneLoader", "File not found: {}", path);
         return LoadBuiltinScene(ecs, pipeline);
     }
 
@@ -19,13 +19,13 @@ bool SceneLoader::Load(const std::string& path, ECS& ecs, RenderPipeline& pipeli
     cgltf_data* data = nullptr;
     cgltf_result result = cgltf_parse_file(&opts, path.c_str(), &data);
     if (result != cgltf_result_success) {
-        printf("[SceneLoader] cgltf_parse_file failed: %d\n", result);
+        REX_LOG_ERROR("SceneLoader", "cgltf_parse_file failed: {}", static_cast<int>(result));
         return LoadBuiltinScene(ecs, pipeline);
     }
 
     result = cgltf_load_buffers(&opts, data, path.c_str());
     if (result != cgltf_result_success) {
-        printf("[SceneLoader] cgltf_load_buffers failed: %d\n", result);
+        REX_LOG_ERROR("SceneLoader", "cgltf_load_buffers failed: {}", static_cast<int>(result));
         cgltf_free(data);
         return LoadBuiltinScene(ecs, pipeline);
     }
@@ -34,7 +34,7 @@ bool SceneLoader::Load(const std::string& path, ECS& ecs, RenderPipeline& pipeli
     if (!scene && data->scenes_count > 0)
         scene = &data->scenes[0];
     if (!scene) {
-        printf("[SceneLoader] no scene found\n");
+        REX_LOG_WARN("SceneLoader", "no scene found");
         cgltf_free(data);
         return LoadBuiltinScene(ecs, pipeline);
     }
@@ -143,7 +143,7 @@ bool SceneLoader::Load(const std::string& path, ECS& ecs, RenderPipeline& pipeli
     }
 
     cgltf_free(data);
-    printf("[SceneLoader] loaded %zu entities\n", ecs.GetEntities().size());
+    REX_LOG_INFO("SceneLoader", "loaded {} entities", ecs.GetEntities().size());
     return true;
 }
 
@@ -185,7 +185,7 @@ static const uint32_t CUBE_INDICES[] = {
 };
 
 bool SceneLoader::LoadBuiltinScene(ECS& ecs, RenderPipeline& pipeline) {
-    printf("[SceneLoader] loading built-in cube\n");
+    REX_LOG_INFO("SceneLoader", "loading built-in cube");
 
     size_t vertCount = sizeof(CUBE_VERTICES) / (8 * sizeof(float));
     std::vector<SceneVertex> verts(vertCount);
@@ -218,8 +218,7 @@ bool SceneLoader::LoadBuiltinScene(ECS& ecs, RenderPipeline& pipeline) {
     camEnt->camera->active = true;
     camEnt->transform.position = XMFLOAT3(0, 2, -5);
 
-    printf("[SceneLoader] built-in cube loaded (%zu verts, %zu indices)\n",
-           vertCount, idxCount);
+    REX_LOG_INFO("SceneLoader", "built-in cube loaded ({} verts, {} indices)", vertCount, idxCount);
     return true;
 }
 

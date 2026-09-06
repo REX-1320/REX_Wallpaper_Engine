@@ -10,7 +10,7 @@ fs.rmSync(out, { recursive: true, force: true })
 fs.mkdirSync(out, { recursive: true })
 
 execSync(
-  `electron-builder --win portable --config.directories.output="${out}"`,
+  `npx electron-builder --win portable --config.directories.output="${out}"`,
   { stdio: 'inherit', cwd: projectDir },
 )
 

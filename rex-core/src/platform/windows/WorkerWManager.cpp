@@ -82,6 +82,7 @@ WorkerWManager::~WorkerWManager() {
 }
 
 shared::Result<void> WorkerWManager::Acquire() {
+    std::lock_guard<std::mutex> opLock(m_opMutex);
     if (m_acquired) {
         return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
                                     "WorkerW already acquired");
@@ -107,6 +108,8 @@ shared::Result<void> WorkerWManager::Acquire() {
 
     m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
     if (!m_renderWindow) {
+        m_workerW = nullptr;
+        m_state.store(DesktopHostState::Suspect, std::memory_order_release);
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Failed to create render window");
     }
@@ -114,16 +117,25 @@ shared::Result<void> WorkerWManager::Acquire() {
     ReparentToWorkerW(m_renderWindow, m_workerW);
 
     if (!VerifyWallpaperLayer()) {
+        // Tear down what we just built: leaving a render window behind on
+        // a failed acquire leaks an HWND per attempt and can leave a
+        // stray visible layer over the desktop.
+        DestroyWindow(m_renderWindow);
+        m_renderWindow = nullptr;
+        m_workerW = nullptr;
+        m_state.store(DesktopHostState::Suspect, std::memory_order_release);
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Wallpaper layer verification failed");
     }
 
     m_acquired = true;
+    m_state.store(DesktopHostState::Normal, std::memory_order_release);
     REX_LOG_INFO("WorkerW", "WorkerW acquired successfully");
     return shared::Result<void>();
 }
 
 void WorkerWManager::Release() {
+    std::lock_guard<std::mutex> opLock(m_opMutex);
     if (!m_acquired) return;
 
     REX_LOG_INFO("WorkerW", "Releasing WorkerW...");
@@ -146,6 +158,7 @@ void WorkerWManager::Release() {
 }
 
 void WorkerWManager::StartMonitor(WorkerWRecoveryCallback onRecovery) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
     if (m_monitoring) return;
 
     m_recoveryCallback = std::move(onRecovery);
@@ -156,8 +169,14 @@ void WorkerWManager::StartMonitor(WorkerWRecoveryCallback onRecovery) {
 }
 
 void WorkerWManager::StopMonitor() {
-    if (!m_monitoring) return;
-    m_monitoring = false;
+    {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
+        if (!m_monitoring) return;
+        m_monitoring = false;
+    }
+    // Join outside m_monitorMutex AND m_opMutex: the monitor thread may be
+    // inside ReacquireWorkerW holding m_opMutex (bounded by its message
+    // timeouts); joining while holding either lock would deadlock.
     if (m_monitorThread.joinable()) {
         m_monitorThread.join();
     }
@@ -238,6 +257,125 @@ bool WorkerWManager::VerifyWallpaperLayer() {
                 above = GetWindow(above, GW_HWNDPREV);
             }
         }
+
+        // Z-order invariant: OUR layer must sit strictly BELOW the icon
+        // layer. A wallpaper window above SHELLDLL_DefView captures all
+        // desktop clicks (dead icons, broken shortcuts, taskbar hover
+        // issues) while every other check above still passes. Only
+        // enforceable when both share Progman as parent; otherwise warn.
+        HWND iconLayer = nullptr;
+        for (HWND child = GetWindow(progman, GW_CHILD); child;
+             child = GetWindow(child, GW_HWNDNEXT)) {
+            wchar_t cls[32] = {};
+            GetClassNameW(child, cls, 32);
+            if (lstrcmpW(cls, L"WorkerW") == 0 &&
+                FindWindowExW(child, nullptr, L"SHELLDLL_DefView", nullptr)) {
+                iconLayer = child;
+                break;
+            }
+        }
+        // Fallback: DefView isn't always a direct Progman child (nested
+        // hosts, remote sessions) — and FindWindowEx(NULL) only searches
+        // top-level windows, so a nested DefView is invisible to it.
+        // Deep-search the whole window tree instead.
+        HWND iconParent = nullptr;
+        if (!iconLayer) {
+            HWND defView = nullptr;
+            EnumWindows(
+                [](HWND hwnd, LPARAM lparam) -> BOOL {
+                    HWND* out = reinterpret_cast<HWND*>(lparam);
+                    if (*out) return FALSE;
+                    wchar_t cls[32] = {};
+                    GetClassNameW(hwnd, cls, 32);
+                    if (lstrcmpW(cls, L"SHELLDLL_DefView") == 0) {
+                        *out = hwnd;
+                        return FALSE;
+                    }
+                    EnumChildWindows(hwnd,
+                        [](HWND child, LPARAM inner) -> BOOL {
+                            HWND* o = reinterpret_cast<HWND*>(inner);
+                            if (*o) return FALSE;
+                            wchar_t c2[32] = {};
+                            GetClassNameW(child, c2, 32);
+                            if (lstrcmpW(c2, L"SHELLDLL_DefView") == 0) {
+                                *o = child;
+                                return FALSE;
+                            }
+                            return TRUE;
+                        },
+                        lparam);
+                    return *out == nullptr;
+                },
+                reinterpret_cast<LPARAM>(&defView));
+            if (defView) {
+                iconParent = GetParent(defView);
+                if (iconParent && iconParent != m_workerW) {
+                    iconLayer = iconParent;
+                    wchar_t cls[32] = {};
+                    GetClassNameW(iconLayer, cls, 32);
+                    REX_LOG_DEBUG("WorkerW",
+                        "Verify: icon layer resolved via DefView: {:p} (class {})",
+                        fmt::ptr(iconLayer),
+                        WidenToUtf8(cls).c_str());
+                }
+            }
+        }
+        if (iconLayer) {
+            // General ordering via lowest common ancestor: climb both
+            // chains to the desktop, find where they diverge, then require
+            // our branch to sit strictly below the icon branch. Works no
+            // matter which window classes Explorer nests the layers under
+            // (WorkerW, CtrlNotifySink, ...).
+            auto chainToDesktop = [](HWND h) {
+                std::vector<HWND> chain;
+                for (HWND w = h; w && w != GetDesktopWindow() && chain.size() < 64;
+                     w = GetParent(w)) {
+                    chain.push_back(w);
+                }
+                return chain;
+            };
+            const auto ourChain = chainToDesktop(m_workerW);
+            const auto iconChain = chainToDesktop(iconLayer);
+            // Deepest common window = lowest common ancestor.
+            size_t oi = ourChain.size(), ii = iconChain.size();
+            while (oi > 0 && ii > 0 && ourChain[oi - 1] == iconChain[ii - 1]) {
+                --oi;
+                --ii;
+            }
+            if (oi == 0 || ii == 0) {
+                // One contains the other — we must NOT be inside (or be)
+                // the icon layer itself.
+                REX_LOG_ERROR("WorkerW",
+                    "Verify failed: our WorkerW {:p} and icon layer {:p} "
+                    "are nested — video would cover desktop icons",
+                    fmt::ptr(m_workerW), fmt::ptr(iconLayer));
+                return false;
+            }
+            HWND ourTop = ourChain[oi - 1];
+            HWND iconTop = iconChain[ii - 1];
+            bool belowIcons = false;
+            for (HWND w = GetWindow(iconTop, GW_HWNDNEXT); w;
+                 w = GetWindow(w, GW_HWNDNEXT)) {
+                if (w == ourTop) {
+                    belowIcons = true;
+                    break;
+                }
+            }
+            if (!belowIcons) {
+                REX_LOG_ERROR("WorkerW",
+                    "Verify failed: our layer {:p} is at/above the icon "
+                    "layer {:p} — video would cover desktop icons and eat input",
+                    fmt::ptr(ourTop), fmt::ptr(iconTop));
+                return false;
+            }
+            REX_LOG_DEBUG("WorkerW",
+                "Verify: our layer {:p} is below icon layer {:p}",
+                fmt::ptr(ourTop), fmt::ptr(iconTop));
+        } else {
+            REX_LOG_WARN("WorkerW",
+                "Verify: no icon layer found; skipping below-icons check "
+                "(icons may be hidden)");
+        }
     }
 
     LONG_PTR wwExStyle = GetWindowLongPtrW(m_workerW, GWL_EXSTYLE);
@@ -256,39 +394,70 @@ bool WorkerWManager::VerifyWallpaperLayer() {
 // ─── Reacquire (shared by Explorer-restart and layer-invalid paths) ────────
 
 bool WorkerWManager::ReacquireWorkerW() {
-    if (m_renderWindow) {
-        DestroyWindow(m_renderWindow);
-        m_renderWindow = nullptr;
+    // The recovery callback (engine reload) may call back into
+    // Acquire/Release, so it must run WITHOUT m_opMutex held. Everything
+    // below up to the unlock scope runs under the lock; the callback runs
+    // after it.
+    WorkerWRecoveryCallback callback;
+    bool repaired = false;
+    {
+        std::lock_guard<std::mutex> opLock(m_opMutex);
+        m_state.store(DesktopHostState::Repairing, std::memory_order_release);
+        REX_LOG_INFO("WorkerW", "Repairing wallpaper layer (reacquire)...");
+        if (m_renderWindow) {
+            DestroyWindow(m_renderWindow);
+            m_renderWindow = nullptr;
+        }
+        m_workerW = nullptr;
+        m_acquired = false;
+
+        HWND workerW = FindBlankWorkerW();
+        if (!workerW) {
+            m_state.store(DesktopHostState::Suspect, std::memory_order_release);
+            REX_LOG_ERROR("WorkerW", "Reacquire failed: no wallpaper WorkerW");
+            return false;
+        }
+
+        m_workerW = workerW;
+        m_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        m_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        m_virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        m_virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+        m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
+        if (!m_renderWindow) {
+            m_workerW = nullptr;
+            m_state.store(DesktopHostState::Suspect, std::memory_order_release);
+            REX_LOG_ERROR("WorkerW", "Reacquire failed: render window creation");
+            return false;
+        }
+
+        ReparentToWorkerW(m_renderWindow, m_workerW);
+
+        // P10: verify BEFORE declaring success — the monitor loop treats a
+        // true return as healthy, so an unverified repair could leave the
+        // render window above the icons for a full check interval.
+        if (!VerifyWallpaperLayer()) {
+            DestroyWindow(m_renderWindow);
+            m_renderWindow = nullptr;
+            m_workerW = nullptr;
+            m_acquired = false;
+            m_state.store(DesktopHostState::Suspect, std::memory_order_release);
+            REX_LOG_ERROR("WorkerW", "Reacquire failed: post-repair verification");
+            return false;
+        }
+
+        m_acquired = true;
+        m_state.store(DesktopHostState::Verified, std::memory_order_release);
+        REX_LOG_INFO("WorkerW", "Wallpaper layer reacquired and verified");
+        callback = m_recoveryCallback;
+        repaired = true;
+    } // opLock releases here.
+
+    if (repaired && callback) {
+        callback();
     }
-    m_workerW = nullptr;
-    m_acquired = false;
-
-    HWND workerW = FindBlankWorkerW();
-    if (!workerW) {
-        REX_LOG_ERROR("WorkerW", "Reacquire failed: no wallpaper WorkerW");
-        return false;
-    }
-
-    m_workerW = workerW;
-    m_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    m_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    m_virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    m_virtualTop  = GetSystemMetrics(SM_YVIRTUALSCREEN);
-
-    m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
-    if (!m_renderWindow) {
-        REX_LOG_ERROR("WorkerW", "Reacquire failed: render window creation");
-        return false;
-    }
-
-    ReparentToWorkerW(m_renderWindow, m_workerW);
-    m_acquired = true;
-    REX_LOG_INFO("WorkerW", "Wallpaper layer reacquired");
-
-    if (m_recoveryCallback) {
-        m_recoveryCallback();
-    }
-    return true;
+    return repaired;
 }
 
 void WorkerWManager::MonitorExplorer() {
@@ -355,6 +524,7 @@ void WorkerWManager::MonitorExplorer() {
                       VerifyWallpaperLayer();
 
             if (!ok) {
+                m_state.store(DesktopHostState::Suspect, std::memory_order_release);
                 REX_LOG_WARN("WorkerW",
                     "Wallpaper layer invalid (Explorer refreshed windows); "
                     "reacquiring...");
@@ -537,15 +707,20 @@ HWND WorkerWManager::FindBlankWorkerW() {
 
     if (!target) {
         // ── Synthetic WorkerW under Progman (last resort) ───────────────
+        // NOTE: the class MUST NOT be L"WorkerW". Explorer treats windows
+        // of its own WorkerW class as desktop-layer peers (sends them
+        // synchronous shell messages); a same-named imposter both confuses
+        // discovery and opens a cross-process SendMessage deadlock that has
+        // hung Explorer (AppHangXProcB1 with our exe in P6).
         REX_LOG_WARN("WorkerW", "Creating synthetic WorkerW under Progman");
         WNDCLASSW wc = {};
         wc.lpfnWndProc = DefWindowProcW;
         wc.hInstance = GetModuleHandleW(nullptr);
-        wc.lpszClassName = L"WorkerW";
+        wc.lpszClassName = L"REXSyntheticWorkerW";
         RegisterClassW(&wc);
 
         target = CreateWindowExW(
-            0, L"WorkerW", L"",
+            0, L"REXSyntheticWorkerW", L"",
             WS_CHILD | WS_VISIBLE,
             0, 0, screenW, screenH,
             progman, nullptr,
@@ -559,17 +734,24 @@ HWND WorkerWManager::FindBlankWorkerW() {
             // the OS wallpaper bitmap cannot cover us, but still below
             // SHELLDLL_DefView so desktop icons stay on top. hWndInsertAfter
             // is the window that PRECEDES (sits above) ours, so when a
-            // paint layer exists we anchor to the sibling above it. When
-            // no paint layer exists, HWND_BOTTOM is the correct desktop
-            // position.
+            // paint layer exists we anchor to the sibling above it.
+            // Fail-safe direction is DOWN: if there is no sibling above
+            // the paint layer (it is already topmost, or identification is
+            // uncertain), HWND_BOTTOM keeps us behind everything instead of
+            // HWND_TOP, which would put the video above the desktop icons
+            // and swallow all icon/taskbar input.
             HWND insertAfter = HWND_BOTTOM;
             HWND paintLayer = FindPaintLayerWorkerW(progman, target);
             if (paintLayer) {
                 HWND abovePaint = GetWindow(paintLayer, GW_HWNDPREV);
-                insertAfter = abovePaint ? abovePaint : HWND_TOP;
-                WDLOG("Synthetic WorkerW: paint layer %p, insertAfter=%p%s",
-                      paintLayer, insertAfter,
-                      abovePaint ? " (above paint layer)" : " (HWND_TOP)");
+                if (abovePaint) {
+                    insertAfter = abovePaint;
+                    WDLOG("Synthetic WorkerW: paint layer %p, insertAfter=%p (above paint layer)",
+                          paintLayer, insertAfter);
+                } else {
+                    WDLOG("Synthetic WorkerW: paint layer %p is topmost; using HWND_BOTTOM (fail-safe)",
+                          paintLayer);
+                }
             } else {
                 WDLOG("Synthetic WorkerW: no paint layer, insertAfter=HWND_BOTTOM");
             }
@@ -594,7 +776,9 @@ HWND WorkerWManager::CreateRenderWindow(HWND parent, int width, int height) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
+    // Stock black brush: CreateSolidBrush here leaked one GDI object per
+    // render-window creation (never DeleteObject'd on any path).
+    wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
 
     if (!RegisterClassW(&wc)) {
         DWORD err = GetLastError();
@@ -703,13 +887,11 @@ void WorkerWManager::ReparentToWorkerW(HWND renderWindow, HWND workerW) {
 LRESULT CALLBACK WorkerWManager::WndProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
-    switch (msg) {
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-        default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
-    }
+    // NOTE: no PostQuitMessage here. This is a child render window, not an
+    // application loop owner; posting quit from it can terminate whatever
+    // thread pumps messages (observed host-loop exits). Lifetime is owned
+    // by DestroyWindow from Acquire/Release/Reacquire paths.
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 } // namespace rex::platform::windows

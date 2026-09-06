@@ -92,12 +92,15 @@ void VideoManager::Shutdown() {
     // continues using the device core. Without this extra ref, the core is
     // freed mid-teardown -> use-after-free inside d3d11.dll (intermittent
     // crash calling a freed block at dev-0x890).
+    // Use a local ComPtr so the ref is properly Released at scope exit
+    // instead of leaking (old code did AddRef without matching Release).
+    Microsoft::WRL::ComPtr<ID3D11Device> keepAlive;
     if (m_device11) {
-        m_device11->AddRef();
+        keepAlive = m_device11;
     }
     m_device11.Reset();
     m_context11.Reset();
-    m_device11.Reset();
+    keepAlive.Reset();
     m_d3d12Device = nullptr;
     m_initialized = false;
 }
@@ -177,6 +180,21 @@ uint64_t VideoManager::GetAdapterLuid() const {
            (static_cast<uint64_t>(luid.HighPart) << 32);
 }
 
+uint64_t VideoManager::GetD3D12AdapterLuid() const {
+    if (!m_d3d12Device) {
+        return 0;
+    }
+    const LUID luid = m_d3d12Device->GetAdapterLuid();
+    return static_cast<uint64_t>(luid.LowPart) |
+           (static_cast<uint64_t>(luid.HighPart) << 32);
+}
+
+bool VideoManager::IsDecoderRendererSameAdapter() const {
+    const uint64_t dec = GetAdapterLuid();
+    const uint64_t rend = GetD3D12AdapterLuid();
+    return dec != 0 && rend != 0 && dec == rend;
+}
+
 void VideoManager::SetTargetResolution(int targetWidth, int targetHeight) {
     if (!m_controller || !m_controller->IsOpen()) return;
     m_controller->SelectBestStream(targetWidth, targetHeight);
@@ -247,7 +265,8 @@ void VideoManager::SetSettingsService(
     RestoreMonitorAssignments();
 }
 
-shared::Result<void> VideoManager::AddMonitor(const MonitorInfo& info) {
+shared::Result<void> VideoManager::AddMonitor(const MonitorInfo& info,
+                                              graphics::CommandQueue* sharedQueue) {
     if (!m_initialized || !m_d3d12Device) {
         return shared::Result<void>(shared::ErrorCode::NotInitialized,
                                     "video manager not initialized");
@@ -263,7 +282,8 @@ shared::Result<void> VideoManager::AddMonitor(const MonitorInfo& info) {
 
     auto compositor = std::make_unique<MonitorCompositor>(info);
     if (m_workerW && IsWindow(m_workerW)) {
-        if (!compositor->Initialize(m_d3d12Device, m_workerW)) {
+        graphics::CommandQueue* queue = sharedQueue ? sharedQueue : m_sharedQueue;
+        if (!compositor->Initialize(m_d3d12Device, m_workerW, queue)) {
             return shared::Result<void>(shared::ErrorCode::UnknownError,
                                         "monitor compositor init failed for " +
                                         info.id);
@@ -276,6 +296,7 @@ shared::Result<void> VideoManager::AddMonitor(const MonitorInfo& info) {
     }
 
     m_monitorEntries.push_back({info, "", std::move(compositor)});
+    if (sharedQueue) m_sharedQueue = sharedQueue;
     REX_LOG_INFO("VideoManager", "monitor '{}' {}x{} @ ({},{}) added ({} active)",
                  info.id.c_str(), info.width, info.height, info.x, info.y,
                  m_monitorEntries.size());
@@ -318,11 +339,22 @@ void VideoManager::UpdateMonitor(const MonitorInfo& info) {
 }
 
 void VideoManager::PresentToAllMonitors(const VideoFrame& frame) {
-    if (!frame.valid) return;
-
     std::lock_guard<std::mutex> lock(m_monitorMutex);
+
     for (auto& entry : m_monitorEntries) {
-        if (entry.compositor && entry.compositor->IsActive()) {
+        if (!entry.compositor || !entry.compositor->IsActive()) continue;
+
+        // Per-monitor independent video takes priority over shared frame
+        if (entry.monitorController && entry.monitorController->IsOpen()) {
+            const VideoFrame* monitorFrame = entry.monitorController->Tick(0.0);
+            if (monitorFrame && monitorFrame->valid) {
+                entry.compositor->PresentFrame(*monitorFrame, m_fence12.Get());
+                continue;
+            }
+        }
+
+        // Fall back to shared frame
+        if (frame.valid) {
             entry.compositor->PresentFrame(frame, m_fence12.Get());
         }
     }
@@ -458,7 +490,112 @@ void VideoManager::ClearVideoFrames() {
             entry.compositor->ClearStaticTexture();
             entry.compositor->ClearVideoFrame();
         }
+        if (entry.monitorController) {
+            entry.monitorController->Close();
+            entry.monitorController.reset();
+        }
     }
+}
+
+// ─── Per-monitor independent video (Phase 4, item 23) ──────────────────────
+
+shared::Result<void> VideoManager::OpenVideoForMonitor(const std::string& monitorId,
+                                                       std::string_view path) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+
+        if (!entry.monitorController) {
+            entry.monitorController = std::make_unique<VideoPlaybackController>();
+        }
+
+        auto result = entry.monitorController->Open(path,
+                                                    m_config.enableHardwareAcceleration,
+                                                    m_context11.Get(),
+                                                    reinterpret_cast<HANDLE>(m_fenceHandle));
+        if (result.IsError()) {
+            REX_LOG_ERROR("VideoManager",
+                          "Failed to open per-monitor video '{}' for '{}': {}",
+                          std::string(path), monitorId,
+                          result.Error().message);
+            entry.monitorController.reset();
+            return result;
+        }
+
+        entry.monitorController->Play();
+
+        REX_LOG_INFO("VideoManager",
+                     "Opened per-monitor video '{}' for monitor '{}'",
+                     std::string(path), monitorId);
+        return shared::Result<void>();
+    }
+
+    return shared::Result<void>(shared::ErrorCode::NotFound,
+                                "Monitor not found: " + monitorId);
+}
+
+void VideoManager::PlayMonitor(const std::string& monitorId) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        if (entry.monitorController) entry.monitorController->Play();
+        return;
+    }
+}
+
+void VideoManager::PauseMonitor(const std::string& monitorId) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        if (entry.monitorController) entry.monitorController->Pause();
+        return;
+    }
+}
+
+void VideoManager::StopMonitor(const std::string& monitorId) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        if (entry.monitorController) entry.monitorController->Close();
+        return;
+    }
+}
+
+void VideoManager::SetMonitorLoop(const std::string& monitorId, bool loop) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        if (entry.monitorController) entry.monitorController->SetLoop(loop);
+        return;
+    }
+}
+
+void VideoManager::SetMonitorSpeed(const std::string& monitorId, float speed) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        if (entry.monitorController) entry.monitorController->SetSpeed(speed);
+        return;
+    }
+}
+
+double VideoManager::GetMonitorPosition(const std::string& monitorId) const {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        return entry.monitorController ? entry.monitorController->GetPosition() : 0.0;
+    }
+    return 0.0;
+}
+
+double VideoManager::GetMonitorDuration(const std::string& monitorId) const {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        return entry.monitorController ? entry.monitorController->GetDuration() : 0.0;
+    }
+    return 0.0;
 }
 
 void VideoManager::ShutdownMonitorCompositors() {

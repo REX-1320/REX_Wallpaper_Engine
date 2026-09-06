@@ -14,7 +14,7 @@ LifecycleCoordinator::LifecycleCoordinator(ModuleRegistry& registry,
 void LifecycleCoordinator::buildDependencyGraph() {
     std::lock_guard<std::mutex> lock(mutex_);
     dependents_.clear();
-    for (auto* mod : registry_.getAllModules()) {
+    for (auto mod : registry_.getAllModules()) {
         const auto& meta = mod->getMetadata();
         for (const auto& depId : meta.dependencies) {
             dependents_[depId].push_back(meta.id);
@@ -24,7 +24,7 @@ void LifecycleCoordinator::buildDependencyGraph() {
 
 void LifecycleCoordinator::initializeAll(const std::vector<std::string>& startupOrder) {
     for (const auto& id : startupOrder) {
-        auto* mod = registry_.getModule(id);
+        auto mod = registry_.getModule(id);
         if (!mod) continue;
 
         auto state = registry_.getModuleState(id);
@@ -56,19 +56,19 @@ void LifecycleCoordinator::initializeAll(const std::vector<std::string>& startup
 }
 
 void LifecycleCoordinator::startModule(const std::string& id) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (!mod) return;
     startSingle(mod);
 }
 
-bool LifecycleCoordinator::startSingle(IModule* mod) {
+bool LifecycleCoordinator::startSingle(std::shared_ptr<IModule> mod) {
     const auto& id = mod->getMetadata().id;
     auto state = registry_.getModuleState(id);
     if (state != ModuleState::Initialized && state != ModuleState::Stopped)
         return false;
 
     for (const auto& depId : mod->getMetadata().dependencies) {
-        auto* dep = registry_.getModule(depId);
+        auto dep = registry_.getModule(depId);
         if (dep && registry_.getModuleState(depId) != ModuleState::Running) {
             registry_.setModuleState(id, ModuleState::Failed);
             bus_.publish({ModuleEventType::ModuleFailed, id, state, ModuleState::Failed, "Dependency not running: " + depId});
@@ -98,12 +98,12 @@ bool LifecycleCoordinator::startSingle(IModule* mod) {
 }
 
 void LifecycleCoordinator::stopModule(const std::string& id) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (!mod) return;
     stopSingle(mod);
 }
 
-void LifecycleCoordinator::stopSingle(IModule* mod) {
+void LifecycleCoordinator::stopSingle(std::shared_ptr<IModule> mod) {
     const auto& id = mod->getMetadata().id;
     auto state = registry_.getModuleState(id);
     if (state != ModuleState::Running && state != ModuleState::Paused)
@@ -125,7 +125,7 @@ void LifecycleCoordinator::stopSingle(IModule* mod) {
 }
 
 void LifecycleCoordinator::pauseModule(const std::string& id) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (!mod) return;
     auto state = registry_.getModuleState(id);
     if (state != ModuleState::Running) return;
@@ -140,7 +140,7 @@ void LifecycleCoordinator::pauseModule(const std::string& id) {
 }
 
 void LifecycleCoordinator::resumeModule(const std::string& id) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (!mod) return;
     auto state = registry_.getModuleState(id);
     if (state != ModuleState::Paused) return;
@@ -154,7 +154,7 @@ void LifecycleCoordinator::resumeModule(const std::string& id) {
 }
 
 void LifecycleCoordinator::restartModule(const std::string& id) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (!mod) return;
 
     stopSingle(mod);
@@ -163,7 +163,7 @@ void LifecycleCoordinator::restartModule(const std::string& id) {
 
 void LifecycleCoordinator::shutdownAll(const std::vector<std::string>& reverseOrder) {
     for (const auto& id : reverseOrder) {
-        auto* mod = registry_.getModule(id);
+        auto mod = registry_.getModule(id);
         if (!mod) continue;
 
         auto state = registry_.getModuleState(id);
@@ -184,7 +184,7 @@ void LifecycleCoordinator::shutdownAll(const std::vector<std::string>& reverseOr
 }
 
 void LifecycleCoordinator::update(float dt) {
-    for (auto* mod : registry_.getAllModules()) {
+    for (auto mod : registry_.getAllModules()) {
         auto state = registry_.getModuleState(mod->getMetadata().id);
         if (state == ModuleState::Running || state == ModuleState::Paused) {
             try {
@@ -199,7 +199,7 @@ void LifecycleCoordinator::cascadeStop(const std::string& id) {
     if (it == dependents_.end()) return;
 
     for (const auto& depId : it->second) {
-        auto* depMod = registry_.getModule(depId);
+        auto depMod = registry_.getModule(depId);
         if (!depMod) continue;
         auto depState = registry_.getModuleState(depId);
         if (depState == ModuleState::Running || depState == ModuleState::Paused) {
@@ -214,7 +214,7 @@ void LifecycleCoordinator::cascadePause(const std::string& id) {
     if (it == dependents_.end()) return;
 
     for (const auto& depId : it->second) {
-        auto* depMod = registry_.getModule(depId);
+        auto depMod = registry_.getModule(depId);
         if (!depMod) continue;
         auto depState = registry_.getModuleState(depId);
         if (depState == ModuleState::Running) {

@@ -9,10 +9,12 @@
 #include <mutex>
 #include <memory>
 #include <thread>
+#include <filesystem>
 
 #include "platform/windows/IDesktopHost.hpp"
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "wallpaper/video/VideoManager.hpp"
+#include "wallpaper/audio/AudioCapture.hpp"
 #include "modules/Settings/interfaces/ISettingsService.hpp"
 #include <rex/wallpaper/IRendererAdapter.hpp>
 
@@ -75,6 +77,9 @@ private:
     void Update(double deltaTime);
     void SetState(EngineState state);
     void RenderLoop();
+    /// P16: sleep until the next expected frame (decoder cadence clamped
+    /// by maxFps, floor ~15Hz so pause/resume/unload stay responsive).
+    void PaceLoop(std::chrono::high_resolution_clock::time_point frameStart);
     shared::Result<void> ReinitializeRenderer();
     shared::Result<void> HandleDeviceLoss();
     void CheckDisplayChanges();
@@ -129,10 +134,23 @@ private:
     std::unique_ptr<rex::platform::windows::IDesktopHost> m_desktopHost;
     std::unique_ptr<D3D12Renderer> m_renderer;
     std::unique_ptr<VideoManager> m_videoManager;
+    std::unique_ptr<AudioCapture> m_audioCapture;
     std::unique_ptr<IRendererAdapter> m_adapter;
     std::thread m_renderThread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_recoveryNeeded{false};
+
+    // ─── Dirty-frame gating & present telemetry (P16) ──────────────────
+    // Set by frame adoption on the render thread and by IPC-thread
+    // property setters; consumed (and cleared) only in RenderLoop.
+    std::atomic<bool> m_frameDirty{false};
+    std::atomic<uint64_t> m_presentCount{0};
+    // Render-thread only: dark clear applied once per texture-less state.
+    bool m_darkCleared = false;
+    // ─── Static image hot-reload (render-thread internal) ─────────────
+    std::string m_hotReloadPath;
+    std::filesystem::file_time_type m_hotReloadLastWrite{};
+
     // ─── Full-screen auto-pause (render-thread internal) ──────────────
     /// Posted by CheckFullScreenPause() so the render loop can service
     /// it without calling the locking Pause()/Play() APIs from inside

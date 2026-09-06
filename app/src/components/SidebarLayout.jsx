@@ -56,16 +56,40 @@ const NAV_GROUPS = [
 function SidebarLayout({ active, onSelect, children }) {
   const [open, setOpen] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [maximized, setMaximized] = useState(false)
   const searchInputRef = useRef(null)
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus()
   }, [searchOpen])
 
+  // Custom title bar state — driven by the Electron main process.
+  // Fully optional-chained: safe in browser/dev where the bridge is absent.
+  useEffect(() => {
+    try {
+      window.rexDesktop?.isMaximized?.()?.then?.(setMaximized)?.catch?.(() => {})
+      return window.rexDesktop?.onMaximized?.(setMaximized)
+    } catch {
+      return undefined
+    }
+  }, [])
+
+  // Tray-driven navigation (e.g. tray "Settings" -> Settings tab).
+  useEffect(() => {
+    return window.rexDesktop?.onNavigate?.((page) => onSelect?.(page))
+  }, [onSelect])
+
+  const winControls = {
+    minimize: () => window.rexDesktop?.minimize?.(),
+    toggleMaximize: () => window.rexDesktop?.toggleMaximize?.(),
+    close: () => window.rexDesktop?.close?.(),
+  }
+
   return (
     <div className="window">
       <DesktopApply />
       <MicaBackdrop variant="mica" dark />
+      <div className="titlebar-drag" onDoubleClick={winControls.toggleMaximize} />
 
       <motion.div
         className="titlebar"
@@ -74,13 +98,13 @@ function SidebarLayout({ active, onSelect, children }) {
         transition={{ type: 'spring', stiffness: 200, damping: 20 }}
       >
         <div className="titlebar-controls">
-          <button type="button" className="titlebar-dot green" aria-label="Maximize">
+          <button type="button" className={`titlebar-dot green${maximized ? ' maximized' : ''}`} aria-label={maximized ? 'Restore' : 'Maximize'} onClick={winControls.toggleMaximize}>
             <Square size={11} />
           </button>
-          <button type="button" className="titlebar-dot yellow" aria-label="Minimize">
+          <button type="button" className="titlebar-dot yellow" aria-label="Minimize" onClick={winControls.minimize}>
             <Minus size={13} />
           </button>
-          <button type="button" className="titlebar-dot red" aria-label="Close">
+          <button type="button" className="titlebar-dot red" aria-label="Close" onClick={winControls.close}>
             <X size={13} />
           </button>
         </div>

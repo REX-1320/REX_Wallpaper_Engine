@@ -111,6 +111,10 @@ importers:
       vite:
         specifier: ^8.2.0
         version: 8.2.0(@types/node@26.1.2)(jiti@2.7.0)
+    optionalDependencies:
+      '@tailwindcss/oxide-wasm32-wasi':
+        specifier: 4.3.3
+        version: 4.3.3
 
 packages:
 

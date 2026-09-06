@@ -1,7 +1,7 @@
 'use strict'
 
 // ─── WallpaperRuntime ──────────────────────────────────────────────────────
-// Persistent client for rex-wallpaper-cli.exe --runtime.
+// Persistent client for rex-wallpaper-runtime.exe --runtime.
 //
 // The runtime process lives for the lifetime of the app. Wallpaper applies
 // are fast LOAD/PLAY commands instead of kill+respawn cycles, and the
@@ -39,6 +39,14 @@ class WallpaperRuntime extends EventEmitter {
 
     proc.stdout.on('data', (chunk) => this._onData(chunk))
 
+    // Drain stderr: it is never read by the protocol, and an unread pipe
+    // fills up (64 KB) and blocks the runtime's writes — a latent freeze
+    // source. Forward it to the app log (capped per chunk to avoid spam).
+    proc.stderr.on('data', (chunk) => {
+      const text = chunk.toString('utf8').trim()
+      if (text) this.logLine('runtime[stderr]:', text.slice(0, 2000))
+    })
+
     proc.on('error', (err) => {
       this.logLine('wallpaper-runtime error:', err.message)
       this._teardown(proc, `runtime spawn failed: ${err.message}`)
@@ -47,6 +55,7 @@ class WallpaperRuntime extends EventEmitter {
     proc.on('exit', (code) => {
       this.logLine('wallpaper-runtime exited with code', code)
       if (this.proc === proc) this._teardown(proc, `runtime exited (${code})`)
+      this.emit('exit', code)
     })
 
     return proc
@@ -89,6 +98,7 @@ class WallpaperRuntime extends EventEmitter {
       const entry = this.pending.get(msg.id)
       if (!entry) return
       this.pending.delete(msg.id)
+      if (entry.timer) clearTimeout(entry.timer)
       if (msg.ok) entry.resolve(msg.data ?? null)
       else entry.reject(new Error(msg.error || 'unknown runtime error'))
       return
@@ -99,11 +109,32 @@ class WallpaperRuntime extends EventEmitter {
     }
   }
 
-  send(cmd, params = {}) {
+  // Default per-command timeout: a wedged native runtime must reject the
+  // caller (so the UI can desync-flag) instead of leaking the promise and
+  // stalling every later apply queued behind it. SHUTDOWN bypasses send().
+  static DEFAULT_TIMEOUT_MS = 15000;
+
+  send(cmd, params = {}, timeoutMs = WallpaperRuntime.DEFAULT_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       const id = this.nextId++
       const payload = JSON.stringify({ id, cmd, params })
-      this.pending.set(id, { resolve, reject })
+      const entry = { resolve, reject, timer: null }
+      this.pending.set(id, entry)
+      if (timeoutMs > 0) {
+        entry.timer = setTimeout(() => {
+          if (this.pending.delete(id)) {
+            this.logLine(`wallpaper-runtime: '${cmd}' timed out after ${timeoutMs}ms`)
+            reject(new Error(`runtime timeout: ${cmd}`))
+          }
+        }, timeoutMs)
+        if (entry.timer.unref) entry.timer.unref()
+      }
+      const settle = (fn, arg) => {
+        if (!this.pending.has(id)) return // already timed out
+        this.pending.delete(id)
+        if (entry.timer) clearTimeout(entry.timer)
+        fn(arg)
+      }
       try {
         const proc = this._spawn()
         const byteLength = Buffer.byteLength(payload)
@@ -111,14 +142,10 @@ class WallpaperRuntime extends EventEmitter {
         frame.writeUInt32LE(byteLength, 0)
         frame.write(payload, 4, 'utf8')
         proc.stdin.write(frame, (err) => {
-          if (err) {
-            this.pending.delete(id)
-            reject(err)
-          }
+          if (err) settle(reject, err)
         })
       } catch (err) {
-        this.pending.delete(id)
-        reject(err)
+        settle(reject, err)
       }
     })
   }
@@ -140,15 +167,42 @@ class WallpaperRuntime extends EventEmitter {
   }
 
   stop() {
-    if (!this.proc) return
-    this.send('SHUTDOWN').catch(() => {})
+    const proc = this.proc
+    this.proc = null
+    this.inited = false
+    if (!proc) return
+
+    // Graceful shutdown: write SHUTDOWN directly (NOT via this.send(),
+    // which would re-spawn a fresh process) and close stdin. The runtime
+    // exits once it sees the frame or EOF.
     try {
-      this.proc.stdin.end()
+      const payload = JSON.stringify({ id: 0xffffffff, cmd: 'SHUTDOWN', params: {} })
+      const frame = Buffer.allocUnsafe(4 + Buffer.byteLength(payload))
+      frame.writeUInt32LE(Buffer.byteLength(payload), 0)
+      frame.write(payload, 4, 'utf8')
+      proc.stdin.write(frame)
+    } catch {
+      // stdin already closed
+    }
+    try {
+      proc.stdin.end()
     } catch {
       // already closed
     }
-    this.proc = null
-    this.inited = false
+
+    // Hard fallback: a wedged runtime (e.g. render-loop freeze) never
+    // answers SHUTDOWN and never exits on EOF. Its open pipes would keep
+    // the Electron app alive forever with no window — kill it so app quit
+    // always completes.
+    const killTimer = setTimeout(() => {
+      try {
+        this.logLine('wallpaper-runtime: no SHUTDOWN response, terminating process')
+        proc.kill()
+      } catch {
+        // already gone
+      }
+    }, 3000)
+    if (killTimer.unref) killTimer.unref()
   }
 }
 

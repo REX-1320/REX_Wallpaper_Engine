@@ -1,4 +1,4 @@
-#include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
+﻿#include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 
 #include <shared/Logger.hpp>
 
@@ -15,7 +15,10 @@ extern "C" {
 }
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <algorithm>
+#include <vector>
 
 namespace rex::wallpaper {
 
@@ -99,7 +102,7 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                                     "a shared fence handle is required");
     }
 
-    // ── FFmpeg: open input ──
+    // â”€â”€ FFmpeg: open input â”€â”€
     av_log_set_level(AV_LOG_ERROR);
     m_fmtCtx = nullptr;
     if (avformat_open_input(&m_fmtCtx, std::string(path).c_str(), nullptr, nullptr) < 0) {
@@ -143,7 +146,7 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     m_decCtx->thread_count = 1;  // deterministic sequential decode (wallpaper-style)
     m_decCtx->pkt_timebase = m_stream->time_base;
 
-    // ── Hardware decode (D3D11VA on our D3D11 device) ──
+    // â”€â”€ Hardware decode (D3D11VA on our D3D11 device) â”€â”€
     m_hardware = false;
     if (useHardware) {
         AVBufferRef* hwDevRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
@@ -152,7 +155,15 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                 reinterpret_cast<AVHWDeviceContext*>(hwDevRef->data);
             AVD3D11VADeviceContext* hwctx =
                 reinterpret_cast<AVD3D11VADeviceContext*>(hwDev->hwctx);
+            // Ownership transfer: FFmpeg never AddRefs a caller-provided
+            // hwctx->device but its device-free Releases it once per
+            // init/unref cycle (measured: -1 manager-device ref per HW
+            // open/close; after two cycles the device died and reopen
+            // failed GetDevice while PLAY presented stale slots — desktop
+            // white noise). This AddRef is consumed by exactly that
+            // Release, netting zero per cycle with no leak.
             hwctx->device = m_device11.Get();
+            m_device11->AddRef();
             hwctx->BindFlags = D3D11_BIND_SHADER_RESOURCE;  // FFmpeg adds BIND_DECODER
             hwctx->MiscFlags = D3D11_RESOURCE_MISC_SHARED |
                                D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
@@ -177,7 +188,7 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
         }
     }
 
-    // ── Software fallback ──
+    // â”€â”€ Software fallback â”€â”€
     if (!m_hardware) {
         if (avcodec_open2(m_decCtx, codec, nullptr) < 0) {
             Close();
@@ -206,8 +217,36 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     m_eof = false;
     m_pktPending = false;
     m_open.store(true, std::memory_order_release);
-    REX_LOG_INFO(kModule, "opened '{}' {}x{} @{:.2f} fps ({} decode)", path, m_width,
-                 m_height, m_frameRate, m_hardware ? "hardware" : "software");
+
+    // P13 diagnostics: exactly which codec/profile/pixel path/adapter is
+    // in play. Answers "why is decode slow?" without a debugger.
+    {
+        const char* hwaccel = m_hardware ? "d3d11va" : "software";
+        const char* pixfmt = av_get_pix_fmt_name(
+            m_hardware ? m_decCtx->sw_pix_fmt
+                       : static_cast<AVPixelFormat>(m_decCtx->pix_fmt));
+        uint64_t luid = 0;
+        if (m_device11) {
+            Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDev;
+            Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+            DXGI_ADAPTER_DESC desc{};
+            if (SUCCEEDED(m_device11.As(&dxgiDev)) &&
+                SUCCEEDED(dxgiDev->GetAdapter(&adapter)) &&
+                SUCCEEDED(adapter->GetDesc(&desc))) {
+                luid = static_cast<uint64_t>(desc.AdapterLuid.LowPart) |
+                       (static_cast<uint64_t>(desc.AdapterLuid.HighPart) << 32);
+            }
+        }
+        REX_LOG_INFO(kModule,
+                     "decoder: codec={} profile={} hwaccel={} pixelFormat={} "
+                     "adapterLUID=0x{:016x}",
+                     avcodec_get_name(m_decCtx->codec_id),
+                     m_decCtx->profile, hwaccel,
+                     pixfmt ? pixfmt : "unknown", luid);
+        REX_LOG_INFO(kModule, "opened '{}' {}x{} @{:.2f} fps ({} decode)", path,
+                     m_width, m_height, m_frameRate,
+                     m_hardware ? "hardware" : "software");
+    }
     return shared::Result<void>();
 }
 
@@ -218,6 +257,9 @@ void FfmpegVideoDecoder::Close() {
         avcodec_free_context(&m_decCtx);
         m_decCtx = nullptr;
     }
+    // NOTE: no Release for the hwctx->device ownership transfer here —
+    // av_buffer_unref above ran FFmpeg's device-free, which consumed the
+    // AddRef taken in Open. Releasing again would double-free.
     av_buffer_unref(&m_hwDevCtx);
     if (m_fmtCtx) {
         avformat_close_input(&m_fmtCtx);
@@ -318,7 +360,7 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
             bestPixels = pixels;
         }
     }
-    // Pass 2: nothing fits — take the smallest stream available.
+    // Pass 2: nothing fits â€” take the smallest stream available.
     if (bestIdx == -1) {
         bestPixels = INT64_MAX;
         for (size_t i = 0; i < m_fmtCtx->nb_streams; ++i) {
@@ -339,7 +381,7 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
     const AVCodec* codec = avcodec_find_decoder(newStream->codecpar->codec_id);
     if (!codec) return;
 
-    // ── Re-open the codec on the new stream ──
+    // â”€â”€ Re-open the codec on the new stream â”€â”€
     avcodec_free_context(&m_decCtx);
     m_decCtx = avcodec_alloc_context3(codec);
     if (!m_decCtx || avcodec_parameters_to_context(m_decCtx, newStream->codecpar) < 0) {
@@ -418,15 +460,15 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
                  m_height, m_frameRate, m_hardware ? "hardware" : "software");
 }
 
-// ─── Colorimetry ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Colorimetry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 VideoColorInfo FfmpegVideoDecoder::ResolveColorInfo() const {
     VideoColorInfo info;
     info.srcWidth  = m_frame ? m_frame->width  : m_width;
     info.srcHeight = m_frame ? m_frame->height : m_height;
 
-    // Fallback chain: frame properties → codec context (derived from the
-    // stream at avcodec_open2) → reasonable defaults.
+    // Fallback chain: frame properties â†’ codec context (derived from the
+    // stream at avcodec_open2) â†’ reasonable defaults.
     AVColorSpace spc = m_frame ? m_frame->colorspace : m_decCtx->colorspace;
     AVColorTransferCharacteristic trc = m_frame ? m_frame->color_trc : m_decCtx->color_trc;
     AVColorRange rng = m_frame ? m_frame->color_range : m_decCtx->color_range;
@@ -537,6 +579,10 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             const double decodeMs = ms(Clock::now() - t0).count();
             m_lastDecodeMs.store(decodeMs, std::memory_order_relaxed);
             m_decodeMsSum.fetch_add(decodeMs, std::memory_order_relaxed);
+            // P13 ring sample (decode = receive_frame â†’ pool publish).
+            m_decodeMsRing[m_decodeMsCount % kTimingRingSize] =
+                static_cast<float>(decodeMs);
+            ++m_decodeMsCount;
             if (ok) {
                 m_framesDecoded.fetch_add(1, std::memory_order_relaxed);
             }
@@ -601,6 +647,19 @@ UINT64 FfmpegVideoDecoder::GetSlotFence(UINT slot) const {
     return m_slotFence[slot].load(std::memory_order_acquire);
 }
 
+// P13: percentile over a fixed ring of the most recent samples.
+static double PercentileOfRing(const float* ring, size_t count, double p) {
+    if (count == 0) return 0.0;
+    const size_t n = std::min(count, FfmpegVideoDecoder::kTimingRingSize);
+    std::vector<float> sorted(ring, ring + static_cast<long>(n));
+    const size_t idx = static_cast<size_t>(
+        std::clamp(p, 0.0, 1.0) * static_cast<double>(n - 1));
+    std::nth_element(sorted.begin(),
+                     sorted.begin() + static_cast<long>(idx),
+                     sorted.end());
+    return static_cast<double>(sorted[idx]);
+}
+
 DecoderDiagnostics FfmpegVideoDecoder::GetDiagnostics() const {
     DecoderDiagnostics d;
     d.framesDecoded = m_framesDecoded.load(std::memory_order_relaxed);
@@ -611,6 +670,12 @@ DecoderDiagnostics FfmpegVideoDecoder::GetDiagnostics() const {
     d.averageDecodeMs = n > 0 ? sum / static_cast<double>(n) : 0.0;
     d.hardwareAccelerated = m_hardware;
     d.eof = m_eof;
+    d.decodeMsP50 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.50);
+    d.decodeMsP95 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.95);
+    d.decodeMsP99 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.99);
+    d.vpMsP50     = PercentileOfRing(m_vpMsRing.data(),     m_vpMsCount,     0.50);
+    d.vpMsP95     = PercentileOfRing(m_vpMsRing.data(),     m_vpMsCount,     0.95);
+    d.vpMsP99     = PercentileOfRing(m_vpMsRing.data(),     m_vpMsCount,     0.99);
     return d;
 }
 
@@ -633,11 +698,15 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height) {
     m_poolNext = 0;
     m_poolHdr = m_hdrContent;
 
-    // HDR sources keep the full PQ/HLG-encoded signal in a 16-bit float
-    // pool; SDR stays in 8-bit BGRA (matches the renderer's SRV format
-    // selection, which reads the opened resource's desc).
+    REX_LOG_INFO(kModule, "pool rebuilt: {} slots, {}x{}, {} (bounded)",
+                 kPoolSize, width, height,
+                 m_hdrContent ? "P010 (GPU HDR path)" : "NV12 (SDR bypass VP)");
+
+    // SDR: NV12 pool (bypass VP, shader does YUV→RGB).
+    // HDR + HW: P010 pool (GPU-resident, shader does BT.2020 PQ decode).
+    // HDR + SW: RGBA16_UNORM pool (software swscale outputs RGBA64).
     const DXGI_FORMAT poolFormat =
-        m_hdrContent ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+        m_hdrContent ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
 
     for (size_t i = 0; i < m_poolTex.size(); ++i) {
         D3D11_TEXTURE2D_DESC pd = {};
@@ -648,7 +717,13 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height) {
         pd.Format = poolFormat;
         pd.SampleDesc.Count = 1;
         pd.Usage = D3D11_USAGE_DEFAULT;
-        pd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        // P010 (multi-planar) doesn't support RENDER_TARGET; NV12 and RGBA16 do.
+        pd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (poolFormat == DXGI_FORMAT_NV12 ||
+            poolFormat == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+            poolFormat == DXGI_FORMAT_R16G16B16A16_UNORM) {
+            pd.BindFlags |= D3D11_BIND_RENDER_TARGET;
+        }
         pd.MiscFlags = D3D11_RESOURCE_MISC_SHARED |
                        D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
         if (FAILED(m_device11->CreateTexture2D(&pd, nullptr, &m_poolTex[i]))) {
@@ -661,25 +736,27 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height) {
         }
     }
 
-    // Hardware YUV->RGB video processor (NV12 decode -> BGRA pool).
+    // Hardware YUV->RGB video processor (only needed for hardware decode)
     m_enum.Reset();
     m_processor.Reset();
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd = {};
-    cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-    cd.InputFrameRate = { 30, 1 };
-    cd.InputWidth = width;
-    cd.InputHeight = height;
-    cd.OutputFrameRate = { 30, 1 };
-    cd.OutputWidth = width;
-    cd.OutputHeight = height;
-    cd.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
-    HRESULT hr = m_videoDevice->CreateVideoProcessorEnumerator(&cd, &m_enum);
-    if (SUCCEEDED(hr)) {
-        hr = m_videoDevice->CreateVideoProcessor(m_enum.Get(), 0, &m_processor);
-    }
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "create video processor failed (0x{:08x})", hr);
-        return false;
+    if (m_hardware) {
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd = {};
+        cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        cd.InputFrameRate = { 30, 1 };
+        cd.InputWidth = width;
+        cd.InputHeight = height;
+        cd.OutputFrameRate = { 30, 1 };
+        cd.OutputWidth = width;
+        cd.OutputHeight = height;
+        cd.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+        HRESULT hr = m_videoDevice->CreateVideoProcessorEnumerator(&cd, &m_enum);
+        if (SUCCEEDED(hr)) {
+            hr = m_videoDevice->CreateVideoProcessor(m_enum.Get(), 0, &m_processor);
+        }
+        if (FAILED(hr)) {
+            REX_LOG_ERROR(kModule, "create video processor failed (0x{:08x})", hr);
+            return false;
+        }
     }
 
     // Software-upload staging texture.
@@ -701,16 +778,37 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height) {
 }
 
 bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
+    // True software decode (no D3D11VA): always use software path.
     if (m_frame->format != AV_PIX_FMT_D3D11) {
         return ConvertSoftware(outFrame);
     }
 
-    // Zero-copy conversion: decoder NV12 texture -> VP blt -> BGRA pool slot.
+    // HW-decoded frame: log surface format once per session.
     auto* tex11 = reinterpret_cast<ID3D11Texture2D*>(m_frame->data[0]);
     const UINT arraySlice = static_cast<UINT>(
         reinterpret_cast<intptr_t>(m_frame->data[1]));
     D3D11_TEXTURE2D_DESC desc11 = {};
     tex11->GetDesc(&desc11);
+
+    static bool s_loggedFormat = false;
+    if (!s_loggedFormat) {
+        const char* fmtName = "unknown";
+        switch (desc11.Format) {
+            case DXGI_FORMAT_NV12:       fmtName = "NV12"; break;
+            case DXGI_FORMAT_P010:       fmtName = "P010"; break;
+            case DXGI_FORMAT_YUY2:       fmtName = "YUY2"; break;
+            case DXGI_FORMAT_AYUV:       fmtName = "AYUV"; break;
+            case DXGI_FORMAT_R8G8B8A8_UNORM: fmtName = "BGRA"; break;
+            case DXGI_FORMAT_R16G16B16A16_FLOAT: fmtName = "RGBA16F"; break;
+        }
+        const char* decodePath = m_hdrContent ? "HW_P010" : "HW_NV12";
+        REX_LOG_INFO(kModule, "decoder surface: {}x{} fmt={} (0x{:x}) "
+                     "hdr={} decodePath={}",
+                     desc11.Width, desc11.Height, fmtName,
+                     static_cast<unsigned>(desc11.Format), m_hdrContent,
+                     decodePath);
+        s_loggedFormat = true;
+    }
 
     if (!EnsurePool(desc11.Width, desc11.Height)) {
         return false;
@@ -719,95 +817,14 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
     const UINT slot = m_poolNext;
     m_poolNext = (m_poolNext + 1) % kPoolSize;
 
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC ivd = {};
-    ivd.FourCC = 0;
-    ivd.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-    ivd.Texture2D.MipSlice = 0;
-    ivd.Texture2D.ArraySlice = arraySlice;
-    Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inView;
-    if (FAILED(m_videoDevice->CreateVideoProcessorInputView(
-            tex11, m_enum.Get(), &ivd, &inView))) {
-        REX_LOG_ERROR(kModule, "create vp input view failed");
-        return false;
-    }
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ovd = {};
-    ovd.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-    ovd.Texture2D.MipSlice = 0;
-    Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> outView;
-    if (FAILED(m_videoDevice->CreateVideoProcessorOutputView(
-            m_poolTex[slot].Get(), m_enum.Get(), &ovd, &outView))) {
-        REX_LOG_ERROR(kModule, "create vp output view failed");
-        return false;
-    }
-
-    RECT srcRect = { 0, 0, static_cast<LONG>(m_frame->width),
-                     static_cast<LONG>(m_frame->height) };
-    m_videoContext->VideoProcessorSetStreamSourceRect(m_processor.Get(), 0, TRUE,
-                                                      &srcRect);
-
-    // Resolve DXGI color spaces from the frame colorimetry (YUV in → RGB
-    // out). HDR signals stay in their encoded domain (PQ/HLG) so the 16F
-    // pool preserves full precision; the renderer decodes the EOTF.
-    auto inputSpace = [&]() {
-        switch (m_colorInfo.yuvMatrix) {
-            case VideoColorInfo::Matrix::BT601:
-                return m_colorInfo.fullRange
-                           ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601
-                           : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
-            case VideoColorInfo::Matrix::BT2020:
-                if (m_colorInfo.transfer == VideoColorInfo::Transfer::PQ)
-                    return DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020;
-                if (m_colorInfo.transfer == VideoColorInfo::Transfer::HLG)
-                    return DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020;
-                return m_colorInfo.fullRange
-                           ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020
-                           : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020;
-            default:
-                return m_colorInfo.fullRange
-                           ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709
-                           : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
-        }
-    }();
-    auto outputSpace = [&]() {
-        // HDR output is always PQ-encoded BT.2020 in the 16F pool (this
-        // SDK has no RGB HLG output space; the video processor converts
-        // HLG input to PQ). The shader therefore always decodes PQ.
-        if (m_colorInfo.transfer == VideoColorInfo::Transfer::PQ ||
-            m_colorInfo.transfer == VideoColorInfo::Transfer::HLG)
-            return DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-        return DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-    }();
-
-    D3D11_VIDEO_PROCESSOR_STREAM stream = {};
-    stream.Enable = TRUE;
-    stream.OutputIndex = 0;
-    stream.InputFrameOrField = 0;
-    stream.pInputSurface = inView.Get();
-    HRESULT bltHr = E_FAIL;
-    for (int attempt = 0; attempt < 2 && FAILED(bltHr); ++attempt) {
-        m_videoContext1->VideoProcessorSetStreamColorSpace1(
-            m_processor.Get(), 0, inputSpace);
-        m_videoContext1->VideoProcessorSetOutputColorSpace1(
-            m_processor.Get(), outputSpace);
-        bltHr = m_videoContext->VideoProcessorBlt(m_processor.Get(), outView.Get(),
-                                                  0, 1, &stream);
-        if (FAILED(bltHr) && attempt == 0) {
-            // Driver may not support the HDR stream/output spaces; retry
-            // once as SDR (G22/P709) so playback survives.
-            REX_LOG_WARN(kModule,
-                         "VP blt failed with HDR color spaces (0x{:08x}), "
-                         "retrying as SDR",
-                         static_cast<unsigned long>(bltHr));
-            inputSpace = m_colorInfo.fullRange
-                             ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709
-                             : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
-            outputSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-        }
-    }
-    if (FAILED(bltHr)) {
-        REX_LOG_ERROR(kModule, "videoprocessor blt failed");
-        return false;
-    }
+    // GPU-resident path: copy decoder surface directly into pool.
+    // SDR: NV12 → NV12 pool, shader does BT.709 YUV→RGB.
+    // HDR: P010 → P010 pool, shader does BT.2020 Y′CbCr → PQ EOTF → RGB.
+    const UINT srcSubresource = arraySlice;
+    D3D11_BOX srcBox = { 0, 0, 0,
+                         desc11.Width, desc11.Height, 1 };
+    m_context->CopySubresourceRegion(m_poolTex[slot].Get(), 0, 0, 0, 0,
+                                      tex11, srcSubresource, &srcBox);
 
     ++m_fenceValue;
     m_slotFence[slot].store(m_fenceValue, std::memory_order_release);
@@ -831,14 +848,33 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
 
 bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
     // Software fallback: swscale to BGRA (SDR) / RGBA64 (HDR), staging
-    // upload, CopyResource into the pool slot (CPU round-trip, used only
-    // when D3D11VA is unavailable).
+    // upload, CopyResource into the pool slot (CPU round-trip).
+    // For HW-decoded HDR: downloads D3D11 frame to CPU first via
+    // av_hwframe_transfer_data, then swscale on the software frame.
     if (!m_loggedSwFallback) {
         m_loggedSwFallback = true;
-        REX_LOG_WARN(kModule, "software frame conversion (CPU upload) active");
+        REX_LOG_WARN(kModule, "software frame conversion (CPU upload) "
+                     "active decodePath=SW_RGBA16");
     }
     if (!m_swFrame || !m_stream) return false;
-    const auto frameFormat = static_cast<AVPixelFormat>(m_frame->format);
+
+    // If the decoded frame is D3D11 (HW accel), download to CPU first.
+    AVFrame* srcFrame = m_frame;
+    AVFrame* dlFrame = nullptr;
+    const bool isD3d11 = (m_frame->format == AV_PIX_FMT_D3D11);
+    if (isD3d11) {
+        dlFrame = av_frame_alloc();
+        if (!dlFrame) return false;
+        dlFrame->format = AV_PIX_FMT_NONE;
+        if (av_hwframe_transfer_data(dlFrame, m_frame, 0) < 0) {
+            REX_LOG_ERROR(kModule, "hwframe download failed for HDR frame");
+            av_frame_free(&dlFrame);
+            return false;
+        }
+        srcFrame = dlFrame;
+    }
+
+    const auto frameFormat = static_cast<AVPixelFormat>(srcFrame->format);
     const AVPixelFormat swFormat = m_hdrContent ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_BGRA;
     if (!m_sws ||
         frameFormat != static_cast<AVPixelFormat>(m_stream->codecpar->format) ||
@@ -846,29 +882,37 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
         if (m_sws) {
             sws_freeContext(m_sws);
         }
-        m_sws = sws_getContext(m_frame->width, m_frame->height, frameFormat,
-                               m_frame->width, m_frame->height, swFormat,
+        m_sws = sws_getContext(srcFrame->width, srcFrame->height, frameFormat,
+                               srcFrame->width, srcFrame->height, swFormat,
                                SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!m_sws) {
             REX_LOG_ERROR(kModule, "swscale context creation failed");
+            if (dlFrame) av_frame_free(&dlFrame);
             return false;
         }
         m_sws16bit = m_hdrContent;
         // Tell swscale the source YUV range/matrix so limited/full and
         // 601/709/2020 sources convert correctly.
+        // For HDR (BT.2020 PQ): use BT.2020 as BOTH source and dest
+        // so swscale does YCbCr→RGB with BT.2020 matrix but NO gamut
+        // conversion. The shader handles BT.2020→BT.709 in linear space
+        // after PQ decode.
         const int srcRange = m_colorInfo.fullRange ? 1 : 0;
         const int srcCsp = (m_colorInfo.yuvMatrix == VideoColorInfo::Matrix::BT601)
                                ? SWS_CS_SMPTE170M
                                : (m_colorInfo.yuvMatrix == VideoColorInfo::Matrix::BT2020)
                                      ? SWS_CS_BT2020
                                      : SWS_CS_ITU709;
+        const int dstCsp = m_hdrContent ? srcCsp : SWS_CS_DEFAULT;
+        const int dstRange = m_hdrContent ? 1 : 0;  // HDR: full range RGB output
         sws_setColorspaceDetails(m_sws, sws_getCoefficients(srcCsp), srcRange,
-                                 sws_getCoefficients(SWS_CS_DEFAULT), 0,
+                                 sws_getCoefficients(dstCsp), dstRange,
                                  0, 1 << 16, 1 << 16);
     }
 
-    if (!EnsurePool(static_cast<UINT>(m_frame->width),
-                    static_cast<UINT>(m_frame->height))) {
+    if (!EnsurePool(static_cast<UINT>(srcFrame->width),
+                    static_cast<UINT>(srcFrame->height))) {
+        if (dlFrame) av_frame_free(&dlFrame);
         return false;
     }
     const UINT slot = m_poolNext;
@@ -876,13 +920,17 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
 
     av_frame_unref(m_swFrame);
     m_swFrame->format = swFormat;
-    m_swFrame->width = m_frame->width;
-    m_swFrame->height = m_frame->height;
+    m_swFrame->width = srcFrame->width;
+    m_swFrame->height = srcFrame->height;
     if (av_frame_get_buffer(m_swFrame, 32) < 0) {
+        if (dlFrame) av_frame_free(&dlFrame);
         return false;
     }
-    sws_scale(m_sws, m_frame->data, m_frame->linesize, 0, m_frame->height,
+    sws_scale(m_sws, srcFrame->data, srcFrame->linesize, 0, srcFrame->height,
               m_swFrame->data, m_swFrame->linesize);
+
+    // Free the download frame now that swscale is done.
+    if (dlFrame) av_frame_free(&dlFrame);
 
     D3D11_MAPPED_SUBRESOURCE map = {};
     if (FAILED(m_context->Map(m_staging.Get(), 0, D3D11_MAP_WRITE, 0, &map))) {

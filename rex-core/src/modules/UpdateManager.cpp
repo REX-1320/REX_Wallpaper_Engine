@@ -4,6 +4,7 @@
 #include "SignatureVerifier.hpp"
 #include "ModuleLoader.hpp"
 #include "ModuleRegistry.hpp"
+#include <cctype>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -19,7 +20,7 @@ std::vector<PluginManifest> UpdateManager::checkForUpdates() {
     std::vector<PluginManifest> updates;
     auto available = marketplaceClient_->fetchAvailablePlugins();
 
-    for (auto* mod : manager_.getRegistry().getAllModules()) {
+    for (auto mod : manager_.getRegistry().getAllModules()) {
         const auto& localMeta = mod->getMetadata();
         for (const auto& remote : available) {
             if (remote.moduleId == localMeta.id) {
@@ -33,9 +34,32 @@ std::vector<PluginManifest> UpdateManager::checkForUpdates() {
     return updates;
 }
 
+namespace {
+bool IsSafePathSegment(const std::string& s) {
+    if (s.empty() || s.size() > 128) return false;
+    for (char c : s) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-'))
+            return false;
+    }
+    if (s == "." || s == "..") return false;
+    return s.find("..") == std::string::npos;
+}
+} // namespace
+
 std::string UpdateManager::getDownloadPath(const std::string& moduleId, const std::string& version) const {
-    std::filesystem::create_directories(downloadDir_);
-    return downloadDir_ + "/" + moduleId + "-" + version + ".rexplg";
+    // Reject traversal: moduleId/version come from marketplace metadata.
+    if (!IsSafePathSegment(moduleId) || !IsSafePathSegment(version)) {
+        return {};
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(downloadDir_, ec);
+    auto full = std::filesystem::weakly_canonical(
+        std::filesystem::path(downloadDir_) / (moduleId + "-" + version + ".rexplg"), ec);
+    auto base = std::filesystem::weakly_canonical(std::filesystem::path(downloadDir_), ec);
+    if (ec || full.string().rfind(base.string(), 0) != 0) {
+        return {};
+    }
+    return full.string();
 }
 
 bool UpdateManager::installOrUpdate(const std::string& moduleId) {
@@ -55,6 +79,10 @@ bool UpdateManager::installOrUpdate(const std::string& moduleId) {
     }
 
     std::string localPath = getDownloadPath(moduleId, remote->version);
+    if (localPath.empty()) {
+        std::cerr << "Rejected unsafe module id/version: " << moduleId << "\n";
+        return false;
+    }
 
     if (!marketplaceClient_->downloadPlugin(remote->downloadUrl, localPath)) {
         std::cerr << "Failed to download plugin binary\n";
@@ -75,10 +103,14 @@ bool UpdateManager::installOrUpdate(const std::string& moduleId) {
         return false;
     }
 
-    auto* existingMod = manager_.getRegistry().getModule(moduleId);
+    auto existingMod = manager_.getRegistry().getModule(moduleId);
     bool isUpdate = (existingMod != nullptr);
     if (isUpdate) {
         manager_.stopModule(moduleId);
+        // Drop our reference BEFORE unloadDynamic unmaps the DLL: the
+        // shared_ptr keeps the object alive but not its code. Re-fetch
+        // after load; see ModuleLoader::unloadDynamic contract.
+        existingMod.reset();
         if (manager_.getLoader().isDynamic(moduleId)) {
             manager_.getLoader().unloadDynamic(moduleId);
             manager_.getRegistry().unregisterModule(moduleId);

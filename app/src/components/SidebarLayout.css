@@ -124,6 +124,16 @@
 .titlebar-dot.yellow { background: #febc2e; }
 .titlebar-dot.green { background: #28c840; }
 
+.titlebar-drag {
+  -webkit-app-region: drag;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 44px;
+  z-index: 5;
+}
+
 .sidebar-heading {
   position: absolute;
   top: 12px;

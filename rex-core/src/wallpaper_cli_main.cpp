@@ -15,8 +15,10 @@
 #include <optional>
 #include <string>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #include <psapi.h>
 
@@ -344,35 +346,73 @@ static LONG WINAPI UnhandledCrashFilter(PEXCEPTION_POINTERS ep) {
 // Writes directly to crash.log via fprintf — NEVER via spdlog — so it works
 // even when the spdlog async queue is itself deadlocked/frozen.
 //
-// Timeline:  T+10s first dump, then every 5s until stop is set.
-// Use:       read %TEMP%\REX\crash.log after the freeze to see exactly which
-//            thread holds which mutex at the hang point.
-static void HangWatchdog(std::atomic<bool>& stop) {
+// Progress-gated: dumps ONLY while the engine reports Running AND the
+// present counter hasn't advanced (a real stall). Idle/paused/stopped
+// engines and healthy playback never dump — previously it dumped
+// unconditionally every 5s forever (multi-MB crash.log of false positives
+// plus a periodic all-thread stack-walk hitch during normal playback).
+// At most kMaxStallDumps dumps per stall episode; crash.log is truncated
+// past kMaxLogBytes instead of growing without bound.
+static void DumpWatchdogStacks(int dumpCount) {
+    constexpr long long kMaxLogBytes = 8LL * 1024 * 1024;
+    const std::string path = BuildLogPath(L"crash.log");
+    bool truncate = false;
+    {
+        FILE* probe = nullptr;
+        if (fopen_s(&probe, path.c_str(), "ab") == 0 && probe) {
+            fseek(probe, 0, SEEK_END);
+            truncate = ftell(probe) > kMaxLogBytes;
+            fclose(probe);
+        }
+    }
+    FILE* f = nullptr;
+    fopen_s(&f, path.c_str(), truncate ? "w" : "a");
+    if (!f) return;
+    SYSTEMTIME st;  GetLocalTime(&st);
+    fprintf(f,
+        "\n=== REX HANG WATCHDOG dump #%d  "
+        "%04d-%02d-%02d %02d:%02d:%02d ===\n",
+        dumpCount,
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    fprintf(f, "All thread stacks:\n");
+    DumpAllThreadStacks(f);
+    fprintf(f, "\n--- end of watchdog dump #%d ---\n", dumpCount);
+    fclose(f);
+}
+
+// progress() returns {watched, presentCount}: watched=false when there is
+// nothing worth watching (no engine, not Running), in which case no dump
+// ever fires and stall state resets.
+static void HangWatchdog(std::atomic<bool>& stop,
+                         std::function<std::pair<bool, uint64_t>()> progress) {
     using namespace std::chrono;
     constexpr int kGraceSecs    = 10;
     constexpr int kIntervalSecs =  5;
+    constexpr int kMaxStallDumps = 5;
 
     // Wait through grace period in 250ms slices for fast shutdown response.
     for (int i = 0; i < kGraceSecs * 4 && !stop.load(std::memory_order_acquire); ++i)
         std::this_thread::sleep_for(milliseconds(250));
 
-    int dumpCount = 0;
+    uint64_t lastCount = 0;
+    bool haveLast = false;
+    int stallDumps = 0;
     while (!stop.load(std::memory_order_acquire)) {
-        const std::string path = BuildLogPath(L"crash.log");
-        FILE* f = nullptr;
-        fopen_s(&f, path.c_str(), "a");
-        if (f) {
-            SYSTEMTIME st;  GetLocalTime(&st);
-            fprintf(f,
-                "\n=== REX HANG WATCHDOG dump #%d  "
-                "%04d-%02d-%02d %02d:%02d:%02d ===\n",
-                ++dumpCount,
-                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-            fprintf(f, "All thread stacks:\n");
-            DumpAllThreadStacks(f);
-            fprintf(f, "\n--- end of watchdog dump #%d ---\n", dumpCount);
-            fclose(f);
+        auto [watched, count] = progress();
+        if (!watched) {
+            haveLast = false;
+            stallDumps = 0;
+        } else if (haveLast && count == lastCount) {
+            if (stallDumps < kMaxStallDumps) {
+                DumpWatchdogStacks(++stallDumps);
+            }
+            // else: already reported this episode; stay silent until
+            // progress resumes (prevents log floods during long stalls).
+        } else {
+            haveLast = true;
+            stallDumps = 0;
         }
+        lastCount = count;
 
         // Sleep in slices for fast exit on shutdown.
         for (int i = 0; i < kIntervalSecs * 4 && !stop.load(std::memory_order_acquire); ++i)
@@ -518,21 +558,31 @@ static struct ClientSurfaceState {
     UINT slotCount = 0;
     HANDLE fence = nullptr;
     HANDLE slots[kMaxPreviewSlots] = {};
+    bool duplicated = false;       // true when handles were DuplicateHandle'd
+                                   // into this process (we own them)
 } g_clientSurface;
 
 static void CloseClientSurface() {
-    if (g_clientSurface.fence) {
-        CloseHandle(g_clientSurface.fence);
+    if (g_clientSurface.duplicated) {
+        if (g_clientSurface.fence) {
+            CloseHandle(g_clientSurface.fence);
+            g_clientSurface.fence = nullptr;
+        }
+        for (UINT i = 0; i < kMaxPreviewSlots; ++i) {
+            if (g_clientSurface.slots[i]) {
+                CloseHandle(g_clientSurface.slots[i]);
+                g_clientSurface.slots[i] = nullptr;
+            }
+        }
+    } else {
         g_clientSurface.fence = nullptr;
-    }
-    for (UINT i = 0; i < kMaxPreviewSlots; ++i) {
-        if (g_clientSurface.slots[i]) {
-            CloseHandle(g_clientSurface.slots[i]);
+        for (UINT i = 0; i < kMaxPreviewSlots; ++i) {
             g_clientSurface.slots[i] = nullptr;
         }
     }
     g_clientSurface.slotCount = 0;
     g_clientSurface.generation = 0;
+    g_clientSurface.duplicated = false;
 }
 
 static json::Json HexU64(uint64_t value) {
@@ -579,7 +629,51 @@ static void FramePollThread(std::mutex& engineGuard,
     }
 }
 
-static int RunRuntime(int maxFps, bool hardwareAcceleration) {
+// Telemetry sampler: appends a one-line snapshot to runtime-telemetry.log
+// every 5s while an engine is alive. Cross-hardware baseline evidence in a
+// single greppable line: process memory, adapter topology (decoder/renderer/
+// display LUIDs), GPU segment usage and pipeline FPS.
+static void TelemetryThread(std::mutex& engineGuard,
+                            std::shared_ptr<IWallpaperEngine>& engine,
+                            std::atomic<bool>& stop) {
+    while (!stop.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        EngineTelemetry t;
+        {
+            std::lock_guard lock(engineGuard);
+            if (!engine) continue;
+            engine->GetTelemetry(t);
+        }
+        FILE* f = nullptr;
+        if (fopen_s(&f, BuildLogPath(L"runtime-telemetry.log").c_str(), "a") != 0 || !f) {
+            continue;
+        }
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        std::fprintf(f,
+                     "%04u-%02u-%02u %02u:%02u:%02u | private=%.1fMB | "
+                     "decRendSame=%d rendDispSame=%d | decLUID=%016llx rendLUID=%016llx | "
+                     "gpuDed=%llu gpuShared=%llu gpuBudget=%llu | "
+                     "decFps=%.1f rendFps=%.1f | slots=%llu ringBytes=%llu | presents=%llu\n",
+                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                     t.privateBytesMB,
+                     t.decoderRendererSameAdapter ? 1 : 0,
+                     t.rendererDisplaySameAdapter ? 1 : 0,
+                     static_cast<unsigned long long>(t.decoderAdapterLuid),
+                     static_cast<unsigned long long>(t.rendererAdapterLuid),
+                     static_cast<unsigned long long>(t.gpuDedicatedBytes),
+                     static_cast<unsigned long long>(t.gpuSharedBytes),
+                     static_cast<unsigned long long>(t.gpuBudgetBytes),
+                     t.decoderFps, t.renderFps,
+                     static_cast<unsigned long long>(t.ringSlotCount),
+                     static_cast<unsigned long long>(t.ringBytes),
+                     static_cast<unsigned long long>(t.presentCount));
+        std::fclose(f);
+    }
+}
+
+
+static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
     // stdout is owned by the frame protocol â€” log to file only.
     rex::shared::Logger::Instance().SetConsoleOutput(false);
     rex::shared::Logger::Instance().Initialize(BuildLogPath(L"runtime.log"), rex::shared::LogLevel::Trace);
@@ -592,6 +686,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
     WallpaperConfig config;
     config.enableHardwareAcceleration = hardwareAcceleration;
     config.maxFps = maxFps;
+    config.forceSdr = forceSdr;
 
     std::atomic<bool> framePollStop{false};
     std::thread framePollThread(FramePollThread, std::ref(engineGuard),
@@ -602,6 +697,11 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
     // of the frame poller (which runs from startup).
     std::atomic<bool> watchdogStop{true};  // starts stopped; set false on INIT
     std::thread watchdogThread;
+
+    // Telemetry sampler: started on INIT success (engine alive), stopped
+    // on SHUTDOWN / stdin EOF. Same lifecycle pattern as the watchdog.
+    std::atomic<bool> telemetryStop{true};
+    std::thread telemetryThread;
 
     std::string frame;
     while (ReadFrame(frame)) {
@@ -625,6 +725,10 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
             watchdogStop.store(true, std::memory_order_release);
             if (watchdogThread.joinable()) watchdogThread.join();
 
+            // Telemetry reads engine state — must be gone before Shutdown.
+            telemetryStop.store(true, std::memory_order_release);
+            if (telemetryThread.joinable()) telemetryThread.join();
+
             framePollStop.store(true, std::memory_order_release);
             if (framePollThread.joinable()) {
                 framePollThread.join();
@@ -644,6 +748,11 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
             config.maxFps = params["maxFps"].AsInt(config.maxFps);
             config.enableHardwareAcceleration =
                 params["hardwareAcceleration"].AsBool(config.enableHardwareAcceleration);
+            // Fullscreen auto-pause knob (default on). Exposed so tests and
+            // a future Settings toggle can disable it; Electron sends it
+            // once Settings wires "pause on fullscreen app".
+            config.pauseOnFullscreen =
+                params["pauseOnFullscreen"].AsBool(config.pauseOnFullscreen);
             {
                 std::lock_guard lock(engineGuard);
                 engine = CreateWallpaperEngine();
@@ -669,7 +778,27 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
                 watchdogThread.join();
             }
             watchdogStop.store(false, std::memory_order_release);
-            watchdogThread = std::thread(HangWatchdog, std::ref(watchdogStop));
+            watchdogThread = std::thread(
+                HangWatchdog, std::ref(watchdogStop),
+                [&engineGuard, &engine]() -> std::pair<bool, uint64_t> {
+                    // try_to_lock: never block the watchdog on the engine
+                    // mutex (a deadlocked engine must not hang the watcher).
+                    std::unique_lock<std::mutex> lock(engineGuard, std::try_to_lock);
+                    if (!lock.owns_lock() || !engine) return {false, 0};
+                    if (engine->GetState() != EngineState::Running) return {false, 0};
+                    EngineTelemetry tel{};
+                    engine->GetTelemetry(tel);
+                    return {true, tel.presentCount};
+                });
+
+            // Start the 5s telemetry sampler now that the engine is alive.
+            if (telemetryThread.joinable()) {
+                telemetryStop.store(true, std::memory_order_release);
+                telemetryThread.join();
+            }
+            telemetryStop.store(false, std::memory_order_release);
+            telemetryThread = std::thread(TelemetryThread, std::ref(engineGuard),
+                                          std::ref(engine), std::ref(telemetryStop));
 
             WriteResponse(id, true);
             WriteEvent("READY", Obj({ { "session", json::Json(engine->GetSessionId().ToString()) } }));
@@ -930,12 +1059,14 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
                                         g_clientSurface.process, &g_clientSurface.slots[i],
                                         0, FALSE, DUPLICATE_SAME_ACCESS);
                     }
+                    g_clientSurface.duplicated = true;
                 } else {
                     g_clientSurface.fence = reinterpret_cast<HANDLE>(s.fenceHandle);
                     for (UINT i = 0; i < g_clientSurface.slotCount; ++i) {
                         g_clientSurface.slots[i] =
                             reinterpret_cast<HANDLE>(engine->GetFrameSlotHandle(i));
                     }
+                    g_clientSurface.duplicated = false;
                 }
             }
 
@@ -999,6 +1130,20 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
             tel.emplace("decodeHeight", json::Json(t.decodeHeight));
             tel.emplace("hdrActive", json::Json(t.hdrActive));
             tel.emplace("displayMaxNits", json::Json(t.displayMaxNits));
+            tel.emplace("gpuDedicated", json::Json(static_cast<double>(t.gpuDedicatedBytes)));
+            tel.emplace("gpuShared", json::Json(static_cast<double>(t.gpuSharedBytes)));
+            tel.emplace("gpuBudget", json::Json(static_cast<double>(t.gpuBudgetBytes)));
+            tel.emplace("decRendSameAdapter", json::Json(t.decoderRendererSameAdapter));
+            tel.emplace("rendDispSameAdapter", json::Json(t.rendererDisplaySameAdapter));
+            tel.emplace("decoderLuid", json::Json(HexU64(t.decoderAdapterLuid)));
+            tel.emplace("rendererLuid", json::Json(HexU64(t.rendererAdapterLuid)));
+            tel.emplace("presentCount", json::Json(static_cast<double>(t.presentCount)));
+            tel.emplace("decodeMsP50", json::Json(t.decodeMsP50));
+            tel.emplace("decodeMsP95", json::Json(t.decodeMsP95));
+            tel.emplace("decodeMsP99", json::Json(t.decodeMsP99));
+            tel.emplace("vpMsP50", json::Json(t.vpMsP50));
+            tel.emplace("vpMsP95", json::Json(t.vpMsP95));
+            tel.emplace("vpMsP99", json::Json(t.vpMsP99));
             data.emplace("telemetry", json::Json(std::move(tel)));
             SceneInfo scene = engine->GetCurrentScene();
             json::Json::Object sceneObj;
@@ -1038,6 +1183,10 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration) {
     watchdogStop.store(true, std::memory_order_release);
     if (watchdogThread.joinable()) {
         watchdogThread.join();
+    }
+    telemetryStop.store(true, std::memory_order_release);
+    if (telemetryThread.joinable()) {
+        telemetryThread.join();
     }
     framePollStop.store(true, std::memory_order_release);
     if (framePollThread.joinable()) {
@@ -1092,10 +1241,16 @@ float4 main(PSIn input) : SV_TARGET {
 }
 )";
 
+// P13: explicit decode-path selection. Auto = try HW, fall back to SW.
+// HwOnly aborts if the codec cannot be hardware-decoded; SwOnly never
+// creates a D3D11VA context.
+enum class HwMode { Auto, HwOnly, SwOnly };
+
 struct BenchFlags {
     std::wstring file;
     double seekSec = 0.0;
     int maxFrames = 0;  // 0 = decode until EOF
+    HwMode hwMode = HwMode::Auto;
 };
 
 struct BenchStats {
@@ -1196,7 +1351,6 @@ static int RunBenchmark(const BenchFlags& flags) {
     HANDLE fenceHandle = nullptr;
     UINT64 fenceValue = 0;
     UINT64 slotConsume[8] = {};   // D3D11 -> D3D12: blt into slot done (wait before draw)
-    UINT64 slotFree[8] = {};      // D3D12 -> D3D11: draw of slot done (wait before blt reuse)
     UINT64 d12SignalVal = 0;
     {
         Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
@@ -1310,31 +1464,35 @@ static int RunBenchmark(const BenchFlags& flags) {
 
     // D3D11VA device context wrapping our D3D11 device. Textures are created
     // with SHARED | SHARED_NTHANDLE so the decode pool is openable in D3D12.
-    AVBufferRef* hwDevRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
-    if (!hwDevRef) {
-        std::cerr << "REX: out of memory (hw device ctx)\n";
-        avcodec_free_context(&dec);
-        avformat_close_input(&fmt);
-        DestroyWindow(hwnd);
-        return 1;
+    // --sw skips this entirely (no D3D11VA context is ever created).
+    AVBufferRef* hwDevRef = nullptr;
+    if (flags.hwMode != HwMode::SwOnly) {
+        hwDevRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+        if (!hwDevRef) {
+            std::cerr << "REX: out of memory (hw device ctx)\n";
+            avcodec_free_context(&dec);
+            avformat_close_input(&fmt);
+            DestroyWindow(hwnd);
+            return 1;
+        }
+        {
+            AVHWDeviceContext* hwDev = reinterpret_cast<AVHWDeviceContext*>(hwDevRef->data);
+            AVD3D11VADeviceContext* hwctx =
+                reinterpret_cast<AVD3D11VADeviceContext*>(hwDev->hwctx);
+            hwctx->device = d3d11.Get();
+            hwctx->BindFlags = D3D11_BIND_SHADER_RESOURCE;  // FFmpeg adds BIND_DECODER
+            hwctx->MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+        }
+        if (av_hwdevice_ctx_init(hwDevRef) < 0) {
+            std::cerr << "REX: d3d11va device init failed\n";
+            av_buffer_unref(&hwDevRef);
+            avcodec_free_context(&dec);
+            avformat_close_input(&fmt);
+            DestroyWindow(hwnd);
+            return 1;
+        }
+        dec->hw_device_ctx = av_buffer_ref(hwDevRef);
     }
-    {
-        AVHWDeviceContext* hwDev = reinterpret_cast<AVHWDeviceContext*>(hwDevRef->data);
-        AVD3D11VADeviceContext* hwctx =
-            reinterpret_cast<AVD3D11VADeviceContext*>(hwDev->hwctx);
-        hwctx->device = d3d11.Get();
-        hwctx->BindFlags = D3D11_BIND_SHADER_RESOURCE;  // FFmpeg adds BIND_DECODER
-        hwctx->MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-    }
-    if (av_hwdevice_ctx_init(hwDevRef) < 0) {
-        std::cerr << "REX: d3d11va device init failed\n";
-        av_buffer_unref(&hwDevRef);
-        avcodec_free_context(&dec);
-        avformat_close_input(&fmt);
-        DestroyWindow(hwnd);
-        return 1;
-    }
-    dec->hw_device_ctx = av_buffer_ref(hwDevRef);
     if (avcodec_open2(dec, codec, nullptr) < 0) {
         std::cerr << "REX: decoder open failed (codec/hwaccel unsupported?)\n";
         av_buffer_unref(&hwDevRef);
@@ -1343,8 +1501,8 @@ static int RunBenchmark(const BenchFlags& flags) {
         DestroyWindow(hwnd);
         return 1;
     }
-    if (!dec->hw_device_ctx) {
-        std::cerr << "REX: hardware decode not active\n";
+    if (flags.hwMode == HwMode::HwOnly && !dec->hw_device_ctx) {
+        std::cerr << "REX: --hw specified but hardware decode not active\n";
         av_buffer_unref(&hwDevRef);
         avcodec_free_context(&dec);
         avformat_close_input(&fmt);
@@ -1562,13 +1720,33 @@ static int RunBenchmark(const BenchFlags& flags) {
     auto handleDecodedFrame = [&](const Clock::time_point& tDec0) -> bool {
         const auto tDec1 = Clock::now();
         const double decodeMs = ms(tDec1 - tDec0).count();
+
+        // --sw: decode-only accounting. Everything below (VP blt, shared
+        // NT handles, D3D12 open/render) is inherently D3D11-texture
+        // interop, so software frames go straight to the stats.
+        if (frame->format != AV_PIX_FMT_D3D11 && flags.hwMode == HwMode::SwOnly) {
+            if (!sawFirst) {
+                sawFirst = true;
+                stats.startupMs = ms(tDec1 - tStart).count();
+            }
+            decodeSum += decodeMs;
+            decodeMax = std::max(decodeMax, decodeMs);
+            stats.frames++;
+            if (stats.frames % 240 == 0) {
+                std::cout << "  [frame " << stats.frames << "] decode "
+                          << (1000.0 / (decodeSum / static_cast<double>(stats.frames)))
+                          << " fps (software)\n";
+            }
+            return true;
+        }
+
         if (!sawFirst) {
             sawFirst = true;
             stats.startupMs = ms(tDec1 - tStart).count();
             if (frame->format != AV_PIX_FMT_D3D11) {
                 std::cerr << "REX: hardware decode not active (frame format "
                           << av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format))
-                          << ", expected d3d11)\n";
+                          << ", expected d3d11). Use --sw for software benchmark.\n";
                 return false;
             }
         }
@@ -1772,7 +1950,7 @@ static int RunBenchmark(const BenchFlags& flags) {
                 cmdList->ResourceBarrier(1, &barrier2);
                 cmdList->Close();
                 queue.Execute(cmdList.Get());
-                queue.Get()->Signal(fence12.Get(), slotFree[slot] = ++d12SignalVal);
+                queue.Get()->Signal(fence12.Get(), ++d12SignalVal);
 
                 swap.Present(1, 0);
                 renderMs = ms(Clock::now() - tRender0).count();
@@ -1906,12 +2084,14 @@ static int RunBenchmark(const BenchFlags& flags) {
     out("input:      " + stats.container + ", " + stats.codec + ", " +
         std::to_string(stats.width) + "x" + std::to_string(stats.height) +
         " @" + std::to_string(stats.containerFps) + " fps");
-    out("hw path:    ffmpeg d3d11va decode -> gpu copy -> shared NT handle -> d3d12");
+    out(flags.hwMode == HwMode::SwOnly
+            ? "path:       ffmpeg sw decode -> CPU (share/render skipped)"
+            : "hw path:    ffmpeg d3d11va decode -> gpu copy -> shared NT handle -> d3d12");
     out("ffmpeg:     " + std::string(av_version_info()));
     if (stats.seekMs > 0.0)
         out("seek:       " + std::to_string(stats.seekMs) + " ms");
     out("startup:    " + std::to_string(stats.startupMs) + " ms (open -> first frame)");
-    if (stats.frames > 0) {
+    if (stats.frames > 0 && flags.hwMode != HwMode::SwOnly) {
         out("decode:     avg " + std::to_string(stats.decodeAvgMs) + " ms | max " +
             std::to_string(stats.decodeMaxMs) + " ms | ~" +
             std::to_string(1000.0 / stats.decodeAvgMs) + " fps");
@@ -1921,6 +2101,10 @@ static int RunBenchmark(const BenchFlags& flags) {
             std::to_string(stats.renderMaxMs) + " ms (vsync paced)");
         out("end-to-end: avg " + std::to_string(stats.e2eAvgMs) + " ms | max " +
             std::to_string(stats.e2eMaxMs) + " ms");
+    } else if (stats.frames > 0) {
+        out("decode:     avg " + std::to_string(stats.decodeAvgMs) + " ms | max " +
+            std::to_string(stats.decodeMaxMs) + " ms | ~" +
+            std::to_string(1000.0 / stats.decodeAvgMs) + " fps (software, decode-only)");
     }
     out("frames:     " + std::to_string(stats.frames) + " decoded, " +
         std::to_string(stats.decodeErrors) + " decode errors, " +
@@ -1932,9 +2116,15 @@ static int RunBenchmark(const BenchFlags& flags) {
     out("process:    " + std::to_string(stats.processMemMB) + " MB private");
     out("log:        " + BuildLogPath(L"benchmark.log"));
     if (fatal) out("status:     ABORTED (hardware decode unavailable)");
+    else if (flags.hwMode == HwMode::SwOnly) out("status:     OK (software decode-only)");
+    else if (flags.hwMode == HwMode::HwOnly) out("status:     OK (hardware verified)");
     if (log) fclose(log);
 
     // ── Cleanup ──
+    for (HANDLE h : poolHandles) {
+        if (h) CloseHandle(h);
+    }
+    poolHandles.clear();
     av_frame_free(&frame);
     av_packet_free(&pkt);
     av_buffer_unref(&hwDevRef);
@@ -2012,6 +2202,8 @@ int wmain(int argc, wchar_t** argv) {
     float volume = 1.0f;
     float speed = 1.0f;
     bool hardwareAcceleration = true;
+    bool forceSdr = false;
+    HwMode benchHwMode = HwMode::Auto;
     bool benchmark = false;
     double seekSec = 0.0;
     int maxBenchFrames = 0;
@@ -2039,6 +2231,12 @@ int wmain(int argc, wchar_t** argv) {
             speed = _wtof(next().c_str());
         } else if (arg == L"--no-hw") {
             hardwareAcceleration = false;
+        } else if (arg == L"--force-sdr") {
+            forceSdr = true;
+        } else if (arg == L"--hw") {
+            benchHwMode = HwMode::HwOnly;   // benchmark: abort if HW unavailable
+        } else if (arg == L"--sw") {
+            benchHwMode = HwMode::SwOnly;   // benchmark: never create D3D11VA ctx
         } else if (arg == L"--benchmark") {
             benchmark = true;
         } else if (arg == L"--seek") {
@@ -2059,6 +2257,10 @@ int wmain(int argc, wchar_t** argv) {
                 "  --volume <0..1>         playback volume\n"
                 "  --speed <0.25..4>       playback speed\n"
                 "  --no-hw                 disable hardware acceleration\n"
+                "  --force-sdr             force SDR path in shader (diagnostic: skip HDR/PQ)\n"
+                "  --hw                    (benchmark) hardware decode ONLY — abort if the\n"
+                "                          codec has no D3D11VA hwaccel\n"
+                "  --sw                    (benchmark) software decode only — no D3D11VA context\n"
                 "  --benchmark             FFmpeg D3D11VA -> D3D12 zero-copy interop benchmark\n"
                 "  --seek <sec>            (benchmark) seek to <sec> before decoding\n"
                 "  --frames <n>            (benchmark) decode at most <n> frames (0 = whole file)\n";
@@ -2067,7 +2269,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     if (runtimeMode) {
-        return RunRuntime(maxFps, hardwareAcceleration);
+        return RunRuntime(maxFps, hardwareAcceleration, forceSdr);
     }
 
     if (benchmark) {
@@ -2075,6 +2277,7 @@ int wmain(int argc, wchar_t** argv) {
         bf.file = file;
         bf.seekSec = seekSec;
         bf.maxFrames = maxBenchFrames;
+        bf.hwMode = benchHwMode;
         return RunBenchmark(bf);
     }
 

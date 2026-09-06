@@ -73,6 +73,11 @@ public:
         m_supported.insert("rotation");
         m_supported.insert("flipH");
         m_supported.insert("flipV");
+        m_supported.insert("volume");
+        m_supported.insert("mute");
+        m_supported.insert("brightness");
+        m_supported.insert("contrast");
+        m_supported.insert("saturation");
     }
 };
 

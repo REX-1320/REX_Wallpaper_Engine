@@ -5,7 +5,6 @@ import ShadcnGallery from './ShadcnGallery'
 import SpecularButton from './components/SpecularButton'
 import WidgetsWorkspace from './widgets/Workspace'
 import WallpaperGallery from './wallpapers/WallpaperGallery'
-import WallpaperPreview from './wallpapers/WallpaperPreview'
 import WallpaperInspector from './wallpapers/inspector/Inspector'
 
 function greeting() {
@@ -58,7 +57,6 @@ function App() {
                 <WallpaperGallery />
               </div>
               <div className="wallpaper-cube w2">
-                <WallpaperPreview />
                 <WallpaperInspector />
               </div>
             </div>

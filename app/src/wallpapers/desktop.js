@@ -27,7 +27,7 @@ export const ENGINE_MODE_BY_MODE = {
 // unavailable, e.g. browser-only dev).
 export const DESKTOP_CAPABILITIES = {
   IMAGE: ['fillMode'],
-  VIDEO: ['fillMode', 'speed', 'loop'],
+  VIDEO: ['fillMode', 'speed', 'loop', 'volume'],
   WEB: [],
   SCENE: [],
   SHADER: [],

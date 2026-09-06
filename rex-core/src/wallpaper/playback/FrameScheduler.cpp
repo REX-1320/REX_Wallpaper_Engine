@@ -10,10 +10,10 @@ void FrameScheduler::Push(const VideoFrame& frame) {
 
 const VideoFrame* FrameScheduler::Tick(double /*targetPts*/) {
     const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
-    if (wc == 0 || wc - 1 <= m_lastConsumedWrite) {
+    if (wc == 0 || wc == m_lastConsumedWrite) {
         return nullptr;
     }
-    m_lastConsumedWrite = wc - 1;
+    m_lastConsumedWrite = wc;
     return &m_slots[(wc - 1) % kNumSlots];
 }
 

@@ -58,11 +58,13 @@ set(WALLPAPER_SOURCES
     src/wallpaper/playback/FrameScheduler.cpp
     src/wallpaper/playback/VideoPlaybackController.cpp
     src/wallpaper/audio/AudioPlayer.cpp
+    src/wallpaper/audio/AudioCapture.cpp
     src/wallpaper/video/VideoManager.cpp
     src/wallpaper/monitor/MonitorCompositor.cpp
     src/wallpaper/loader/ImageLoader.cpp
     src/wallpaper/scene/StaticImageScene.cpp
     src/wallpaper/runtime/RendererAdapters.cpp
+    src/wallpaper/runtime/RuntimeSettings.cpp
 )
 
 set(GRAPHICS_SOURCES
@@ -361,6 +363,11 @@ if(BUILD_TESTING)
         tests/wallpaper/test_stress.cpp
         tests/wallpaper/test_resource_leak.cpp
         tests/wallpaper/test_soak.cpp
+        tests/wallpaper/test_frame_scheduler.cpp
+        tests/wallpaper/test_descriptor_heap.cpp
+        tests/wallpaper/test_json_parser.cpp
+        tests/wallpaper/test_runtime_settings.cpp
+        tests/wallpaper/test_resource_state_tracker.cpp
         ${PLATFORM_WINDOWS_SOURCES}
         ${WALLPAPER_SOURCES}
         ${GRAPHICS_SOURCES}

@@ -4,6 +4,7 @@
 #include "SwapChain.hpp"
 #include "CommandQueue.hpp"
 #include "DescriptorHeapManager.hpp"
+#include "ResourceStateTracker.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 
@@ -13,6 +14,7 @@
 #include <array>
 #include <mutex>
 #include <atomic>
+#include <span>
 #include <string_view>
 #include <DirectXMath.h>
 
@@ -37,6 +39,12 @@ public:
     /// the engine's device so shared-handle video textures stay valid).
     shared::Result<void> Initialize(HWND targetWindow, int width, int height,
                                     ID3D12Device* adoptDevice);
+    /// Initialize sharing an existing CommandQueue (cross-renderer race fix:
+    /// all renderers sharing a device must use the same queue to avoid
+    /// concurrent resource state transitions on shared textures).
+    shared::Result<void> Initialize(HWND targetWindow, int width, int height,
+                                    ID3D12Device* adoptDevice,
+                                    graphics::CommandQueue* sharedQueue);
     void Shutdown();
     void Resize(int width, int height);
 
@@ -44,6 +52,8 @@ public:
     shared::Result<void> LoadTexture(std::string_view path);
     shared::Result<void> UpdateTexturePixels(
         const uint8_t* pixels, int width, int height, int rowPitch);
+    shared::Result<void> UpdateTexturePixels(
+        std::span<const uint8_t> pixels, int width, int height, int rowPitch);
     void ClearTexture();
     bool HasTexture() const { return m_hasTexture; }
 
@@ -77,9 +87,16 @@ public:
     /// user values to 0..2).
     void SetVideoAdjustments(float brightness, float contrast, float saturation) {
         m_brightness = brightness;
-        m_contrast   = contrast;
+        m_contrast = contrast;
         m_saturation = saturation;
     }
+
+    // ─── Paper-white nits (HDR) ───────────────────────────────────────
+    void SetPaperWhiteNits(float nits) { m_paperWhiteNits = nits; }
+
+    // ─── Force SDR (diagnostic) ─────────────────────────────────────
+    void SetForceSdr(bool force) { m_forceSdr = force; }
+    bool IsForceSdr() const { return m_forceSdr; }
 
     // ─── Transform (rotation / flip) ────────────────────────────────────
     /// Rotation in degrees around the screen center + horizontal/vertical
@@ -96,6 +113,10 @@ public:
     bool SetCustomPixelShader(const std::string& hlslSource);
     /// Revert to the built-in SDR/HDR pixel shader.
     void ClearCustomPixelShader();
+
+    // ─── Audio spectrum ────────────────────────────────────────────────
+    /// Updates the audio spectrum constant buffer (32 bands, 0..1).
+    void UpdateAudioSpectrum(const std::array<float, 32>& spectrum);
 
     // ─── Frame Rendering ────────────────────────────────────────────────
     void BeginFrame();
@@ -116,6 +137,8 @@ public:
     // ─── Access to shared graphics primitives ──────────────────────────
     graphics::Device&       GetDevice()       { return m_device; }
     const graphics::Device& GetDevice() const { return m_device; }
+    graphics::CommandQueue&       GetCommandQueue()       { return ActiveQueue(); }
+    const graphics::CommandQueue& GetCommandQueue() const { return ActiveQueue(); }
 
 private:
     // ─── Initialization helpers ─────────────────────────────────────────
@@ -134,7 +157,7 @@ private:
     // ─── Color pipeline ─────────────────────────────────────────────────
     /// Fills the root-constant payload (b0) from the active frame's
     /// colorimetry plus display settings.
-    void BuildColorConstants(float cb[16], bool hdrOutput) const;
+    void BuildColorConstants(float cb[15], bool hdrOutput) const;
 
     // ─── Texture Upload ────────────────────────────────────────────────
     bool UploadTextureToGPU(const TextureData& data);
@@ -146,6 +169,8 @@ private:
     graphics::Device       m_device;
     graphics::SwapChain    m_swapChain;
     graphics::CommandQueue m_commandQueue;
+    graphics::CommandQueue* m_sharedQueue = nullptr; // non-owning; set when shared
+    graphics::ResourceStateTracker m_stateTracker;
 
     // ─── Per-frame command state ───────────────────────────────────────
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    m_commandAllocator;
@@ -167,8 +192,18 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>  m_textureUploadBuffer;
     D3D12_GPU_DESCRIPTOR_HANDLE            m_textureSRVGpuHandle{};
     bool m_hasTexture = false;
+    bool m_isStaticTexture = false;  // true when rendering a static RGBA texture
     int  m_texWidth  = 0;
     int  m_texHeight = 0;
+
+    // ─── Fullscreen quad UV crop ───────────────────────────────────────
+    // Crops driver-aligned pool padding (e.g. 1152-high texture for 1080p
+    // content) out of the sampled region. Applied by rewriting the 4 quad
+    // UVs (upload heap) only when the video/static state changes — never
+    // per frame. (1,1) = sample the whole texture.
+    void EnsureVertexUVs(float sx, float sy);
+    float m_appliedUvX = 1.0f;
+    float m_appliedUvY = 1.0f;
 
     // ─── Video (shared-handle) state ───────────────────────────────────
     // Opened D3D12 views of the decoder's BGRA pool slots. One SRV per
@@ -177,6 +212,11 @@ private:
         HANDLE sharedHandle = nullptr;
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         D3D12_GPU_DESCRIPTOR_HANDLE srvGpu{};
+        // Decoder pool textures are driver-aligned (e.g. 1920x1152 for a
+        // 1920x1080 frame); the active picture is smaller. The shader crops
+        // via uvScale so zeroed padding rows never present (green bar).
+        UINT texWidth = 0;
+        UINT texHeight = 0;
     };
     static constexpr UINT kMaxVideoSlots = 8;
     std::array<VideoSlotResource, kMaxVideoSlots> m_videoSlots;
@@ -185,12 +225,20 @@ private:
     bool   m_hasVideoFrame = false;
     int    m_videoWidth  = 0;
     int    m_videoHeight = 0;
+    // Active-picture UV crop (active / texture dims, 1.0 = exact fit).
+    // Recomputed per DrawVideoFrame from the bound slot; (1,1) whenever
+    // no video frame is bound (static textures are never padded).
+    float  m_videoUvScaleX = 1.0f;
+    float  m_videoUvScaleY = 1.0f;
 
     // ─── Color pipeline state ──────────────────────────────────────────
     VideoColorInfo m_activeColorInfo;   // colorimetry of the bound frame
     bool m_isHdrOutput = false;         // swap chain is R16F + PQ/BT.2020
+    bool m_forceSdr = false;            // --force-sdr: override hdrOutput to 0
     float m_displayPeakNits = 80.0f;    // tone-mapping target (display or
                                         // SDR reference white in nits)
+    float m_inputFormat = 0.0f;         // shader input format (0=NV12, 1=RGBA16, 2=P010)
+    float m_debugMode = 0.0f;           // shader debug (0=normal, 1=Y-only, 2=UV-only)
 
     // ─── Fill mode ─────────────────────────────────────────────────────
     FillMode m_fillMode = FillMode::Fill;
@@ -210,6 +258,7 @@ private:
     float m_brightness = 1.0f;
     float m_contrast   = 1.0f;
     float m_saturation = 1.0f;
+    float m_paperWhiteNits = 203.0f;  // SDR reference white on HDR displays
 
     // ─── Dimensions & state ───────────────────────────────────────────
     int   m_width = 0;
@@ -221,15 +270,49 @@ private:
     // ─── Thread safety ────────────────────────────────────────────────
     mutable std::mutex m_renderMutex;
 
+    /// Returns the command queue used for GPU submissions: the shared
+    /// queue when compositing, or the local queue for the main renderer.
+    graphics::CommandQueue& ActiveQueue() {
+        return m_sharedQueue ? *m_sharedQueue : m_commandQueue;
+    }
+    const graphics::CommandQueue& ActiveQueue() const {
+        return m_sharedQueue ? *m_sharedQueue : m_commandQueue;
+    }
+
     // ─── Telemetry ─────────────────────────────────────────────────────
     std::atomic<uint64_t> m_textureBytes{0};
     std::atomic<uint64_t> m_uploadBytes{0};
     std::atomic<uint64_t> m_textureRecreations{0};
     std::atomic<uint64_t> m_uploads{0};
-    std::atomic<uint64_t> m_allocatorsPerUpload{2}; // copy list + render frame
+    // Cumulative command allocators/lists created inside upload paths.
+    // Flatlines after warm-up (P5 ring); growth during playback = regression.
+    std::atomic<uint64_t> m_allocatorsPerUpload{0};
+
+    // ─── Persistent copy/upload contexts (P5) ─────────────────────────
+    // Ring of allocator+list pairs reused by the software-copy and texture
+    // upload paths. Created once in Initialize(); steady-state uploads
+    // perform ZERO command-buffer allocations. Each path executes then
+    // WaitForGPUs, so entries are always GPU-idle before reuse.
+    static constexpr UINT kCopyContextCount = 4;
+    struct CopyContext {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    allocator;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+    };
+    CopyContext m_copyContexts[kCopyContextCount]{};
+    UINT        m_copyContextNext = 0;
+    /// Fetches the next ring slot, creating it lazily (warm-up/device-loss
+    /// recovery only). List comes back closed-and-ready for Reset().
+    shared::Result<void> AcquireCopyContext(
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator>& allocatorOut,
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>& listOut);
 
     // ─── Vertex layout ────────────────────────────────────────────────
     struct Vertex { float x, y, u, v; };
+
+    // ─── Audio spectrum constant buffer ────────────────────────────────
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_audioCB;
+    std::array<float, 32>* m_mappedSpectrum = nullptr;
+    std::array<float, 32> m_currentSpectrum{};
 };
 
 } // namespace rex::wallpaper

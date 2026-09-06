@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -31,8 +32,8 @@ public:
     void buildDependencyGraph();
 
 private:
-    bool startSingle(IModule* mod);
-    void stopSingle(IModule* mod);
+    bool startSingle(std::shared_ptr<IModule> mod);
+    void stopSingle(std::shared_ptr<IModule> mod);
     void cascadeStop(const std::string& id);
     void cascadePause(const std::string& id);
 

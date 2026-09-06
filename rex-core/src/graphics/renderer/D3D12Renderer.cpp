@@ -45,25 +45,23 @@ VSOutput main(VSInput input) {
 )";
 
 static const char* g_pixelShaderSource = R"(
-Texture2D tex : register(t0);
+Texture2D texY : register(t0);
+Texture2D texUV : register(t1);
 SamplerState sam : register(s0);
 
-// Root constants (16 floats = 4 float4, set per frame from the decoded
-// frame's colorimetry):
-//   mode: x = yuv matrix (0=BT.601, 1=BT.709, 2=BT.2020)
-//         y = transfer  (0=SDR, 1=PQ/ST.2084, 2=HLG)
-//         z = full range flag
-//         w = HDR output flag (swap chain is R16F + PQ/BT.2020)
-//   adj : x = brightness (gain, identity 1.0), y = contrast (identity 1.0),
-//         z = saturation (identity 1.0),
-//         w = paper white in nits (SDR white on HDR output)
-//   disp: x = display peak nits, y = mastering max nits,
-//         z = mastering min nits, w = MaxCLL
 cbuffer ColorConstants : register(b0) {
-    float4 mode;
-    float4 adj;
-    float4 disp;
-    float4 unused;
+    float4 mode;    // x = matrix (0=BT601, 1=BT709, 2=BT2020)
+                    // y = transfer (0=SDR, 1=PQ, 2=HLG)
+                    // z = fullRange, w = HDR output
+    float4 adj;     // x = brightness, y = contrast, z = saturation, w = paper white nits
+    float4 disp;    // x = display peak nits, y = mastering max, z = mastering min, w = MaxCLL
+    float3 extra;   // x = inputFormat (0=NV12, 1=RGBA16, 2=P010)
+                    // y = debugMode  (0=normal, 1=Y-only, 2=UV-only)
+                    // z = staticRGBA (1 = static RGBA texture, skip YUV decode)
+};
+
+cbuffer AudioConstants : register(b2) {
+    float4 spec[8];
 };
 
 struct VSOutput {
@@ -82,7 +80,6 @@ static const float3x3 BT709_TO_BT2020 = {
     0.0433, 0.0114, 0.8956
 };
 
-// ST.2084 (PQ) EOTF / inverse EOTF. Input/output in 10000-nit units.
 float3 PqToLinear(float3 e) {
     const float m1 = 0.1593017578125;
     const float m2 = 78.84375;
@@ -103,7 +100,6 @@ float3 LinearToPq(float3 l) {
     float3 p = pow(max(l / 10000.0, 0.0), m1);
     return pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
 }
-
 // HLG (ARIB STD-B67) inverse OETF, nominal 1000-nit peak, system gamma 1.2.
 float3 HlgToLinear(float3 e) {
     const float a = 0.17883277;
@@ -113,9 +109,6 @@ float3 HlgToLinear(float3 e) {
     return pow(l, 1.2) * 1000.0;
 }
 
-// sRGB / BT.709 gamma (G22) decode & encode. The D3D11 video processor
-// stores SDR RGB gamma-encoded; treating G22 as sRGB is the standard
-// approximation.
 float3 SrgbToLinear(float3 c) {
     float3 lo = c / 12.92;
     float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
@@ -127,57 +120,135 @@ float3 LinearToSrgb(float3 c) {
     return lerp(hi, lo, step(c, float3(0.0031308, 0.0031308, 0.0031308)));
 }
 
-// Simple filmic shoulder (ACES-fit style) for HDR -> SDR tone mapping.
 float3 AcesFit(float3 x) {
     return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
 }
 
-float4 main(VSOutput input) : SV_TARGET {
-    float4 c = tex.Sample(sam, input.uv);
+float SampleSpectrum(float x) {
+    float idx = x * 31.0;
+    int lo = (int)floor(idx);
+    int hi = min(lo + 1, 31);
+    float t = idx - (float)lo;
+    int slot = lo >> 2;
+    int lane = lo & 3;
+    int slotH = hi >> 2;
+    int laneH = hi & 3;
+    float vlo = spec[slot][lane];
+    float vhi = spec[slotH][laneH];
+    return lerp(vlo, vhi, t);
+}
 
+float4 main(VSOutput input) : SV_TARGET {
     const float masterMax = max(disp.y, 1.0);
     const float peak = max(disp.x, 100.0);
+    float3 rgb;
 
-    // ── Decode source to linear light (BT.709 primaries) ───────────────
-    // The decoder's pool already holds RGB (YUV conversion happens in the
-    // D3D11 video processor / swscale): SDR = G22-encoded BT.709 (8-bit),
-    // HDR = PQ-encoded BT.2020 in 16-bit float (the video processor
-    // converts HLG sources to PQ — this SDK has no RGB HLG output space).
-    float3 rgb;   // linear, BT.709, relative to masterMax (HDR) or SDR white
-    if (mode.y > 0.5) {          // PQ or HLG (both arrive as PQ)
-        rgb = mul(BT2020_TO_BT709, PqToLinear(c.rgb)) / masterMax;
-    } else {                     // SDR
-        rgb = SrgbToLinear(c.rgb);
+    if (extra.z > 0.5) {
+        float4 c = texY.Sample(sam, input.uv);
+        rgb = c.rgb;
+    } else if (extra.x > 1.5) {
+        float  yRaw  = texY.Sample(sam, input.uv).r;
+        float2 uvRaw = texUV.Sample(sam, input.uv).rg;
+        float y10  = yRaw * 1023.68;
+        float cb10 = uvRaw.x * 1023.68;
+        float cr10 = uvRaw.y * 1023.68;
+
+        float yN, cbN, crN;
+        if (mode.z > 0.5) {
+            yN = y10 / 1023.0;
+            cbN = cb10 / 1023.0 - 0.5;
+            crN = cr10 / 1023.0 - 0.5;
+        } else {
+            yN  = (y10 - 64.0) / 876.0;
+            cbN = (cb10 - 512.0) / 896.0;
+            crN = (cr10 - 512.0) / 896.0;
+        }
+        float r = yN + 1.4746 * crN;
+        float g = yN - 0.16455 * cbN - 0.57135 * crN;
+        float b = yN + 1.8814 * cbN;
+        rgb = float3(r, g, b);
+        // Gamut-map to BT.709 BEFORE the tone map (verified: better hue
+        // preservation, fewer clipped highlights than ACES-first). NOTE the
+        // mul(v, M) row-vector order: these NPMs are column-stored, and
+        // mul(M, v) breaks white (D65 -> 1.52/0.44/1.04 pink-green tint).
+        rgb = max(mul(rgb, BT2020_TO_BT709), 0.0);
+        if (mode.y > 1.5) {
+            rgb = HlgToLinear(saturate(rgb)) / masterMax;
+        } else {
+            rgb = PqToLinear(saturate(rgb)) / masterMax;
+        }
+    } else if (mode.y > 0.5) {
+        float4 c = texY.Sample(sam, input.uv);
+        rgb = PqToLinear(saturate(c.rgb)) / masterMax;
+    } else {
+        float  y  = texY.Sample(sam, input.uv).r;
+        float2 uv = texUV.Sample(sam, input.uv).rg;
+
+        float yN, cbN, crN;
+        if (mode.z > 0.5) {
+            yN = y;
+            cbN = uv.x - 0.5;
+            crN = uv.y - 0.5;
+        } else {
+            yN = (y - 16.0/255.0) * (255.0/219.0);
+            cbN = (uv.x - 128.0/255.0) * (255.0/224.0);
+            crN = (uv.y - 128.0/255.0) * (255.0/224.0);
+        }
+
+        float r, g, b;
+        if (mode.x < 0.5) {
+            r = yN + 1.402 * crN;
+            g = yN - 0.344136 * cbN - 0.714136 * crN;
+            b = yN + 1.772 * cbN;
+        } else {
+            r = yN + 1.5748 * crN;
+            g = yN - 0.1873 * cbN - 0.4681 * crN;
+            b = yN + 1.8556 * cbN;
+        }
+        rgb = float3(r, g, b);
     }
 
-    // ── User adjustments (linear space) ────────────────────────────────
-    // brightness/contrast combine into a single gain (identity 1.0/1.0);
-    // saturation is a luma-weighted mix (identity 1.0).
-    rgb = saturate(rgb * (adj.x * adj.y));
-    float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
-    rgb = lerp(luma, rgb, adj.z);
+    if (mode.w < 0.5) {
+        rgb = saturate(rgb * (adj.x * adj.y));
+        float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+        rgb = lerp(luma, rgb, adj.z);
+    }
 
-    // SDR content on an SDR target with neutral adjustments: exact passthrough.
-    if (mode.y <= 0.5 && mode.w <= 0.5 &&
-        adj.x == 1.0 && adj.y == 1.0 && adj.z == 1.0) {
-        return c;
+    if (extra.y > 0.5 && extra.z < 0.5) {
+        if (extra.y < 1.5) {
+            if (extra.x > 1.5) {
+                float yRaw = texY.Sample(sam, input.uv).r;
+                return float4(yRaw, yRaw, yRaw, 1.0);
+            } else {
+                float y = texY.Sample(sam, input.uv).r;
+                return float4(y, y, y, 1.0);
+            }
+        } else {
+            if (extra.x > 1.5) {
+                float2 uvRaw = texUV.Sample(sam, input.uv).rg;
+                return float4(uvRaw.x, uvRaw.y, 0.5, 1.0);
+            } else {
+                float2 uv = texUV.Sample(sam, input.uv).rg;
+                return float4(uv.x, uv.y, 0.5, 1.0);
+            }
+        }
     }
 
     if (mode.w > 0.5) {
-        // ── HDR output: tone map to display peak, PQ-encode BT.2020 ───
-        // HDR source: absolute nits scaled to mastering peak. SDR source:
-        // white (1.0) maps to the SDR reference white level (paper white).
-        float3 lin = (mode.y > 0.5) ? rgb * masterMax : rgb * adj.w;
-        lin = min(lin * min(1.0, peak / masterMax), peak);  // scale-to-fit
-        return float4(LinearToPq(mul(BT709_TO_BT2020, lin)), 1.0);
+        float3 lin;
+        if (mode.y > 0.5 || extra.x > 1.5) {
+            lin = min(rgb * masterMax * min(1.0, peak / masterMax), peak);
+        } else {
+            lin = rgb * adj.w;
+        }
+        return float4(LinearToPq((mode.y > 0.5 || extra.x > 1.5) ? lin : mul(lin, BT709_TO_BT2020)), 1.0);
     }
 
-    // ── SDR output ─────────────────────────────────────────────────────
-    if (mode.y > 0.5) {
-        rgb = AcesFit(rgb * 1.0);                 // HDR → SDR tone map
-        return float4(LinearToSrgb(rgb), 1.0);
+    if (mode.y > 0.5 || extra.x > 1.5) {
+        rgb = AcesFit(rgb);
+        rgb = mul(rgb, BT2020_TO_BT709);
     }
-    return float4(LinearToSrgb(rgb), 1.0);
+    return float4(LinearToSrgb(saturate(rgb)), 1.0);
 }
 )";
 
@@ -233,8 +304,12 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
     }
 
     // ── Swap Chain ─────────────────────────────────────────────────────
+    // --force-sdr: lock swapchain to SDR format before first frame
+    if (m_forceSdr) {
+        m_swapChain.SetForceSdr(true);
+    }
     auto scResult = m_swapChain.Initialize(
-        m_commandQueue.Get(), m_device.Get(),
+        ActiveQueue().Get(), m_device.Get(),
         targetWindow, width, height);
     if (scResult.IsError()) {
         return scResult;
@@ -285,8 +360,156 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
     }
     m_commandList->Close();
 
+    // ── Pre-create copy/upload context ring (P5) ──────────────────────
+    // Steady-state uploads must not allocate command buffers. Lazy
+    // creation inside AcquireCopyContext only fires if these fail below.
+    for (UINT i = 0; i < kCopyContextCount; ++i) {
+        m_copyContexts[i].allocator = m_device.CreateCommandAllocator();
+        if (!m_copyContexts[i].allocator) {
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "Failed to create copy allocator");
+        }
+        m_copyContexts[i].list =
+            m_device.CreateCommandList(m_copyContexts[i].allocator.Get());
+        if (!m_copyContexts[i].list) {
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "Failed to create copy list");
+        }
+        m_copyContexts[i].list->Close(); // created open; Reset() needs closed
+    }
+
+    // ── Audio spectrum constant buffer (32 floats, b2) ───────────────
+    {
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = sizeof(std::array<float, 32>);
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.Format = DXGI_FORMAT_UNKNOWN;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bd.SampleDesc.Count = 1;
+        HRESULT hr = m_device.Get()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE,
+            &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(&m_audioCB));
+        if (SUCCEEDED(hr)) {
+            m_audioCB->Map(0, nullptr, reinterpret_cast<void**>(&m_mappedSpectrum));
+            m_currentSpectrum.fill(0.0f);
+        }
+    }
+
     m_initialized = true;
     REX_LOG_INFO("D3D12", "Renderer initialized successfully");
+    return shared::Result<void>();
+}
+
+shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int height,
+                                               ID3D12Device* adoptDevice,
+                                               graphics::CommandQueue* sharedQueue) {
+    if (m_initialized) {
+        return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
+                                    "Renderer already initialized");
+    }
+    if (!sharedQueue || !sharedQueue->Get()) {
+        return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+                                    "shared queue is null");
+    }
+
+    REX_LOG_INFO("D3D12", "Initializing D3D12 renderer ({}x{}, shared queue)", width, height);
+
+    m_width  = width;
+    m_height = height;
+    m_sharedQueue = sharedQueue;
+
+    // ── Device ─────────────────────────────────────────────────────────
+    auto devResult = adoptDevice ? m_device.InitializeAdopted(adoptDevice)
+                                 : m_device.Initialize();
+    if (devResult.IsError()) {
+        return devResult;
+    }
+
+    // Skip local command queue — use the shared one.
+    // ── Command allocator + list ───────────────────────────────────────
+    m_commandAllocator = m_device.CreateCommandAllocator();
+    if (!m_commandAllocator) {
+        return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                    "Failed to create command allocator");
+    }
+
+    // ── Swap Chain ─────────────────────────────────────────────────────
+    if (m_forceSdr) {
+        m_swapChain.SetForceSdr(true);
+    }
+    auto scResult = m_swapChain.Initialize(
+        m_sharedQueue->Get(), m_device.Get(),
+        targetWindow, width, height);
+    if (scResult.IsError()) {
+        return scResult;
+    }
+
+    // ── SRV heap (shader-visible, 64 slots) ───────────────────────────
+    m_srvHeap = m_device.CreateDescriptorHeap(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 64,
+        D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+    if (!m_srvHeap) {
+        return shared::Result<void>(shared::ErrorCode::OutOfMemory,
+                                    "Failed to create SRV heap");
+    }
+
+    // ── Root signature ────────────────────────────────────────────────
+    if (!CreateRootSignature()) {
+        return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                    "Failed to create root signature");
+    }
+
+    // ── Vertex buffer ─────────────────────────────────────────────────
+    if (!CreateVertexBuffer()) {
+        return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                    "Failed to create vertex buffer");
+    }
+
+    // ── Pipeline state ────────────────────────────────────────────────
+    if (!CreatePipelineState(DXGI_FORMAT_R8G8B8A8_UNORM, m_pipelineState)) {
+        return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                    "Failed to create SDR pipeline state");
+    }
+    m_isHdrOutput = m_swapChain.IsHDR();
+    if (m_isHdrOutput) {
+        if (!CreatePipelineState(DXGI_FORMAT_R16G16B16A16_FLOAT, m_pipelineStateHdr)) {
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "Failed to create HDR pipeline state");
+        }
+    }
+
+    // ── Initialize command list ───────────────────────────────────────
+    m_commandList = m_device.CreateCommandList(
+        m_commandAllocator.Get(), m_pipelineState.Get());
+    if (!m_commandList) {
+        return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                    "Failed to create command list");
+    }
+    m_commandList->Close();
+
+    // ── Pre-create copy/upload context ring (P5) ──────────────────────
+    for (UINT i = 0; i < kCopyContextCount; ++i) {
+        m_copyContexts[i].allocator = m_device.CreateCommandAllocator();
+        if (!m_copyContexts[i].allocator) {
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "Failed to create copy allocator");
+        }
+        m_copyContexts[i].list =
+            m_device.CreateCommandList(m_copyContexts[i].allocator.Get());
+        if (!m_copyContexts[i].list) {
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "Failed to create copy list");
+        }
+        m_copyContexts[i].list->Close();
+    }
+
+    m_initialized = true;
+    REX_LOG_INFO("D3D12", "Renderer initialized with shared queue");
     return shared::Result<void>();
 }
 
@@ -296,7 +519,7 @@ void D3D12Renderer::Shutdown() {
     REX_LOG_INFO("D3D12", "Shutting down renderer...");
 
     std::lock_guard<std::mutex> lock(m_renderMutex);
-    m_commandQueue.WaitForGPU();
+    ActiveQueue().WaitForGPU();
 
     // Release wallpaper-specific resources
     m_texture.Reset();
@@ -310,7 +533,17 @@ void D3D12Renderer::Shutdown() {
     m_videoSlotCount = 0;
     m_activeVideoHandle = nullptr;
     m_hasVideoFrame = false;
+
+    // Unmap audio spectrum CB
+    if (m_mappedSpectrum) {
+        m_audioCB->Unmap(0, nullptr);
+        m_mappedSpectrum = nullptr;
+    }
+    m_audioCB.Reset();
+    m_currentSpectrum.fill(0.0f);
+
     m_activeColorInfo = VideoColorInfo{};
+    m_inputFormat = 0.0f;
     m_vertexBuffer.Reset();
     m_pipelineState.Reset();
     m_pipelineStateHdr.Reset();
@@ -324,7 +557,9 @@ void D3D12Renderer::Shutdown() {
 
     // Shutdown shared primitives (order: swap chain → queue → device)
     m_swapChain.Shutdown();
-    m_commandQueue.Shutdown();
+    if (!m_sharedQueue) {
+        m_commandQueue.Shutdown();
+    }
     // Device has no persistent state to clean up
 
     m_initialized = false;
@@ -350,7 +585,7 @@ shared::Result<void> D3D12Renderer::LoadTexture(std::string_view path) {
     std::lock_guard<std::mutex> lock(m_renderMutex);
 
     if (m_texture) {
-        m_commandQueue.WaitForGPU();
+        ActiveQueue().WaitForGPU();
         m_texture.Reset();
         m_hasTexture = false;
     }
@@ -367,10 +602,11 @@ shared::Result<void> D3D12Renderer::LoadTexture(std::string_view path) {
 void D3D12Renderer::ClearTexture() {
     std::lock_guard<std::mutex> lock(m_renderMutex);
     if (m_texture) {
-        m_commandQueue.WaitForGPU();
+        ActiveQueue().WaitForGPU();
         m_texture.Reset();
         m_textureUploadBuffer.Reset();
         m_hasTexture = false;
+        m_inputFormat = 0.0f;
     }
 }
 
@@ -418,25 +654,111 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
         }
         m_videoSlots[idx].sharedHandle = frame.sharedHandle;
 
-        // SRV format follows the pool texture the decoder created
-        // (B8G8R8A8_UNORM for SDR, R16G16B16A16_FLOAT for HDR). Reading it
-        // from the opened resource keeps the renderer format-agnostic.
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = m_videoSlots[idx].resource->GetDesc().Format;
-        srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Texture2D.MipLevels     = 1;
+        const DXGI_FORMAT fmt = m_videoSlots[idx].resource->GetDesc().Format;
+        const D3D12_RESOURCE_DESC resDesc = m_videoSlots[idx].resource->GetDesc();
+        m_videoSlots[idx].texWidth = static_cast<UINT>(resDesc.Width);
+        m_videoSlots[idx].texHeight = resDesc.Height;
+
+        // Log full resource descriptor for P010 diagnostics.
+        if (fmt == DXGI_FORMAT_P010 || fmt == DXGI_FORMAT_NV12) {
+            const char* fmtName = (fmt == DXGI_FORMAT_P010) ? "P010" : "NV12";
+            REX_LOG_INFO("D3D12", "shared resource: fmt={} {}x{} "
+                         "arraySize={} mipLevels={} sampleCount={} "
+                         "dimension={} flags=0x{:x}",
+                         fmtName, resDesc.Width, resDesc.Height,
+                         resDesc.DepthOrArraySize, resDesc.MipLevels,
+                         resDesc.SampleDesc.Count,
+                         static_cast<int>(resDesc.Dimension),
+                         static_cast<unsigned>(resDesc.Flags));
+        }
+
+        // Set shader input format constant for the current frame.
+        // 0 = NV12, 1 = RGBA16, 2 = P010
+        if (fmt == DXGI_FORMAT_P010) {
+            m_inputFormat = 2.0f;
+        } else if (fmt == DXGI_FORMAT_NV12) {
+            m_inputFormat = 0.0f;
+        } else {
+            m_inputFormat = 1.0f;  // BGRA / RGBA16F
+        }
 
         const UINT inc = dev->GetDescriptorHandleIncrementSize(
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_CPU_DESCRIPTOR_HANDLE cpu =
             m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-        cpu.ptr += (1 + idx) * inc;
-        dev->CreateShaderResourceView(m_videoSlots[idx].resource.Get(),
-                                      &srvDesc, cpu);
-        m_videoSlots[idx].srvGpu =
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu =
             m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        m_videoSlots[idx].srvGpu.ptr += (1 + idx) * inc;
+
+        if (fmt == DXGI_FORMAT_NV12 || fmt == DXGI_FORMAT_P010) {
+            // NV12/P010: create two SRVs — t0 = Y plane, t1 = UV plane.
+            // Descriptor layout: Y at (1 + idx*2), UV at (1 + idx*2 + 1).
+            const bool is10bit = (fmt == DXGI_FORMAT_P010);
+            const UINT base = 1 + idx * 2;
+
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvY = {};
+            srvY.Format = is10bit ? DXGI_FORMAT_R16_UNORM
+                                  : DXGI_FORMAT_R8_UNORM;
+            srvY.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvY.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvY.Texture2D.MipLevels = 1;
+            srvY.Texture2D.PlaneSlice = 0;
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuY = cpu;
+            cpuY.ptr += base * inc;
+            dev->CreateShaderResourceView(m_videoSlots[idx].resource.Get(),
+                                          &srvY, cpuY);
+
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvUV = {};
+            srvUV.Format = is10bit ? DXGI_FORMAT_R16G16_UNORM
+                                   : DXGI_FORMAT_R8G8_UNORM;
+            srvUV.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvUV.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvUV.Texture2D.MipLevels = 1;
+            srvUV.Texture2D.PlaneSlice = 1;
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuUV = cpu;
+            cpuUV.ptr += (base + 1) * inc;
+            dev->CreateShaderResourceView(m_videoSlots[idx].resource.Get(),
+                                          &srvUV, cpuUV);
+
+            // GPU handle points to Y descriptor (UV is next descriptor)
+            m_videoSlots[idx].srvGpu = gpu;
+            m_videoSlots[idx].srvGpu.ptr += base * inc;
+        } else {
+            // BGRA / RGBA16F: t0 = main SRV, t1 = dummy (shader samples texUV
+            // only in NV12 mode; for RGBA16F the second descriptor must still
+            // be valid to satisfy the root signature's 2-descriptor range).
+            const UINT base = 1 + idx * 2;
+
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = fmt;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            if (fmt == DXGI_FORMAT_B8G8R8A8_UNORM) {
+                srvDesc.Shader4ComponentMapping =
+                    D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
+                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3);
+            } else {
+                srvDesc.Shader4ComponentMapping =
+                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            }
+            srvDesc.Texture2D.MipLevels = 1;
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuSrv = cpu;
+            cpuSrv.ptr += base * inc;
+            dev->CreateShaderResourceView(m_videoSlots[idx].resource.Get(),
+                                          &srvDesc, cpuSrv);
+
+            // Dummy t1 descriptor (same resource, default mapping)
+            D3D12_SHADER_RESOURCE_VIEW_DESC dummy = srvDesc;
+            dummy.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuDummy = cpu;
+            cpuDummy.ptr += (base + 1) * inc;
+            dev->CreateShaderResourceView(m_videoSlots[idx].resource.Get(),
+                                          &dummy, cpuDummy);
+
+            m_videoSlots[idx].srvGpu = gpu;
+            m_videoSlots[idx].srvGpu.ptr += base * inc;
+        }
 
         m_videoSlotCount++;
     }
@@ -445,7 +767,7 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
     // signals the shared fence; the D3D12 queue must wait on that signal
     // before the draw in RenderFrame() samples the slot.
     if (waitFence) {
-        m_commandQueue.WaitForFence(waitFence, frame.fenceValue);
+        ActiveQueue().WaitForFence(waitFence, frame.fenceValue);
     }
 
     m_activeVideoHandle = frame.sharedHandle;
@@ -454,18 +776,50 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
     m_videoHeight = frame.height;
     m_activeColorInfo = frame.colorInfo;
 
+    // Crop scale: sample only the active picture, never driver padding.
+    // Pool textures may be larger than the frame (e.g. 1920x1152 HW
+    // surface for 1920x1080 content); sampling 0..1 raw would present
+    // zeroed padding rows as a green band and squeeze the picture.
+    // The single scale must satisfy BOTH planes under linear filtering:
+    // the binding constraint is the half-resolution chroma plane, whose
+    // last active row center sits a full luma texel inside the edge.
+    // (active-2)/tex keeps every sample footprint inside active rows on
+    // both planes (cost: ~2 edge content rows stretched over, invisible).
+    // Exact-fit textures keep exactly 1.0 (no behavior change there).
+    m_videoUvScaleX = 1.0f;
+    m_videoUvScaleY = 1.0f;
+    for (UINT i = 0; i < m_videoSlotCount; ++i) {
+        if (m_videoSlots[i].sharedHandle == frame.sharedHandle &&
+            m_videoSlots[i].texWidth > 0 && m_videoSlots[i].texHeight > 0 &&
+            frame.width > 0 && frame.height > 0) {
+            if (static_cast<UINT>(frame.width) == m_videoSlots[i].texWidth) {
+                m_videoUvScaleX = 1.0f;
+            } else {
+                m_videoUvScaleX = (static_cast<float>(frame.width) - 2.0f) /
+                                  static_cast<float>(m_videoSlots[i].texWidth);
+            }
+            if (static_cast<UINT>(frame.height) == m_videoSlots[i].texHeight) {
+                m_videoUvScaleY = 1.0f;
+            } else {
+                m_videoUvScaleY = (static_cast<float>(frame.height) - 2.0f) /
+                                  static_cast<float>(m_videoSlots[i].texHeight);
+            }
+            break;
+        }
+    }
+
     // Tone-mapping target: the actual display peak when HDR is active,
     // otherwise SDR reference white (80 nits).
-    m_displayPeakNits = m_swapChain.IsHDRActive()
-                            ? m_swapChain.GetDisplayMaxNits()
-                            : 80.0f;
+    float peak = m_swapChain.IsHDRActive() ? m_swapChain.GetDisplayMaxNits() : 80.0f;
+    if (peak <= 0.0f) peak = 1000.0f;  // common HDR display fallback
+    m_displayPeakNits = peak;
     return shared::Result<void>();
 }
 
 void D3D12Renderer::ClearVideoFrame() {
     std::lock_guard<std::mutex> lock(m_renderMutex);
 
-    m_commandQueue.WaitForGPU();
+    ActiveQueue().WaitForGPU();
     for (auto& slot : m_videoSlots) {
         slot.resource.Reset();
         slot.sharedHandle = nullptr;
@@ -476,7 +830,10 @@ void D3D12Renderer::ClearVideoFrame() {
     m_hasVideoFrame = false;
     m_videoWidth  = 0;
     m_videoHeight = 0;
+    m_videoUvScaleX = 1.0f;
+    m_videoUvScaleY = 1.0f;
     m_activeColorInfo = VideoColorInfo{};
+    m_inputFormat = 0.0f;
 }
 
 // ─── Update Texture Pixels (video frames) ────────────────────────────────
@@ -502,7 +859,7 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
 
     if (!m_texture || m_texWidth != width || m_texHeight != height) {
         if (m_texture) {
-            m_commandQueue.WaitForGPU();
+            ActiveQueue().WaitForGPU();
             m_texture.Reset();
             m_textureUploadBuffer.Reset();
         }
@@ -601,20 +958,13 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     }
     m_textureUploadBuffer->Unmap(0, nullptr);
 
-    // Create temp copy command list
-    auto copyAllocator = m_device.CreateCommandAllocator();
-    if (!copyAllocator) {
-        if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) m_deviceRemoved = true;
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "CreateCommandAllocator failed");
+    // Persistent context ring (P5) — no per-upload allocation.
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> copyAllocator;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> copyList;
+    if (auto ctxRes = AcquireCopyContext(copyAllocator, copyList); ctxRes.IsError()) {
+        return ctxRes;
     }
-
-    auto copyList = m_device.CreateCommandList(copyAllocator.Get());
-    if (!copyList) {
-        if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) m_deviceRemoved = true;
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "CreateCommandList failed");
-    }
+    copyList->Reset(copyAllocator.Get(), nullptr);
 
     D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
     dstLoc.pResource        = m_texture.Get();
@@ -645,15 +995,59 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     copyList->ResourceBarrier(1, &barrier);
 
     copyList->Close();
-    m_commandQueue.Execute(copyList.Get());
-    m_commandQueue.WaitForGPU();
+    ActiveQueue().Execute(copyList.Get());
+    ActiveQueue().WaitForGPU();
 
     m_uploads++;
 
     return shared::Result<void>();
 }
 
+shared::Result<void> D3D12Renderer::UpdateTexturePixels(
+    std::span<const uint8_t> pixels, int width, int height, int rowPitch) {
+    if (pixels.size() < static_cast<size_t>(rowPitch) * height) {
+        return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+                                    "pixel buffer too small for given dimensions");
+    }
+    return UpdateTexturePixels(pixels.data(), width, height, rowPitch);
+}
+
 // ─── Frame Rendering ──────────────────────────────────────────────────────
+
+// P5: persistent copy-context ring. After warm-up this never allocates;
+// the counter only moves if a context had to be (re)created during an
+// upload — steady-state growth there is a regression signal.
+shared::Result<void> D3D12Renderer::AcquireCopyContext(
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator>& allocatorOut,
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>& listOut) {
+    CopyContext& ctx = m_copyContexts[m_copyContextNext];
+    m_copyContextNext = (m_copyContextNext + 1) % kCopyContextCount;
+
+    if (!ctx.allocator || !ctx.list) {
+        m_allocatorsPerUpload.fetch_add(1, std::memory_order_relaxed);
+        ctx.allocator = m_device.CreateCommandAllocator();
+        if (!ctx.allocator) {
+            if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) {
+                m_deviceRemoved = true;
+            }
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "CreateCommandAllocator failed");
+        }
+        ctx.list = m_device.CreateCommandList(ctx.allocator.Get());
+        if (!ctx.list) {
+            if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) {
+                m_deviceRemoved = true;
+            }
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "CreateCommandList failed");
+        }
+        ctx.list->Close();
+    }
+
+    allocatorOut = ctx.allocator;
+    listOut      = ctx.list;
+    return shared::Result<void>();
+}
 
 void D3D12Renderer::BeginFrame() {
     m_renderMutex.lock();
@@ -662,6 +1056,7 @@ void D3D12Renderer::BeginFrame() {
 
     m_commandAllocator->Reset();
     m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get());
+    m_stateTracker.Reset();
 }
 
 void D3D12Renderer::RenderFrame() {
@@ -713,20 +1108,21 @@ void D3D12Renderer::RenderFrame() {
         // for sampling, then return to COMMON so the D3D11 video engine can
         // blt into the slot again.
         if (videoActive) {
-            barrier.Transition.pResource   = texToDraw;
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-            barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            m_commandList->ResourceBarrier(1, &barrier);
+            m_stateTracker.Transition(m_commandList.Get(), texToDraw,
+                                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
 
         m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
         ID3D12PipelineState* pso = nullptr;
+        // --force-sdr: always use SDR PSO (R8G8B8A8_UNORM) even if swap chain
+        // is R16F, because our NV12 shader outputs sRGB, not PQ.
+        const bool useHdrPso = m_forceSdr ? false : m_isHdrOutput;
         if (m_customPsActive) {
-            pso = m_isHdrOutput ? m_customPSOHdr.Get() : m_customPSO.Get();
+            pso = useHdrPso ? m_customPSOHdr.Get() : m_customPSO.Get();
         }
         if (!pso) {
-            pso = m_isHdrOutput ? m_pipelineStateHdr.Get()
-                                : m_pipelineState.Get();
+            pso = useHdrPso ? m_pipelineStateHdr.Get()
+                            : m_pipelineState.Get();
         }
         m_commandList->SetPipelineState(pso);
         m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -742,20 +1138,35 @@ void D3D12Renderer::RenderFrame() {
         m_commandList->SetGraphicsRootDescriptorTable(0, srvToDraw);
 
         // Color constants: decode/transfer, adjustments, HDR metadata.
-        float cb[16] = {};
+        m_isStaticTexture = m_hasTexture && !videoActive;
+        float cb[15] = {};
         BuildColorConstants(cb, m_isHdrOutput);
-        m_commandList->SetGraphicsRoot32BitConstants(1, 16, cb, 0);
+        m_commandList->SetGraphicsRoot32BitConstants(1, 15, cb, 0);
 
         // Transform matrix (rotation/flip) for the vertex shader.
         m_commandList->SetGraphicsRoot32BitConstants(2, 16,
                                                      &m_transformMatrix, 0);
 
+        // Audio spectrum (b2, 32 floats) — zeroed when no audio capture.
+        m_commandList->SetGraphicsRoot32BitConstants(3, 32,
+                                                     &m_currentSpectrum, 0);
+
+        // Crop driver padding out of the sampled region. Video pools may
+        // be larger than the active picture (e.g. 1920x1152 surface for
+        // 1920x1080 content); sampling raw 0..1 would present zeroed
+        // padding rows as a green band and squeeze the picture.
+        // Static textures always fit exactly.
+        if (videoActive) {
+            EnsureVertexUVs(m_videoUvScaleX, m_videoUvScaleY);
+        } else {
+            EnsureVertexUVs(1.0f, 1.0f);
+        }
+
         m_commandList->DrawInstanced(4, 1, 0, 0);
 
         if (videoActive) {
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
-            m_commandList->ResourceBarrier(1, &barrier);
+            m_stateTracker.Transition(m_commandList.Get(), texToDraw,
+                                      D3D12_RESOURCE_STATE_COMMON);
         }
     }
 
@@ -768,7 +1179,7 @@ void D3D12Renderer::RenderFrame() {
 
 void D3D12Renderer::EndFrame() {
     m_commandList->Close();
-    m_commandQueue.Execute(m_commandList.Get());
+    ActiveQueue().Execute(m_commandList.Get());
 
     HRESULT hr = m_swapChain.Present(1, 0);
 
@@ -816,7 +1227,7 @@ void D3D12Renderer::EndFrame() {
         }
     }
 
-    m_commandQueue.Signal();
+    ActiveQueue().Signal();
     m_renderMutex.unlock();
 }
 
@@ -834,7 +1245,7 @@ void D3D12Renderer::Resize(int width, int height) {
 
     REX_LOG_INFO("D3D12", "Resizing to {}x{}", width, height);
 
-    m_commandQueue.WaitForGPU();
+    ActiveQueue().WaitForGPU();
     m_swapChain.Resize(m_device.Get(), width, height);
 
     m_width  = width;
@@ -910,20 +1321,14 @@ bool D3D12Renderer::UploadTextureToGPU(const TextureData& data) {
     }
     uploadBuffer->Unmap(0, nullptr);
 
-    // Copy via command list
-    auto uploadAlloc = m_device.CreateCommandAllocator();
-    if (!uploadAlloc) {
-        if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) m_deviceRemoved = true;
+    // Copy via persistent context ring (P5) — no per-upload allocation.
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> uploadAlloc;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> uploadList;
+    if (auto ctxRes = AcquireCopyContext(uploadAlloc, uploadList); ctxRes.IsError()) {
         m_texture.Reset();
         return false;
     }
-
-    auto uploadList = m_device.CreateCommandList(uploadAlloc.Get());
-    if (!uploadList) {
-        if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) m_deviceRemoved = true;
-        m_texture.Reset();
-        return false;
-    }
+    uploadList->Reset(uploadAlloc.Get(), nullptr);
 
     D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
     dstLoc.pResource        = m_texture.Get();
@@ -951,8 +1356,8 @@ bool D3D12Renderer::UploadTextureToGPU(const TextureData& data) {
     uploadList->ResourceBarrier(1, &barrier);
 
     uploadList->Close();
-    m_commandQueue.Execute(uploadList.Get());
-    m_commandQueue.WaitForGPU();
+    ActiveQueue().Execute(uploadList.Get());
+    ActiveQueue().WaitForGPU();
 
     // Create SRV
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -1062,11 +1467,11 @@ void D3D12Renderer::ClearCustomPixelShader() {
 bool D3D12Renderer::CreateRootSignature() {
     D3D12_DESCRIPTOR_RANGE range = {};
     range.RangeType             = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors        = 1;
+    range.NumDescriptors        = 2;   // t0=Y plane, t1=UV plane (NV12)
     range.BaseShaderRegister    = 0;
     range.RegisterSpace         = 0;
 
-    D3D12_ROOT_PARAMETER params[3] = {};
+    D3D12_ROOT_PARAMETER params[4] = {};
 
     // t0: texture (static or video slot)
     params[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -1075,11 +1480,11 @@ bool D3D12Renderer::CreateRootSignature() {
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // b0: color constants (mode / adjustments / display metadata) —
-    // 16 floats, updated per frame via SetGraphicsRoot32BitConstants.
+    // 15 floats, updated per frame via SetGraphicsRoot32BitConstants.
     params[1].ParameterType                    = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[1].Constants.ShaderRegister         = 0;
     params[1].Constants.RegisterSpace          = 0;
-    params[1].Constants.Num32BitValues         = 16;
+    params[1].Constants.Num32BitValues         = 15;
     params[1].ShaderVisibility                 = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // b1: transform matrix (rotation/flip) — 16 floats, vertex shader.
@@ -1088,6 +1493,13 @@ bool D3D12Renderer::CreateRootSignature() {
     params[2].Constants.RegisterSpace          = 0;
     params[2].Constants.Num32BitValues         = 16;
     params[2].ShaderVisibility                 = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    // b2: audio spectrum — 32 floats (8 float4s), pixel shader.
+    params[3].ParameterType                    = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[3].Constants.ShaderRegister         = 2;
+    params[3].Constants.RegisterSpace          = 0;
+    params[3].Constants.Num32BitValues         = 32;
+    params[3].ShaderVisibility                 = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -1100,7 +1512,7 @@ bool D3D12Renderer::CreateRootSignature() {
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};
-    desc.NumParameters     = 3;
+    desc.NumParameters     = 4;
     desc.pParameters       = params;
     desc.NumStaticSamplers = 1;
     desc.pStaticSamplers   = &sampler;
@@ -1167,9 +1579,9 @@ bool D3D12Renderer::CreatePipelineStateWithPs(
     psoDesc.InputLayout               = {inputLayout, 2};
     psoDesc.RasterizerState.FillMode  = D3D12_FILL_MODE_SOLID;
     psoDesc.RasterizerState.CullMode  = D3D12_CULL_MODE_NONE;
-    psoDesc.BlendState.RenderTarget[0].BlendEnable       = TRUE;
-    psoDesc.BlendState.RenderTarget[0].SrcBlend          = D3D12_BLEND_SRC_ALPHA;
-    psoDesc.BlendState.RenderTarget[0].DestBlend         = D3D12_BLEND_INV_SRC_ALPHA;
+    psoDesc.BlendState.RenderTarget[0].BlendEnable       = FALSE;
+    psoDesc.BlendState.RenderTarget[0].SrcBlend          = D3D12_BLEND_ONE;
+    psoDesc.BlendState.RenderTarget[0].DestBlend         = D3D12_BLEND_ZERO;
     psoDesc.BlendState.RenderTarget[0].BlendOp           = D3D12_BLEND_OP_ADD;
     psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha     = D3D12_BLEND_ONE;
     psoDesc.BlendState.RenderTarget[0].DestBlendAlpha    = D3D12_BLEND_ZERO;
@@ -1193,20 +1605,21 @@ bool D3D12Renderer::CreatePipelineStateWithPs(
 
 // ─── Color Pipeline ──────────────────────────────────────────────────────
 
-void D3D12Renderer::BuildColorConstants(float cb[16], bool hdrOutput) const {
+void D3D12Renderer::BuildColorConstants(float cb[15], bool hdrOutput) const {
     const VideoColorInfo& ci = m_activeColorInfo;
 
     // mode: matrix | transfer | fullRange | isHdrOutput
     cb[0] = static_cast<float>(ci.yuvMatrix);
     cb[1] = static_cast<float>(ci.transfer);
     cb[2] = ci.fullRange ? 1.0f : 0.0f;
-    cb[3] = hdrOutput ? 1.0f : 0.0f;
+    // --force-sdr overrides hdrOutput to 0 (SDR path in shader)
+    cb[3] = (m_forceSdr || !hdrOutput) ? 0.0f : 1.0f;
 
     // adj: brightness | contrast | saturation | paper white
     cb[4] = m_brightness;                 // brightness (identity 1.0)
     cb[5] = m_contrast;                   // contrast (identity 1.0)
     cb[6] = m_saturation;                 // saturation (identity 1.0)
-    cb[7] = 203.0f;                    // SDR reference white on HDR (nits)
+    cb[7] = m_paperWhiteNits;               // SDR reference white on HDR (nits)
 
     // disp: display peak | mastering max | mastering min | MaxCLL
     cb[8] = m_displayPeakNits;           // tone-mapping target (nits)
@@ -1215,7 +1628,19 @@ void D3D12Renderer::BuildColorConstants(float cb[16], bool hdrOutput) const {
     cb[10] = ci.masteringDisplayMinLuminance;
     cb[11] = ci.maxContentLightLevel;
 
-    cb[12] = cb[13] = cb[14] = cb[15] = 0.0f;
+    // extra: inputFormat (0=NV12, 1=RGBA16, 2=P010), debugMode, staticRGBA
+    cb[12] = m_inputFormat;
+    cb[13] = m_debugMode;
+    cb[14] = m_isStaticTexture ? 1.0f : 0.0f;  // 1 = static RGBA texture
+}
+
+// ─── Audio Spectrum ──────────────────────────────────────────────────────
+
+void D3D12Renderer::UpdateAudioSpectrum(const std::array<float, 32>& spectrum) {
+    m_currentSpectrum = spectrum;
+    if (m_mappedSpectrum) {
+        *m_mappedSpectrum = spectrum;
+    }
 }
 
 bool D3D12Renderer::CreateVertexBuffer() {
@@ -1248,6 +1673,28 @@ bool D3D12Renderer::CreateVertexBuffer() {
     m_vertexBuffer->Unmap(0, nullptr);
 
     return true;
+}
+
+void D3D12Renderer::EnsureVertexUVs(float sx, float sy) {
+    if (sx == m_appliedUvX && sy == m_appliedUvY) return;
+    if (!m_vertexBuffer) return;
+    // State changes only (video switch / video<->static); stall the pipe
+    // so no in-flight frame samples half-rewritten UVs.
+    ActiveQueue().WaitForGPU();
+    struct QuadVert { float px, py, u, v; };
+    QuadVert verts[] = {
+        {-1.0f, -1.0f, 0.0f, sy},
+        { 1.0f, -1.0f, sx,   sy},
+        {-1.0f,  1.0f, 0.0f, 0.0f},
+        { 1.0f,  1.0f, sx,   0.0f},
+    };
+    void* mapped = nullptr;
+    if (SUCCEEDED(m_vertexBuffer->Map(0, nullptr, &mapped))) {
+        memcpy(mapped, verts, sizeof(verts));
+        m_vertexBuffer->Unmap(0, nullptr);
+        m_appliedUvX = sx;
+        m_appliedUvY = sy;
+    }
 }
 
 // ─── Fill Mode Viewport ──────────────────────────────────────────────────

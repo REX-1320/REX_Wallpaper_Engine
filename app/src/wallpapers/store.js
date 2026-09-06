@@ -20,7 +20,10 @@ export function seedWallpapers() {
   const wallpaper = createWallpaperFromType('VIDEO')
   if (wallpaper) {
     wallpapers.set(wallpaper.id, wallpaper)
-    selectedId = wallpaper.id
+    // Don't auto-select the seed: it has no filePath, and selecting it
+    // makes applyWallpaperToDesktop STOP the desktop on every boot while
+    // wiping lastApplied recovery state. Select only real files.
+    if (wallpaper.filePath) selectedId = wallpaper.id
   }
   seeded = true
   bump()
@@ -145,7 +148,6 @@ export async function loadWallpaperFile(file) {
   wallpaper.info.filePath = fileName
   wallpaper.info.description = `Imported ${TYPE_META[type].label.toLowerCase()} wallpaper.`
   if (typeof file !== 'string') {
-    wallpaper.fileUrl = URL.createObjectURL(file)
     wallpaper.filePath = file.path ?? null
     if (window.rexDesktop?.getPathForFile) {
       try {

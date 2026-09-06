@@ -84,6 +84,10 @@ public:
     /// True when HDR10 presentation is actually active on this swap chain.
     bool IsHDRActive() const { return m_hdrActive; }
 
+    /// Force SDR mode: prevents UpdateHdrSelection from switching to R16F/PQ.
+    void SetForceSdr(bool force) { m_forceSdr = force; }
+    bool IsForceSdr() const { return m_forceSdr; }
+
 private:
     shared::Result<void> CreateRenderTargetViews(ID3D12Device* device);
     /// Queries the output the swap chain is currently on and picks the
@@ -103,6 +107,7 @@ private:
     float   m_displayMaxNits = 0.0f;
     float   m_displayMinNits = 0.0f;
     bool    m_hdrActive = false;
+    bool    m_forceSdr = false;
     bool    m_initialized = false;
 };
 

@@ -21,8 +21,8 @@
     ],
     "extraResources": [
       {
-        "from": "../rex-core/.build/Release/rex-wallpaper-cli.exe",
-        "to": "bin/rex-wallpaper-cli.exe"
+        "from": "../rex-core/.build/Release/rex-wallpaper-runtime.exe",
+        "to": "bin/rex-wallpaper-runtime.exe"
       },
       {
         "from": "../rex-core/.build/Release/spdlog.dll",
@@ -31,6 +31,22 @@
       {
         "from": "../rex-core/.build/Release/fmt.dll",
         "to": "bin/fmt.dll"
+      },
+      {
+        "from": "../rex-core/.build/Release/avcodec-62.dll",
+        "to": "bin/avcodec-62.dll"
+      },
+      {
+        "from": "../rex-core/.build/Release/avformat-62.dll",
+        "to": "bin/avformat-62.dll"
+      },
+      {
+        "from": "../rex-core/.build/Release/avutil-60.dll",
+        "to": "bin/avutil-60.dll"
+      },
+      {
+        "from": "../rex-core/.build/Release/swscale-9.dll",
+        "to": "bin/swscale-9.dll"
       }
     ],
     "directories": {
@@ -88,5 +104,8 @@
     "electron-builder": "^26.15.3",
     "oxlint": "^1.75.0",
     "vite": "^8.2.0"
+  },
+  "optionalDependencies": {
+    "@tailwindcss/oxide-wasm32-wasi": "4.3.3"
   }
 }

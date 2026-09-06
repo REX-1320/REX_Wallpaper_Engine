@@ -44,7 +44,10 @@ public:
 
     /// workerW: the wallpaper WorkerW (parent of the engine's render
     /// window). device: the engine's D3D12 device (adopted by the renderer).
-    bool Initialize(ID3D12Device* device, HWND workerW);
+    /// sharedQueue: the engine renderer's command queue (shared to avoid
+    /// concurrent resource state transitions on shared textures).
+    bool Initialize(ID3D12Device* device, HWND workerW,
+                    graphics::CommandQueue* sharedQueue = nullptr);
     void Shutdown();
 
     /// Present the current video frame (a decoder pool slot) to this

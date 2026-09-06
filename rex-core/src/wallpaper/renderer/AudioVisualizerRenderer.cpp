@@ -1,6 +1,6 @@
 #include "AudioVisualizerRenderer.hpp"
 #include "graphics/compositor/compositor.h"
-#include <cstdio>
+#include <shared/Logger.hpp>
 #include <cmath>
 #include <d3dcompiler.h>
 #include <avrt.h>
@@ -141,7 +141,7 @@ bool AudioVisualizerRenderer::load(const SceneInfo& scene, Compositor& composito
         { 0, 0, (float)m_width, (float)m_height }, 1.0f, 0, true });
 
     m_playing = true;
-    printf("[AudioVisualizer] loaded (mode=%d)\n", (int)m_visualType);
+    REX_LOG_INFO("AudioVisualizer", "loaded (mode={})", static_cast<int>(m_visualType));
     return true;
 }
 
@@ -281,7 +281,7 @@ bool AudioVisualizerRenderer::InitD3D12(Compositor& compositor, int width, int h
     // Compile shaders
     CompileShaders();
 
-    printf("[AudioVisualizer] D3D12 initialized\n");
+    REX_LOG_INFO("AudioVisualizer", "D3D12 initialized");
     return true;
 }
 
@@ -291,7 +291,7 @@ void AudioVisualizerRenderer::CompileShaders() {
     auto compile = [&](const char* src, const char* target, ID3DBlob** blob) {
         if (FAILED(D3DCompile(src, strlen(src), nullptr, nullptr, nullptr,
             "main" + 0, target, D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, blob, &errBlob))) {
-            if (errBlob) printf("[AV] shader error: %s\n",
+            if (errBlob) REX_LOG_ERROR("AV", "shader error: {}",
                 (const char*)errBlob->GetBufferPointer());
             return false;
         }
@@ -327,7 +327,7 @@ void AudioVisualizerRenderer::CompileShaders() {
     ComPtr<ID3DBlob> rsBlob;
     if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1,
         rsBlob.GetAddressOf(), &errBlob))) {
-        if (errBlob) printf("[AV] root sig error: %s\n",
+        if (errBlob) REX_LOG_ERROR("AV", "root sig error: {}",
             (const char*)errBlob->GetBufferPointer());
         return;
     }
@@ -362,14 +362,14 @@ bool AudioVisualizerRenderer::InitAudioCapture() {
 
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
         CLSCTX_ALL, IID_PPV_ARGS(&m_enum));
-    if (FAILED(hr)) { printf("[AV] no MMDeviceEnumerator\n"); return false; }
+    if (FAILED(hr)) { REX_LOG_ERROR("AV", "no MMDeviceEnumerator"); return false; }
 
     hr = m_enum->GetDefaultAudioEndpoint(eRender, eConsole, &m_audioDevice);
-    if (FAILED(hr)) { printf("[AV] no default audio endpoint\n"); return false; }
+    if (FAILED(hr)) { REX_LOG_ERROR("AV", "no default audio endpoint"); return false; }
 
     hr = m_audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
         reinterpret_cast<void**>(m_audioClient.GetAddressOf()));
-    if (FAILED(hr)) { printf("[AV] no audio client\n"); return false; }
+    if (FAILED(hr)) { REX_LOG_ERROR("AV", "no audio client"); return false; }
 
     hr = m_audioClient->GetMixFormat(&m_waveFormat);
     if (FAILED(hr)) return false;
@@ -380,7 +380,7 @@ bool AudioVisualizerRenderer::InitAudioCapture() {
 
     hr = m_audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_LOOPBACK, hnsPeriod, 0, m_waveFormat, nullptr);
-    if (FAILED(hr)) { printf("[AV] initialize failed: %08x\n", hr); return false; }
+    if (FAILED(hr)) { REX_LOG_ERROR("AV", "initialize failed: {:08x}", hr); return false; }
 
     hr = m_audioClient->GetService(IID_PPV_ARGS(&m_captureClient));
     if (FAILED(hr)) return false;
@@ -390,7 +390,7 @@ bool AudioVisualizerRenderer::InitAudioCapture() {
 
     m_audioRunning = true;
     m_audioThread = std::thread(&AudioVisualizerRenderer::AudioCaptureThread, this);
-    printf("[AV] audio capture started\n");
+    REX_LOG_INFO("AV", "audio capture started");
     return true;
 }
 

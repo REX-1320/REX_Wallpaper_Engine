@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -76,6 +77,15 @@ struct DecoderDiagnostics {
     double   decodeFps        = 0.0;
     double   averageDecodeMs  = 0.0;
     double   lastDecodeMs     = 0.0;
+    // P13 per-stage percentiles over the last 128 frames. "decode" spans
+    // avcodec_receive_frame through pool publish; "vp" is VideoProcessorBlt
+    // alone (including its HDR-fallback retry when one occurs).
+    double   decodeMsP50      = 0.0;
+    double   decodeMsP95      = 0.0;
+    double   decodeMsP99      = 0.0;
+    double   vpMsP50          = 0.0;
+    double   vpMsP95          = 0.0;
+    double   vpMsP99          = 0.0;
     uint32_t recoveryCount    = 0;
     uint32_t deviceResets     = 0;
     bool     hardwareAccelerated = false;
@@ -98,7 +108,10 @@ struct DecoderDiagnostics {
 // decode thread). All other members are safe to read concurrently.
 
 class FfmpegVideoDecoder {
-public:
+ public:
+    /// P13 timing-ring capacity (also used by diagnostics percentile math).
+    static constexpr size_t kTimingRingSize = 128;
+
     FfmpegVideoDecoder();
     ~FfmpegVideoDecoder();
 
@@ -208,6 +221,13 @@ private:
     mutable std::atomic<uint64_t> m_cpuToGpuCopies{0};
     mutable std::atomic<double>   m_decodeMsSum{0.0};
     mutable std::atomic<double>   m_lastDecodeMs{0.0};
+
+    // P13 per-stage timing rings (single decode-thread writer; GetDiagnostics
+    // is the only reader and tolerates torn/interleaved samples).
+    std::array<float, kTimingRingSize> m_decodeMsRing{};
+    std::array<float, kTimingRingSize> m_vpMsRing{};
+    size_t m_decodeMsCount = 0;   // decode-thread owned
+    size_t m_vpMsCount     = 0;   // decode-thread owned
 };
 
 } // namespace rex::wallpaper

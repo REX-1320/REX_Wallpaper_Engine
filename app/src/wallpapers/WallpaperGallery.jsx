@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown, ArrowUp, Check, Folder, FolderOpen, ListMusic, ListPlus, Monitor, Pencil, Plus, Settings2, Trash2, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
@@ -12,6 +12,7 @@ import {
 import { detectFileType, PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS, TYPE_META } from './registry'
 import {
   deletePlaylist,
+  deleteWallpaper,
   loadWallpaperFile,
   renamePlaylist,
   selectWallpaper,
@@ -22,6 +23,7 @@ import {
 import DisplaySection from './inspector/sections/DisplaySection'
 import PlaylistEngineDialog from './playlist/PlaylistEngineDialog'
 import { playlistEngine } from './playlist/engine'
+import { createThumbnail, deleteThumbnail, saveThumbnail } from './thumbnail'
 
 const SORT_OPTIONS = [
   { key: 'name', label: 'Name' },
@@ -29,18 +31,6 @@ const SORT_OPTIONS = [
   { key: 'size', label: 'Size' },
   { key: 'date', label: 'Date' },
 ]
-
-function formatSize(bytes) {
-  if (bytes == null) return ''
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function formatDate(ts) {
-  if (!ts) return ''
-  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-}
 
 export default function WallpaperGallery() {
   const [files, setFiles] = useState([])
@@ -53,11 +43,15 @@ export default function WallpaperGallery() {
   const [editingFile, setEditingFile] = useState(null)
   const [menu, setMenu] = useState(null)
   const [settingsTarget, setSettingsTarget] = useState(null)
+  const thumbsRef = useRef(new Map())
+  const [, forceThumbs] = useState(0)
   const fileInputRef = useRef(null)
   const cubeRef = useRef(null)
   const playlistCubeRef = useRef(null)
   const { wallpapers, playlists, selectedId } = useWallpaperStore()
   const selectedWallpaper = wallpapers.find((w) => w.id === selectedId) ?? null
+
+  const getThumb = useCallback((id) => thumbsRef.current.get(id) ?? null, [])
 
   const startRename = (folder) => {
     setEditingId(folder.id)
@@ -113,8 +107,15 @@ export default function WallpaperGallery() {
 
   const removeFile = (record) => {
     const w = wallpapers.find((x) => x.info.source === record.name)
-    if (w) deleteWallpaper(w.id)
-    if (record.thumbUrl) URL.revokeObjectURL(record.thumbUrl)
+    if (w) {
+      if (w.id === selectedId) selectWallpaper(null)
+      deleteWallpaper(w.id)
+    }
+    // Drop the persisted cached poster (best-effort; bridge may be absent).
+    if (record.thumbPath) {
+      deleteThumbnail(record.thumbPath)?.catch?.(() => {})
+    }
+    thumbsRef.current.delete(record.id)
     setFiles((prev) => prev.filter((f) => f !== record))
     setMenu(null)
   }
@@ -134,6 +135,16 @@ export default function WallpaperGallery() {
 
   useEffect(() => {
     playlistEngine.start()
+    return () => playlistEngine.stop()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      for (const url of thumbsRef.current.values()) {
+        if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
+      }
+      thumbsRef.current.clear()
+    }
   }, [])
 
   useEffect(() => {
@@ -165,16 +176,40 @@ export default function WallpaperGallery() {
   }, [menu])
 
   const handleFiles = async (e) => {
-    const records = [...e.target.files].map((f) => ({
-      id: crypto.randomUUID(),
-      name: f.name,
-      size: f.size,
-      date: f.lastModified,
-      file: f,
-      thumbUrl: f.type.startsWith('image/') || f.type.startsWith('video/') ? URL.createObjectURL(f) : null,
-      isVideo: f.type.startsWith('video/'),
-    }))
-    if (records.length === 0) return
+    const raw = [...e.target.files]
+    if (raw.length === 0) return
+    const records = await Promise.all(
+      raw.map(async (f) => {
+        const thumb = await createThumbnail(f)
+        const id = crypto.randomUUID()
+        const thumbDataUrl = thumb?.dataUrl ?? null
+        // Persist the poster to the REX thumbnail cache so tiles survive
+        // past the in-memory blob URL lifetime. Best-effort: the bridge
+        // is absent outside the desktop app.
+        let thumbPath = null
+        if (thumbDataUrl) {
+          try {
+            thumbPath = await saveThumbnail(id, thumbDataUrl)
+          } catch {
+            thumbPath = null
+          }
+        }
+        return {
+          id,
+          name: f.name,
+          size: f.size,
+          date: f.lastModified,
+          file: f,
+          thumbDataUrl,
+          thumbPath,
+          isVideo: f.type.startsWith('video/'),
+        }
+      }),
+    )
+    for (const r of records) {
+      if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
+    }
+    forceThumbs((n) => n + 1)
     setFiles((prev) => [...prev, ...records])
     await loadWallpaperFile(records[0].file)
     e.target.value = ''
@@ -463,13 +498,9 @@ export default function WallpaperGallery() {
                   })
                 }}
               >
-                {record.thumbUrl ? (
+                {getThumb(record.id) ? (
                   <span className="gallery-tile-media">
-                    {record.isVideo ? (
-                      <video src={record.thumbUrl} muted preload="metadata" />
-                    ) : (
-                      <img src={record.thumbUrl} alt={name} />
-                    )}
+                    <img src={getThumb(record.id)} alt={name} />
                   </span>
                 ) : (
                   <span className="gallery-tile-thumb">

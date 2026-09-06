@@ -1,16 +1,16 @@
 #include "ImageRenderer.hpp"
 #include "graphics/compositor/compositor.h"
-#include <cstdio>
+#include <shared/Logger.hpp>
 
 namespace rex::wallpaper {
 
 bool ImageRenderer::load(const SceneInfo& scene, Compositor& compositor) {
     m_path = scene.sourcePath;
     if (m_path.empty()) {
-        printf("[ImageRenderer] Empty path\n");
+        REX_LOG_WARN("ImageRenderer", "Empty path");
         return false;
     }
-    printf("[ImageRenderer] Loading: %s\n", m_path.c_str());
+    REX_LOG_INFO("ImageRenderer", "Loading: {}", m_path);
     return compositor.SetBackgroundFromFile(m_path.c_str());
 }
 

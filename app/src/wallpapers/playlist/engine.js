@@ -282,12 +282,29 @@ let timer = null
 let systemTimer = null
 let started = false
 
+let persistTimer = null
+function schedulePersist() {
+  // Debounced disk write: many bumps (ticks, drags) collapse into one
+  // localStorage write every 2s instead of every 500ms tick.
+  if (persistTimer) return
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    persist()
+  }, 2000)
+}
+function flushPersist() {
+  if (persistTimer) {
+    clearTimeout(persistTimer)
+    persistTimer = null
+  }
+  persist()
+}
+
 function bump() {
   version += 1
-  state.now = Date.now()
   hookSnapshot = null
   for (const listener of listeners) listener()
-  persist()
+  schedulePersist()
 }
 
 function persist() {
@@ -363,7 +380,13 @@ function filterPool(settings, pool) {
     }
     if (filters.renderer && w.performance?.renderer && w.performance.renderer !== filters.renderer) return false
     if (filters.author && !(w.info?.author ?? '').toLowerCase().includes(filters.author.toLowerCase())) return false
-    if (filters.tags && !(w.info?.tags ?? []).some((t) => t.toLowerCase().includes(filters.tags.toLowerCase()))) return false
+    if (filters.tags) {
+      const rawTags = w.info?.tags
+      const tagList = Array.isArray(rawTags)
+        ? rawTags
+        : String(rawTags ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+      if (!tagList.some((t) => t.includes(filters.tags.toLowerCase()))) return false
+    }
     if (rules.skipNsfw && w.info?.nsfw) return false
     if (rules.skipLargeFiles && (w.info?.fileSize ?? '').includes('MB') && parseFloat(w.info.fileSize) > 50) return false
     if (rules.skipHighGpu && w.performance?.renderer === 'CPU') return false
@@ -706,16 +729,25 @@ function timeMatch(time, now) {
 }
 
 function tick() {
+  // Fresh clock every tick, but notify subscribers + persist ONLY when
+  // something actually changed (previously bumped unconditionally 2x/sec,
+  // churning localStorage and re-rendering consumers forever).
+  state.now = Date.now()
+  let changed = false
   const id = activePlaylistId()
   if (id && id !== state.currentPlaylistId) {
     state.currentPlaylistId = id
     const settings = getSettings(id)
     if (settings.startup.randomOnStartup) fireChange(settings, 'Startup')
+    changed = true
   }
   const settings = state.currentPlaylistId ? getSettings(state.currentPlaylistId) : null
   if (settings) {
     const reason = evaluateMode(settings)
-    if (reason) fireChange(settings, reason)
+    if (reason) {
+      fireChange(settings, reason)
+      changed = true
+    }
     if (settings.automation.enabled && evaluateAutomation(settings)) {
       const target = (getSnapshot().playlists ?? []).find((p) => p.name === settings.automation.switchTo)
       if (target) {
@@ -723,11 +755,12 @@ function tick() {
         const selected = snapshot.wallpapers.find((w) => w.id === snapshot.selectedId)
         if (selected) {
           updateWallpaperProperty(selected.id, ['playlist', 'currentPlaylist'], target.name)
+          changed = true
         }
       }
     }
   }
-  bump()
+  if (changed) bump()
 }
 
 function evaluateAutomation(settings) {
@@ -810,6 +843,7 @@ export const playlistEngine = {
     clearInterval(systemTimer)
     document.removeEventListener('pointerdown', onActivity)
     document.removeEventListener('keydown', onActivity)
+    flushPersist()
   },
   getSettings,
   set(playlistId, path, value) {

@@ -16,8 +16,15 @@ public:
     }
 
     virtual void publish(const ModuleEvent& event) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& cb : subscribers_) {
+        // Snapshot under lock, invoke WITHOUT the lock: subscribers may
+        // subscribe()/publish() re-entrantly (previously self-deadlocked on
+        // std::mutex and inverted lock order with module mutexes).
+        std::vector<Callback> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            snapshot = subscribers_;
+        }
+        for (auto& cb : snapshot) {
             if (cb) cb(event);
         }
     }

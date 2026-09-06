@@ -2,6 +2,7 @@
 
 #include "wallpaper/playback/VideoPlaybackController.hpp"
 #include "wallpaper/monitor/MonitorCompositor.hpp"
+#include "graphics/renderer/CommandQueue.hpp"
 #include "modules/Settings/interfaces/ISettingsService.hpp"
 
 #include <rex/wallpaper/IWallpaperEngine.hpp>
@@ -103,6 +104,11 @@ public:
     HANDLE GetFenceHandle() const { return m_fenceHandle; }
     /// Adapter LUID as a single 64-bit value (LowPart | HighPart<<32).
     uint64_t GetAdapterLuid() const;
+    /// LUID of the adapter the D3D12 renderer runs on (0 = unknown).
+    uint64_t GetD3D12AdapterLuid() const;
+    /// True when the D3D11 decoder device and the D3D12 renderer device
+    /// live on the same physical adapter (required for shared handles).
+    bool IsDecoderRendererSameAdapter() const;
     /// Bumped on every OpenVideo/Close; hosts re-duplicate handles on change.
     uint64_t GetSurfaceGeneration() const { return m_surfaceGen; }
     UINT GetSlotCount() const {
@@ -128,7 +134,10 @@ public:
 
     /// Create a compositor for a monitor. Safe to call after Initialize()
     /// (renders on the render thread; control methods are mutex-guarded).
-    shared::Result<void> AddMonitor(const MonitorInfo& info);
+    /// sharedQueue: when set, compositors share the engine renderer's
+    /// command queue (cross-renderer race fix).
+    shared::Result<void> AddMonitor(const MonitorInfo& info,
+                                    graphics::CommandQueue* sharedQueue = nullptr);
     shared::Result<void> RemoveMonitor(const std::string& monitorId);
     /// Refresh geometry (resolution/orientation changes). Recreates the
     /// compositor when the renderer cannot resize.
@@ -166,6 +175,21 @@ public:
     /// Drop GPU video/static state on all compositors (scene unload).
     void ClearVideoFrames();
 
+    // ─── Per-monitor independent video (Phase 4, item 23) ───────────────
+    /// Open a video for a specific monitor (independent playback).
+    shared::Result<void> OpenVideoForMonitor(const std::string& monitorId,
+                                             std::string_view path);
+    /// Play/pause/stop the per-monitor video on the specified monitor.
+    void PlayMonitor(const std::string& monitorId);
+    void PauseMonitor(const std::string& monitorId);
+    void StopMonitor(const std::string& monitorId);
+    /// Set loop/speed for a per-monitor video.
+    void SetMonitorLoop(const std::string& monitorId, bool loop);
+    void SetMonitorSpeed(const std::string& monitorId, float speed);
+    /// Get position/duration of a per-monitor video.
+    double GetMonitorPosition(const std::string& monitorId) const;
+    double GetMonitorDuration(const std::string& monitorId) const;
+
     /// Shutdown all monitor compositors (call on shutdown/device loss).
     void ShutdownMonitorCompositors();
 
@@ -200,10 +224,13 @@ private:
         MonitorInfo info;
         std::string assignedWallpaper; // per-monitor override ("" = main scene)
         std::unique_ptr<MonitorCompositor> compositor;
+        // Per-monitor independent video playback (nullptr = mirrors main scene)
+        std::unique_ptr<VideoPlaybackController> monitorController;
     };
     std::vector<MonitorEntry> m_monitorEntries;
     mutable std::mutex m_monitorMutex;
     HWND m_workerW = nullptr;
+    graphics::CommandQueue* m_sharedQueue = nullptr; // cross-renderer queue sharing
     std::shared_ptr<rex::settings::ISettingsService> m_settings;
 
     static std::string AssignmentKey(const MonitorInfo& info);

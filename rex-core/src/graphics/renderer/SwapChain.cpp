@@ -160,6 +160,7 @@ void SwapChain::WaitForFrame() const {
 
 void SwapChain::UpdateHdrSelection() {
     if (!m_swapChain) return;
+    if (m_forceSdr) return;  // --force-sdr: stay on SDR format
 
     Microsoft::WRL::ComPtr<IDXGIOutput> output;
     if (FAILED(m_swapChain->GetContainingOutput(&output))) return;

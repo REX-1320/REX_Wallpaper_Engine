@@ -57,9 +57,9 @@ TEST(LifecycleCoordinatorTest, StartSingleModule) {
     coord.startModule("test");
     EXPECT_EQ(registry.getModuleState("test"), ModuleState::Running);
 
-    auto* raw = registry.getModule("test");
+    auto raw = registry.getModule("test");
     ASSERT_NE(raw, nullptr);
-    auto* fake = static_cast<FakeModule*>(raw);
+    auto* fake = static_cast<FakeModule*>(raw.get());
     EXPECT_EQ(fake->startCount_, 1);
 }
 
@@ -104,9 +104,9 @@ TEST(LifecycleCoordinatorTest, RestartModule) {
     coord.restartModule("test");
     EXPECT_EQ(registry.getModuleState("test"), ModuleState::Running);
 
-    auto* raw = registry.getModule("test");
+    auto raw = registry.getModule("test");
     ASSERT_NE(raw, nullptr);
-    auto* fake = static_cast<FakeModule*>(raw);
+    auto* fake = static_cast<FakeModule*>(raw.get());
     EXPECT_EQ(fake->stopCount_, 1);
     EXPECT_EQ(fake->startCount_, 1);
 }

@@ -30,6 +30,7 @@ bool DescriptorHeapManager::Initialize(ID3D12Device* device, UINT capacity) {
     for (UINT i = 0; i < capacity; ++i) {
         m_freeList.push_back(capacity - 1 - i); // stack: 255, 254, ..., 0
     }
+    m_allocated.assign(capacity, false);
 
     REX_LOG_INFO("HeapMgr", "Initialized descriptor heap with {} slots ({} bytes each)",
                  capacity, m_descriptorSize);
@@ -46,6 +47,7 @@ std::optional<DescriptorAllocation> DescriptorHeapManager::Allocate() {
 
     UINT index = m_freeList.back();
     m_freeList.pop_back();
+    m_allocated[index] = true;
 
     DescriptorAllocation alloc;
     alloc.index     = index;
@@ -59,6 +61,11 @@ void DescriptorHeapManager::Free(DescriptorAllocation alloc) {
     if (alloc.index >= m_capacity) return;
 
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_allocated[alloc.index]) {
+        REX_LOG_WARN("HeapMgr", "Attempt to free unallocated descriptor index {}", alloc.index);
+        return;
+    }
+    m_allocated[alloc.index] = false;
     m_freeList.push_back(alloc.index);
 }
 

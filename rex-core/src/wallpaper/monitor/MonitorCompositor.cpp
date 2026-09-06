@@ -36,7 +36,8 @@ ATOM MonitorCompositor::RegisterWindowClass() {
     return s_windowClass;
 }
 
-bool MonitorCompositor::Initialize(ID3D12Device* device, HWND workerW) {
+bool MonitorCompositor::Initialize(ID3D12Device* device, HWND workerW,
+                                   graphics::CommandQueue* sharedQueue) {
     if (m_active) return true;
     if (!device || !workerW || !IsWindow(workerW)) {
         REX_LOG_ERROR(kModule, "[{}] invalid device/parent for init",
@@ -70,8 +71,10 @@ bool MonitorCompositor::Initialize(ID3D12Device* device, HWND workerW) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     m_renderer = std::make_unique<D3D12Renderer>();
-    auto result = m_renderer->Initialize(m_window, m_info.width,
-                                         m_info.height, device);
+    auto result = sharedQueue
+        ? m_renderer->Initialize(m_window, m_info.width, m_info.height,
+                                 device, sharedQueue)
+        : m_renderer->Initialize(m_window, m_info.width, m_info.height, device);
     if (result.IsError()) {
         REX_LOG_ERROR(kModule, "[{}] renderer init failed: {}",
                       m_info.id.c_str(), result.Error().message);

@@ -1,13 +1,55 @@
 #include "Engine.hpp"
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "platform/windows/MonitorEdid.hpp"
+#include <shared/PreciseSleep.hpp>
 #include <iostream>
 #include <chrono>
 #include <algorithm>
 #include <cstdlib>
 #include <psapi.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
 
 namespace rex::wallpaper {
+
+namespace {
+
+/// LUID of the adapter that owns the output driving `monitorDeviceName`
+/// ("\\.\DISPLAYN", matching MONITORINFOEXW.szDevice / DXGI_OUTPUT_DESC.
+/// DeviceName). 0 when not found. Cheap enough for 5s telemetry sampling
+/// (a handful of adapter/output GetDesc calls).
+uint64_t QueryDisplayAdapterLuid(const std::string& monitorDeviceName) {
+    if (monitorDeviceName.empty()) return 0;
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, monitorDeviceName.c_str(),
+                                           -1, nullptr, 0);
+    if (needed <= 0) return 0;
+    std::wstring wide(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, monitorDeviceName.c_str(), -1,
+                        wide.data(), needed);
+    wide.resize(static_cast<size_t>(needed) - 1);
+
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 0;
+
+    for (UINT a = 0;; ++a) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(a, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        for (UINT o = 0;; ++o) {
+            Microsoft::WRL::ComPtr<IDXGIOutput> output;
+            if (adapter->EnumOutputs(o, &output) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_OUTPUT_DESC desc{};
+            if (FAILED(output->GetDesc(&desc))) continue;
+            if (wide != desc.DeviceName) continue;
+            DXGI_ADAPTER_DESC1 adesc{};
+            if (FAILED(adapter->GetDesc1(&adesc))) return 0;
+            return static_cast<uint64_t>(adesc.AdapterLuid.LowPart) |
+                   (static_cast<uint64_t>(adesc.AdapterLuid.HighPart) << 32);
+        }
+    }
+    return 0;
+}
+
+} // namespace
 
 Engine::Engine() {
     REX_LOG_INFO("Engine", "Engine instance created");
@@ -71,6 +113,7 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
         host->Release();
         return result;
     }
+    m_renderer->SetForceSdr(m_config.forceSdr);
 
     // Video backend (FFmpeg D3D11VA -> D3D12 shared textures). Non-fatal:
     // video scenes simply won't play if this fails.
@@ -163,6 +206,10 @@ shared::Result<void> Engine::Shutdown() {
         m_videoManager.reset();
     }
     REX_LOG_INFO("Engine", "Shutdown: video teardown done");
+    if (m_audioCapture) {
+        m_audioCapture->Stop();
+        m_audioCapture.reset();
+    }
     m_renderer.reset();
     REX_LOG_INFO("Engine", "Shutdown: renderer destroyed");
     m_adapter.reset();
@@ -215,6 +262,7 @@ shared::Result<void> Engine::ReinitializeRenderer() {
                       result.Error().message);
         return result;
     }
+    m_renderer->SetForceSdr(m_config.forceSdr);
 
     // Recreate the video backend on the new device.
     m_videoManager = std::make_unique<VideoManager>();
@@ -322,11 +370,21 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
             REX_LOG_WARN("Engine", "Failed to load texture '{}': {}",
                          scene.sourcePath.c_str(), texResult.Error().message);
         }
+        // Enable hot-reload for static images
+        m_hotReloadPath = scene.sourcePath;
+        {
+            std::error_code ec;
+            m_hotReloadLastWrite = std::filesystem::last_write_time(m_hotReloadPath, ec);
+        }
         // Per-monitor compositors without an override mirror the main scene.
         if (m_videoManager) {
             m_videoManager->SetSharedStaticWallpaper(scene.sourcePath);
         }
     } else if (scene.type == "video" && !scene.sourcePath.empty()) {
+        // Clear any leftover static texture so the renderer knows we're in video mode
+        if (m_renderer) {
+            m_renderer->ClearTexture();
+        }
         if (!m_videoManager) {
             REX_LOG_WARN("Engine", "VideoManager not available, video will not play");
         } else {
@@ -334,6 +392,20 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
             if (videoResult.IsError()) {
                 REX_LOG_WARN("Engine", "Failed to open video '{}': {}",
                              scene.sourcePath.c_str(), videoResult.Error().message);
+                // A failed open must not present stale (or uninitialized)
+                // pool slots as if the new scene were playing — that is the
+                // desktop white-noise symptom. Drop all GPU frames so the
+                // compositor falls back to clear color, and report failure
+                // so LOAD -> ok:false and callers skip PLAY.
+                m_videoManager->ClearVideoFrames();
+                if (m_renderer) {
+                    m_renderer->ClearVideoFrame();
+                }
+                // Don't leave the failed scene as "current": Play() must
+                // refuse ("No scene loaded") instead of presenting nothing.
+                m_currentScene = SceneInfo{};
+                m_playing = false;
+                return videoResult;
             } else {
                 // Apply scene-level playback settings immediately.
                 m_videoManager->SetLoop(scene.loop);
@@ -348,6 +420,18 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
                 }
             }
         }
+    } else if (scene.type == "audio") {
+        // Audio visualisation: capture loopback audio for spectrum.
+        if (!m_audioCapture) {
+            m_audioCapture = std::make_unique<AudioCapture>();
+        }
+        if (!m_audioCapture->IsRunning()) {
+            m_audioCapture->Start();
+        }
+        m_hotReloadPath.clear();
+    } else {
+        // Non-static scene: disable hot-reload
+        m_hotReloadPath.clear();
     }
 
     // Push scene-level video adjustments to the renderer (and compositors).
@@ -387,6 +471,10 @@ shared::Result<void> Engine::UnloadScene() {
         m_videoManager->ClearVideoFrames();
     }
 
+    if (m_audioCapture) {
+        m_audioCapture->Stop();
+    }
+
     if (m_renderer) {
         m_renderer->ClearTexture();
         m_renderer->ClearVideoFrame();
@@ -418,6 +506,8 @@ shared::Result<void> Engine::Play() {
     SetState(EngineState::Running);
     m_stopwatch.Start();
 
+    // P16: arm the first present after (re)starting playback.
+    m_frameDirty.store(true, std::memory_order_release);
     return shared::Result<void>();
 }
 
@@ -550,6 +640,10 @@ std::vector<MonitorInfo> Engine::EnumerateMonitors() const {
 }
 
 shared::Result<void> Engine::SetFillMode(FillMode mode) {
+    if (mode == FillMode::Tile) {
+        return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+                                    "Tile fill mode is not implemented");
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     m_currentScene.fillMode = mode;
     if (m_renderer) {
@@ -558,6 +652,7 @@ shared::Result<void> Engine::SetFillMode(FillMode mode) {
     if (m_videoManager) {
         m_videoManager->ApplyFillMode(mode);
     }
+    m_frameDirty.store(true, std::memory_order_release);
     REX_LOG_DEBUG("Engine", "Fill mode set to {}", static_cast<int>(mode));
     return shared::Result<void>();
 }
@@ -575,6 +670,7 @@ shared::Result<void> Engine::SetBrightness(float value) {
                                               m_currentScene.contrast,
                                               m_currentScene.saturation);
     }
+    m_frameDirty.store(true, std::memory_order_release);
     REX_LOG_DEBUG("Engine", "Brightness set to {:.2f}", m_currentScene.brightness);
     return shared::Result<void>();
 }
@@ -592,6 +688,7 @@ shared::Result<void> Engine::SetContrast(float value) {
                                               m_currentScene.contrast,
                                               m_currentScene.saturation);
     }
+    m_frameDirty.store(true, std::memory_order_release);
     REX_LOG_DEBUG("Engine", "Contrast set to {:.2f}", m_currentScene.contrast);
     return shared::Result<void>();
 }
@@ -609,6 +706,7 @@ shared::Result<void> Engine::SetSaturation(float value) {
                                               m_currentScene.contrast,
                                               m_currentScene.saturation);
     }
+    m_frameDirty.store(true, std::memory_order_release);
     REX_LOG_DEBUG("Engine", "Saturation set to {:.2f}", m_currentScene.saturation);
     return shared::Result<void>();
 }
@@ -778,6 +876,12 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.renderFps      = vt.renderFps;
         out.ringSlotCount  = vt.ringSlotCount;
         out.ringBytes      = vt.ringBytes;
+        out.decodeMsP50    = vt.decodeMsP50;
+        out.decodeMsP95    = vt.decodeMsP95;
+        out.decodeMsP99    = vt.decodeMsP99;
+        out.vpMsP50        = vt.vpMsP50;
+        out.vpMsP95        = vt.vpMsP95;
+        out.vpMsP99        = vt.vpMsP99;
     }    if (m_renderer) {
         out.textureBytes    = m_renderer->GetTextureBytes();
         out.uploadBytes     = m_renderer->GetUploadBytes();
@@ -803,6 +907,75 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.displayMaxNits = m_renderer->GetDisplayMaxNits();
     }
 
+    // Adapter topology: decoder (D3D11) vs renderer (D3D12) vs display.
+    if (m_videoManager) {
+        out.decoderAdapterLuid  = m_videoManager->GetAdapterLuid();
+        out.rendererAdapterLuid = m_videoManager->GetD3D12AdapterLuid();
+        out.decoderRendererSameAdapter = m_videoManager->IsDecoderRendererSameAdapter();
+        const uint64_t displayLuid = QueryDisplayAdapterLuid(m_currentMonitor.id);
+        out.rendererDisplaySameAdapter =
+            displayLuid != 0 && out.rendererAdapterLuid != 0 &&
+            displayLuid == out.rendererAdapterLuid;
+    }
+
+    // GPU memory on the renderer's adapter (LOCAL = dedicated VRAM,
+    // NON_LOCAL = shared/system-memory segment).
+    // NOTE: ID3D12Device does NOT implement IDXGIDevice — resolve the
+    // adapter via GetAdapterLuid() + EnumAdapterByLuid instead.
+    if (m_renderer && m_videoManager) {
+        const uint64_t rendererLuid = m_videoManager->GetD3D12AdapterLuid();
+        HRESULT hrFactory = E_FAIL, hrEnum = E_FAIL, hrAs = E_FAIL,
+                hrLocal = E_FAIL, hrNonLocal = E_FAIL;
+        DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+        DXGI_QUERY_VIDEO_MEMORY_INFO nonlocal{};
+        if (rendererLuid != 0) {
+            Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+            hrFactory = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+            if (SUCCEEDED(hrFactory)) {
+                LUID luid{};
+                luid.LowPart  = static_cast<DWORD>(rendererLuid & 0xFFFFFFFFull);
+                luid.HighPart = static_cast<LONG>(rendererLuid >> 32);
+                Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+                hrEnum = factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
+                if (SUCCEEDED(hrEnum)) {
+                    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+                    hrAs = adapter.As(&adapter3);
+                    if (SUCCEEDED(hrAs)) {
+                        hrLocal    = adapter3->QueryVideoMemoryInfo(
+                            0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local);
+                        hrNonLocal = adapter3->QueryVideoMemoryInfo(
+                            0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal);
+                    }
+                }
+            }
+        }
+
+        // One-shot diagnostic: budget==0 means the chain broke somewhere,
+        // which would silently blind every downstream comparison.
+        static std::atomic<bool> s_gpuMemWarned{false};
+        if (!s_gpuMemWarned.exchange(true) &&
+            (rendererLuid == 0 || FAILED(hrFactory) || FAILED(hrEnum) ||
+             FAILED(hrAs) || FAILED(hrLocal) || FAILED(hrNonLocal))) {
+            REX_LOG_WARN("Engine",
+                         "GPU memory query incomplete: luid={:016x} "
+                         "factory={:08x} enum={:08x} as3={:08x} "
+                         "local={:08x} nonlocal={:08x}",
+                         static_cast<uint64_t>(rendererLuid),
+                         static_cast<uint32_t>(hrFactory),
+                         static_cast<uint32_t>(hrEnum),
+                         static_cast<uint32_t>(hrAs),
+                         static_cast<uint32_t>(hrLocal),
+                         static_cast<uint32_t>(hrNonLocal));
+        }
+        if (SUCCEEDED(hrLocal)) {
+            out.gpuDedicatedBytes = local.CurrentUsage;
+            out.gpuBudgetBytes    = local.Budget;
+        }
+        if (SUCCEEDED(hrNonLocal)) {
+            out.gpuSharedBytes = nonlocal.CurrentUsage;
+        }
+    }
+
     out.scenesLoaded   = m_scenesLoaded.load(std::memory_order_relaxed);
     out.scenesReleased = m_scenesReleased.load(std::memory_order_relaxed);
 
@@ -812,6 +985,8 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.privateBytesMB = static_cast<double>(pmc.PrivateUsage)
                            / (1024.0 * 1024.0);
     }
+
+    out.presentCount = m_presentCount.load(std::memory_order_relaxed);
 }
 
 void Engine::DumpStats() const {
@@ -1085,36 +1260,74 @@ void Engine::RenderLoop() {
         }
 
         if (m_renderer && m_renderer->IsInitialized()) {
-            m_renderer->BeginFrame();
-
-            // ── Video frame update ──────────────────────────────────────
-            // Tick() returns a pointer into the scheduler ring (SPSC:
-            // stable until the next Tick()); the frame stays valid until
-            // then. DrawVideoFrame registers the pool slot + fence wait;
-            // actual sampling happens in RenderFrame() after the queue
-            // has waited for the D3D11 blt to finish.
+            // ── P16 dirty-frame gate ────────────────────────────────────
+            // Poll the scheduler EVERY wake (lock-free SPSC, pointer stays
+            // valid until the next Tick), but only Begin/Draw/Present when
+            // content actually changed. Without this, the loop re-rendered
+            // identical frames at ~refresh rate — burning 36-55% GPU when
+            // the decoder ran slower than the display.
+            const VideoFrame* pending = nullptr;
             if (m_state == EngineState::Running && m_videoManager
                 && m_videoManager->IsOpen()
                 && m_currentScene.type == "video") {
-                const VideoFrame* frame = m_videoManager->Tick(GetPosition());
-                if (frame && frame->valid && m_renderer) {
-                    m_renderer->DrawVideoFrame(*frame,
-                                               m_videoManager->GetSharedFence());
+                pending = m_videoManager->Tick(GetPosition());
+                if (pending && !(pending->valid)) pending = nullptr;
+            }
+
+            if (!pending && !m_frameDirty.load(std::memory_order_acquire)) {
+                m_frameCount++;              // keep %30/%120 housekeeping alive
+                PaceLoop(frameStart);
+                continue;
+            }
+
+            m_renderer->BeginFrame();
+
+            if (pending && m_renderer) {
+                m_renderer->DrawVideoFrame(*pending,
+                                           m_videoManager->GetSharedFence());
+                if (IsMultiMonitorMode()) {
+                    // Same decoded frame to every monitor compositor.
+                    m_videoManager->PresentToAllMonitors(*pending);
                 }
-                // Multi-monitor mode: the same ticked frame goes to every
-                // monitor compositor (each does its own Begin/Draw/Render/
-                // End on the shared device).
-                if (frame && frame->valid && IsMultiMonitorMode()) {
-                    m_videoManager->PresentToAllMonitors(*frame);
-                }
+                // New pixels fully handled this pass — disarm any setter-
+                // sourced dirty so we don't double-present.
+                m_frameDirty.store(false, std::memory_order_release);
             }
 
             // ── Clear color (static dark until texture is loaded) ──────
-            // Previously animated RGB here produced the "different colors"
-            // the user saw instead of the video. Keep it static/neutral.
+            // Applied once per texture-less state; re-presenting identical
+            // dark frames is exactly what P16 exists to prevent.
             if (m_state == EngineState::Running
                 && !m_renderer->HasTexture()) {
-                m_renderer->SetClearColor(0.02f, 0.02f, 0.02f);
+                if (!m_darkCleared) {
+                    m_renderer->SetClearColor(0.02f, 0.02f, 0.02f);
+                    m_darkCleared = true;
+                }
+            } else {
+                m_darkCleared = false;
+            }
+
+            // ── Hot-reload: detect static image changes ──────────────
+            if (m_state == EngineState::Running
+                && !m_hotReloadPath.empty()
+                && m_frameCount % 60 == 0) {
+                std::error_code ec;
+                auto lastWrite = std::filesystem::last_write_time(m_hotReloadPath, ec);
+                if (!ec && lastWrite != m_hotReloadLastWrite) {
+                    m_hotReloadLastWrite = lastWrite;
+                    if (m_renderer->LoadTexture(m_hotReloadPath).IsSuccess()) {
+                        REX_LOG_INFO("Engine", "Hot-reloaded static image: {}",
+                                     m_hotReloadPath);
+                    }
+                }
+            }
+
+            // Feed audio spectrum to renderer (zeroed if no audio capture).
+            if (m_audioCapture && m_audioCapture->IsRunning()) {
+                std::array<float, 32> spectrum{};
+                if (m_audioCapture->GetSpectrum(spectrum)) {
+                    m_renderer->UpdateAudioSpectrum(spectrum);
+                }
             }
 
             m_renderer->RenderFrame();
@@ -1124,6 +1337,9 @@ void Engine::RenderLoop() {
             double deltaMs = duration<double, std::milli>(
                 frameEnd - frameStart).count();
             Update(deltaMs / 1000.0);
+
+            m_presentCount.fetch_add(1, std::memory_order_relaxed);
+            PaceLoop(frameStart);
         } else {
             // Renderer not ready — wait before retrying
             std::this_thread::sleep_for(milliseconds(16));
@@ -1133,13 +1349,30 @@ void Engine::RenderLoop() {
     REX_LOG_INFO("Engine", "Render loop ended");
 }
 
+// ─── P16 content-aware pacing ──────────────────────────────────────────────
+//
+// Sleeps until the next expected frame. Target interval is the SLOWER of
+// maxFps and the decoder's measured cadence, floored at ~15 Hz so pause/
+// resume/unload/SET_* commands stay responsive.
+
+void Engine::PaceLoop(
+    std::chrono::high_resolution_clock::time_point frameStart) {
+    const double targetIntervalMs =
+        m_config.maxFps > 0 ? std::max(1000.0 / m_config.maxFps, 4.0) : 16.7;
+    const auto deadline = frameStart +
+        std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(
+            std::chrono::duration<double, std::milli>(targetIntervalMs));
+    rex::shared::PreciseSleepUntil(deadline);
+}
+
 // ─── Per-monitor wallpapers (Phase 5) ─────────────────────────────────────
 
 void Engine::SetupMonitorCompositors() {
     if (!m_videoManager || !IsMultiMonitorMode()) return;
 
+    graphics::CommandQueue* queue = m_renderer ? &m_renderer->GetCommandQueue() : nullptr;
     for (const auto& info : EnumerateMonitors()) {
-        auto result = m_videoManager->AddMonitor(info);
+        auto result = m_videoManager->AddMonitor(info, queue);
         if (result.IsError()) {
             REX_LOG_WARN("Engine", "Failed to add compositor for monitor '{}': {}",
                          info.id.c_str(), result.Error().message);

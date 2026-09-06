@@ -12,42 +12,36 @@ void ModuleRegistry::registerModule(std::unique_ptr<IModule> module) {
     states_[id] = ModuleState::Registered;
 }
 
-IModule* ModuleRegistry::getModule(const std::string& id) {
+std::shared_ptr<IModule> ModuleRegistry::getModule(const std::string& id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = modules_.find(id);
-    return (it != modules_.end()) ? it->second.get() : nullptr;
+    return (it != modules_.end()) ? it->second : nullptr;
 }
 
-const IModule* ModuleRegistry::getModule(const std::string& id) const {
+std::vector<std::shared_ptr<IModule>> ModuleRegistry::getModulesByCategory(const std::string& category) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(id);
-    return (it != modules_.end()) ? it->second.get() : nullptr;
-}
-
-std::vector<IModule*> ModuleRegistry::getModulesByCategory(const std::string& category) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<IModule*> result;
+    std::vector<std::shared_ptr<IModule>> result;
     for (const auto& [id, mod] : modules_) {
         if (mod->getMetadata().category == category)
-            result.push_back(mod.get());
+            result.push_back(mod);
     }
     return result;
 }
 
-std::vector<IModule*> ModuleRegistry::getAllModules() const {
+std::vector<std::shared_ptr<IModule>> ModuleRegistry::getAllModules() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<IModule*> result;
+    std::vector<std::shared_ptr<IModule>> result;
     for (const auto& [id, mod] : modules_)
-        result.push_back(mod.get());
+        result.push_back(mod);
     return result;
 }
 
-std::unique_ptr<IModule> ModuleRegistry::unregisterModule(const std::string& id) {
+std::shared_ptr<IModule> ModuleRegistry::unregisterModule(const std::string& id) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = modules_.find(id);
     if (it != modules_.end()) {
         states_.erase(id);
-        auto ptr = std::move(it->second);
+        auto ptr = it->second;
         modules_.erase(it);
         return ptr;
     }

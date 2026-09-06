@@ -29,7 +29,7 @@ void ModuleOrchestrator::initialize() {
 
     DependencyResolver resolver;
     std::vector<DependencyResolver::ModuleInfo> infos;
-    for (auto* mod : registry_.getAllModules()) {
+    for (auto mod : registry_.getAllModules()) {
         const auto& meta = mod->getMetadata();
         infos.push_back({meta.id, meta.dependencies});
     }
@@ -47,7 +47,7 @@ void ModuleOrchestrator::initialize() {
 
     auto savedConfigs = config_.loadAll();
     for (const auto& cfg : savedConfigs) {
-        auto* mod = registry_.getModule(cfg.moduleId);
+        auto mod = registry_.getModule(cfg.moduleId);
         if (!mod) continue;
 
         if (cfg.enabled && (mod->getMetadata().autoStart || cfg.autoStart)) {
@@ -72,7 +72,7 @@ void ModuleOrchestrator::shutdown() {
     }
 
     std::vector<ModuleConfig> configs;
-    for (auto* mod : registry_.getAllModules()) {
+    for (auto mod : registry_.getAllModules()) {
         const auto& id = mod->getMetadata().id;
         ModuleConfig cfg;
         cfg.moduleId = id;
@@ -87,7 +87,7 @@ void ModuleOrchestrator::shutdown() {
 void ModuleOrchestrator::update(float dt) {
     if (coordinator_) coordinator_->update(dt);
 
-    for (auto* mod : registry_.getAllModules()) {
+    for (auto mod : registry_.getAllModules()) {
         auto h = mod->getHealth();
         h.state = registry_.getModuleState(mod->getMetadata().id);
         health_.reportHealth(mod->getMetadata().id, h);
@@ -115,9 +115,9 @@ void ModuleOrchestrator::restartModule(const std::string& id) {
 }
 
 void ModuleOrchestrator::enableModule(const std::string& id) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (mod) mod->enable();
-    coordinator_->startModule(id);
+    if (coordinator_) coordinator_->startModule(id);
 
     ModuleConfig cfg = config_.loadModule(id);
     cfg.enabled = true;
@@ -128,7 +128,7 @@ void ModuleOrchestrator::disableModule(const std::string& id) {
     if (coordinator_) {
         coordinator_->stopModule(id);
     }
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (mod) mod->disable();
     registry_.setModuleState(id, ModuleState::Disabled);
 
@@ -138,7 +138,7 @@ void ModuleOrchestrator::disableModule(const std::string& id) {
 }
 
 void ModuleOrchestrator::reloadModule(const std::string& id) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (!mod) throw std::runtime_error("Module not found: " + id);
     if (!loader_.isDynamic(id))
         throw std::runtime_error("Module is not dynamic: " + id);
@@ -162,14 +162,14 @@ void ModuleOrchestrator::reloadModule(const std::string& id) {
     registry_.registerModule(std::move(newMod));
 
     ModuleContext ctx(newId, services_, registry_, bus_, "config/" + newId + ".json");
-    auto* registeredMod = registry_.getModule(newId);
+    auto registeredMod = registry_.getModule(newId);
     if (registeredMod && registeredMod->initialize(&ctx)) {
         registry_.setModuleState(newId, ModuleState::Initialized);
     }
 }
 
 void ModuleOrchestrator::handleModuleFailure(const std::string& id, const std::string& error) {
-    auto* mod = registry_.getModule(id);
+    auto mod = registry_.getModule(id);
     if (!mod) return;
 
     ModuleHealth h = health_.getHealth(id);
@@ -202,7 +202,7 @@ void ModuleOrchestrator::handleModuleFailure(const std::string& id, const std::s
 }
 
 void ModuleOrchestrator::updateHealth() {
-    for (auto* mod : registry_.getAllModules()) {
+    for (auto mod : registry_.getAllModules()) {
         const auto& id = mod->getMetadata().id;
         ModuleHealth h = mod->getHealth();
         h.state = registry_.getModuleState(id);

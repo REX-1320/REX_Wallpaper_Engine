@@ -1,5 +1,5 @@
 #include "RenderPipeline.hpp"
-#include <cstdio>
+#include <shared/Logger.hpp>
 #include <cstring>
 #include <d3dcompiler.h>
 
@@ -32,7 +32,7 @@ bool RenderPipeline::Initialize(ID3D12Device* device, int width, int height) {
     Microsoft::WRL::ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1,
         &sig, &err))) {
-        printf("[Pipeline] root sig serialize failed\n");
+        REX_LOG_ERROR("Pipeline", "root sig serialize failed");
         return false;
     }
     if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(),
@@ -62,12 +62,12 @@ bool RenderPipeline::Initialize(ID3D12Device* device, int width, int height) {
     Microsoft::WRL::ComPtr<ID3DBlob> vs, ps;
     if (FAILED(D3DCompile(vsSrc, strlen(vsSrc), nullptr, nullptr, nullptr,
         "main", "vs_5_0", 0, 0, &vs, &err))) {
-        printf("[Pipeline] VS compile failed\n");
+        REX_LOG_ERROR("Pipeline", "VS compile failed");
         return false;
     }
     if (FAILED(D3DCompile(psSrc, strlen(psSrc), nullptr, nullptr, nullptr,
         "main", "ps_5_0", 0, 0, &ps, &err))) {
-        printf("[Pipeline] PS compile failed\n");
+        REX_LOG_ERROR("Pipeline", "PS compile failed");
         return false;
     }
 
@@ -102,7 +102,7 @@ bool RenderPipeline::Initialize(ID3D12Device* device, int width, int height) {
 
     if (FAILED(device->CreateGraphicsPipelineState(&pso,
         IID_PPV_ARGS(&m_pipelineState)))) {
-        printf("[Pipeline] PSO creation failed\n");
+        REX_LOG_ERROR("Pipeline", "PSO creation failed");
         return false;
     }
 
@@ -129,7 +129,7 @@ bool RenderPipeline::Initialize(ID3D12Device* device, int width, int height) {
     if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE,
         &dd, D3D12_RESOURCE_STATE_DEPTH_WRITE, &dc,
         IID_PPV_ARGS(&m_depthTexture)))) {
-        printf("[Pipeline] depth buffer creation failed\n");
+        REX_LOG_ERROR("Pipeline", "depth buffer creation failed");
         return false;
     }
 
@@ -148,7 +148,7 @@ bool RenderPipeline::Initialize(ID3D12Device* device, int width, int height) {
     device->CreateDepthStencilView(m_depthTexture.Get(), &dsv,
         m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 
-    printf("[Pipeline] initialized (%dx%d)\n", width, height);
+    REX_LOG_INFO("Pipeline", "initialized ({}x{})", width, height);
     return true;
 }
 

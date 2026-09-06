@@ -1,6 +1,6 @@
 #include "SceneRenderer.hpp"
 #include "graphics/compositor/compositor.h"
-#include <cstdio>
+#include <shared/Logger.hpp>
 
 namespace rex::wallpaper {
 
@@ -12,14 +12,13 @@ bool SceneRenderer::load(const SceneInfo& scene, Compositor& compositor) {
     m_width  = static_cast<int>(compositor.GetViewportWidth());
     m_height = static_cast<int>(compositor.GetViewportHeight());
 
-    printf("[SceneRenderer] loading scene: %s (%dx%d)\n",
-           m_path.c_str(), m_width, m_height);
+    REX_LOG_INFO("SceneRenderer", "loading scene: {} ({}x{})", m_path, m_width, m_height);
 
     m_compositor = &compositor;
     if (!InitD3D12(compositor, m_width, m_height)) return false;
 
     if (!m_loader.Load(m_path, m_ecs, m_pipeline)) {
-        printf("[SceneRenderer] failed to load scene\n");
+        REX_LOG_ERROR("SceneRenderer", "failed to load scene");
         return false;
     }
 
@@ -28,7 +27,7 @@ bool SceneRenderer::load(const SceneInfo& scene, Compositor& compositor) {
         1.0f, 0, true });
 
     m_playing.store(true);
-    printf("[SceneRenderer] loaded (%zu entities)\n", m_ecs.GetEntities().size());
+    REX_LOG_INFO("SceneRenderer", "loaded ({} entities)", m_ecs.GetEntities().size());
     return true;
 }
 
@@ -162,7 +161,7 @@ bool SceneRenderer::InitD3D12(Compositor& compositor, int width, int height) {
     // Initialize pipeline (creates the depth buffer too)
     if (!m_pipeline.Initialize(m_device.Get(), width, height)) return false;
 
-    printf("[SceneRenderer] D3D12 initialized\n");
+    REX_LOG_INFO("SceneRenderer", "D3D12 initialized");
     return true;
 }
 
