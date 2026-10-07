@@ -272,13 +272,19 @@ void VideoPlaybackController::SelectBestStream(int targetWidth, int targetHeight
 }
 
 const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
-    const VideoFrame* frame = m_scheduler.Tick(targetPts);
+    // Loop-relative target (Phase 2): the decoder wraps PTS every
+    // duration while the wall marches on — an unwrapped target starves
+    // the render loop past the first loop and explodes the drop counter.
+    const double wrapped = WrapTarget(
+        targetPts, m_duration, m_looping.load(std::memory_order_relaxed));
+    // The wall target is the playback clock (Phase 2): the decode thread
+    // parks against it instead of pacing to the source rate.
+    m_lastWallTarget.store(wrapped, std::memory_order_relaxed);
+    const VideoFrame* frame = m_scheduler.Tick(wrapped);
     if (frame) {
         m_consumerFrameCount++;
         m_framesConsumed.fetch_add(1, std::memory_order_relaxed);
-        const uint64_t decoded = m_framesDecoded.load(std::memory_order_relaxed);
-        const uint64_t consumed = m_framesConsumed.load(std::memory_order_relaxed);
-        m_framesDropped.store(decoded > consumed ? decoded - consumed - 1 : 0,
+        m_framesDropped.store(m_scheduler.GetDroppedCount(),
                               std::memory_order_relaxed);
     }
     return frame;
@@ -344,7 +350,6 @@ void VideoPlaybackController::DecoderThread() {
             continue;
         }
 
-        const auto t0 = Clock::now();
         VideoFrame frame;
         bool ok = false;
         bool looping = true;
@@ -394,14 +399,15 @@ void VideoPlaybackController::DecoderThread() {
             m_lastFrame.frameIndex = frame.frameIndex;
         }
 
-        // Pace decode to the source frame rate (speed-scaled).
-        const double elapsed = ms(Clock::now() - t0).count();
-        const double interval =
-            m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
-        const double remaining = interval - elapsed;
-        if (remaining > 0.5) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(
-                static_cast<long long>(remaining)));
+        // Clock separation (Phase 2): decode flat-out so the freshest
+        // frame is always available; park only when safely ahead of the
+        // wall target (pause/stall backstop) instead of pacing to the
+        // source rate. A decode shortfall now costs frames, never time.
+        // (Speed scaling of the wall target itself lands in Phase 4.)
+        const double ahead = m_position.load(std::memory_order_relaxed)
+                           - m_lastWallTarget.load(std::memory_order_relaxed);
+        if (ahead > kMaxDecodeAheadSec) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
 }

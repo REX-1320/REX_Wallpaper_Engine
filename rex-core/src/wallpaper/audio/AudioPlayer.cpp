@@ -28,6 +28,41 @@ inline int16_t ClampToS16(float v) {
 }
 } // namespace
 
+void AudioPlayer::ResampleLinear(const int16_t* src, size_t srcFrames,
+                                 int channels, int16_t* dst,
+                                 size_t dstFrames) {
+    if (!src || !dst || channels <= 0 || dstFrames == 0 || srcFrames == 0) {
+        return;
+    }
+    if (srcFrames <= 1 || dstFrames <= 1) {
+        for (size_t i = 0; i < dstFrames; ++i) {
+            for (int c = 0; c < channels; ++c) {
+                dst[i * static_cast<size_t>(channels) + c] = src[c];
+            }
+        }
+        return;
+    }
+    const double step =
+        static_cast<double>(srcFrames - 1) / (dstFrames - 1);
+    for (size_t i = 0; i < dstFrames; ++i) {
+        const double pos = static_cast<double>(i) * step;
+        size_t i0 = static_cast<size_t>(pos);
+        if (i0 >= srcFrames - 1) i0 = srcFrames - 2;  // pos at the last frame
+        const double frac = pos - static_cast<double>(i0);
+        for (int c = 0; c < channels; ++c) {
+            const double a =
+                src[i0 * static_cast<size_t>(channels) + c];
+            const double b =
+                src[(i0 + 1) * static_cast<size_t>(channels) + c];
+            double v = a + (b - a) * frac;
+            if (v < -32768.0) v = -32768.0;
+            else if (v > 32767.0) v = 32767.0;
+            dst[i * static_cast<size_t>(channels) + c] =
+                static_cast<int16_t>(std::lround(v));
+        }
+    }
+}
+
 AudioPlayer::~AudioPlayer() {
     Close();
 }
@@ -158,6 +193,10 @@ void AudioPlayer::Seek(double seconds) {
 
 void AudioPlayer::SetVolume(float volume) {
     m_volume.store(std::clamp(volume, 0.0f, 1.0f), std::memory_order_relaxed);
+}
+
+void AudioPlayer::SetSpeed(float speed) {
+    m_speed.store(std::clamp(speed, 0.25f, 4.0f), std::memory_order_relaxed);
 }
 
 void AudioPlayer::SetMute(bool mute) {
@@ -323,6 +362,7 @@ void AudioPlayer::DoSeek(double seconds) {
     m_eof = false;
     std::lock_guard lock(m_ringMutex);
     m_readPos = m_writePos = m_bufferedFrames = 0;
+    m_speedError = 0.0;  // P1-13: tempo debt belongs to the old position
     m_position.store(seconds, std::memory_order_release);
 }
 
@@ -330,9 +370,15 @@ void AudioPlayer::DoSeek(double seconds) {
 
 int AudioPlayer::PushFrameToRing(AVFrame* frame) {
     const int frames = frame->nb_samples;
-    const int ch = std::max(frame->ch_layout.nb_channels, m_channels);
-    const int channels = ch > 0 ? ch : m_channels;
-    if (frames <= 0 || channels <= 0) {
+    // P1-11: the ring layout is ALWAYS the device channel count. Frames
+    // carrying more channels (5.1/quad on a stereo ring, mid-stream layout
+    // change) are downmixed by dropping the extras — the old
+    // max(frameCh, m_channels) stride wrote past the allocation (heap
+    // overflow) and corrupted the layout RenderStep reads with m_channels.
+    const int srcChannels = frame->ch_layout.nb_channels > 0
+                                ? frame->ch_layout.nb_channels : m_channels;
+    const int channels = m_channels > 0 ? m_channels : srcChannels;
+    if (frames <= 0 || channels <= 0 || srcChannels <= 0) {
         return 0;
     }
     {
@@ -341,8 +387,6 @@ int AudioPlayer::PushFrameToRing(AVFrame* frame) {
             return 0;  // ring full: drop-new (decode is gated, rare)
         }
         int16_t* dst = m_ring.data() + m_writePos * static_cast<size_t>(channels);
-        const int srcChannels = frame->ch_layout.nb_channels > 0
-                                    ? frame->ch_layout.nb_channels : channels;
         const bool planar = av_sample_fmt_is_planar(
             static_cast<AVSampleFormat>(frame->format));
 
@@ -427,7 +471,36 @@ void AudioPlayer::RenderStep() {
     {
         std::lock_guard lock(m_ringMutex);
         have = std::min<size_t>(m_bufferedFrames, framesAvail);
-        if (have > 0) {
+        const float speed = m_speed.load(std::memory_order_relaxed);
+        if (have > 0 && speed != 1.0f) {
+            // P1-13: tempo playback — consume have*speed content frames,
+            // resampled to have device frames. Fractional debt carries
+            // across callbacks so the long-term rate is exact.
+            m_speedError += static_cast<double>(have) * speed;
+            size_t contentFrames = static_cast<size_t>(m_speedError);
+            m_speedError -= static_cast<double>(contentFrames);
+            if (contentFrames > m_bufferedFrames) {
+                contentFrames = m_bufferedFrames;
+            }
+            if (contentFrames == 0) {
+                have = 0;  // wait for more content (zero-filled below)
+            } else {
+                const size_t ch = static_cast<size_t>(m_channels);
+                std::vector<int16_t> content(contentFrames * ch);
+                const size_t first =
+                    std::min(contentFrames, m_ringFrames - m_readPos);
+                std::memcpy(content.data(),
+                            m_ring.data() + m_readPos * ch, first * ch * 2);
+                if (contentFrames > first) {
+                    std::memcpy(content.data() + first * ch, m_ring.data(),
+                                (contentFrames - first) * ch * 2);
+                }
+                ResampleLinear(content.data(), contentFrames,
+                               m_channels, dst, have);
+                m_readPos = (m_readPos + contentFrames) % m_ringFrames;
+                m_bufferedFrames -= contentFrames;
+            }
+        } else if (have > 0) {
             const size_t samples = have * static_cast<size_t>(m_channels);
             std::memcpy(dst, m_ring.data() + m_readPos * static_cast<size_t>(m_channels),
                         samples * 2);

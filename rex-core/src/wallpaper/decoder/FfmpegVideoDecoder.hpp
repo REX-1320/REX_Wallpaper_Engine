@@ -107,8 +107,18 @@ struct DecoderDiagnostics {
 // Threading: DecodeFrame() must be called from exactly one thread (the
 // decode thread). All other members are safe to read concurrently.
 
+// P1-10: bounds the EOF→seek→EOF cycle inside one DecodeFrame call. A
+// normal loop wrap needs exactly one internal seek per call; a second
+// consecutive EOF means the seek produced no frames (0-frame file) —
+// DecodeFrame must return instead of hanging Open's synchronous prewarm.
+struct EofLoopGuard {
+    static constexpr int kMaxInternalSeeks = 1;
+    int seeks = 0;
+    bool AllowSeek() { return seeks++ < kMaxInternalSeeks; }
+};
+
 class FfmpegVideoDecoder {
- public:
+  public:
     /// P13 timing-ring capacity (also used by diagnostics percentile math).
     static constexpr size_t kTimingRingSize = 128;
 
@@ -133,10 +143,27 @@ class FfmpegVideoDecoder {
     /// outFrame describes the pool slot the frame was converted into.
     bool DecodeFrame(VideoFrame& outFrame);
 
+    /// Abort any blocked FFmpeg call (P1-9 / R14): makes a stuck
+    /// av_read_frame (or open/stream-info on a dead share) return
+    /// AVERROR_EXIT promptly. Called before joining the decode thread —
+    /// Close() would otherwise hang until the FFmpeg timeout.
+    void RequestStop();
+
+    /// FFmpeg AVIOInterruptCB entry point — do not call directly. Returns
+    /// nonzero once RequestStop()/Close() ran; installed on the format
+    /// context in Open() so every blocking demuxer call honors it.
+    static int InterruptCallback(void* opaque);
+
     void SetLoop(bool loop) { m_looping.store(loop, std::memory_order_relaxed); }
     bool GetLoop() const { return m_looping.load(std::memory_order_relaxed); }
     bool Seek(double seconds);
     bool Flush();
+
+    /// Pool texture format for a decode path (P0-3 / R3).
+    /// HW frames are YUV (VP output): P010 for HDR, NV12 for SDR.
+    /// SW frames are RGB (swscale output): 16-bit RGBA for HDR, BGRA for
+    /// SDR. Uploading RGB bytes into a YUV pool corrupts every frame.
+    static DXGI_FORMAT PoolTextureFormat(bool hardwarePath, bool hdrContent);
 
     /// Picks the video stream closest to (but not above) the target
     /// resolution; if none fits, the smallest stream. Re-opens the codec
@@ -161,7 +188,7 @@ class FfmpegVideoDecoder {
 private:
     bool SeekInternal(double seconds);
     VideoColorInfo ResolveColorInfo() const;
-    bool EnsurePool(UINT width, UINT height);
+    bool EnsurePool(UINT width, UINT height, DXGI_FORMAT format);
     bool ConvertAndSignal(VideoFrame& outFrame);
     bool ConvertSoftware(VideoFrame& outFrame);
 
@@ -176,8 +203,13 @@ private:
     int  m_videoStreamIndex        = -1;
     AVStream* m_stream             = nullptr;
     bool m_pktPending              = false;
-    bool m_hardware                = false;
-    bool m_eof                     = false;
+    // P1-8: written by the decode thread, read unlocked by diagnostics —
+    // plain bools were a data race. Relaxed: flags only, no ordering.
+    std::atomic<bool> m_hardware{false};
+    std::atomic<bool> m_eof{false};
+    // P1-9: set by RequestStop()/Close(), read by InterruptCallback on
+    // FFmpeg's IO thread. Atomic: never take a lock inside the callback.
+    std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_looping{true};
     bool m_loggedSwFallback        = false;
 
@@ -206,7 +238,9 @@ private:
     UINT m_poolW = 0;
     UINT m_poolH = 0;
     UINT m_poolNext = 0;
-    bool m_poolHdr = false;   // pool format is 16-bit float (HDR sources)
+    // Pool generation key: exact texture format (path + HDR in one).
+    // Rebuilt one-time per resolution/format, regardless of HW/SW path.
+    DXGI_FORMAT m_poolFormat = DXGI_FORMAT_UNKNOWN;
     bool m_hdrContent = false; // current stream carries PQ/HLG transfer
     UINT64 m_fenceValue = 0;
     UINT64 m_frameIndex = 0;

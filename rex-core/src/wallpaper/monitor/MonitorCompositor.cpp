@@ -107,7 +107,7 @@ void MonitorCompositor::PresentFrame(const VideoFrame& frame,
                                      ID3D12Fence* waitFence) {
     if (!m_active || !m_renderer || !frame.valid) return;
 
-    m_renderer->BeginFrame();                    // 1. prepare
+    if (!m_renderer->BeginFrame()) return;      // 1. prepare (P0-4: skip on fence timeout)
     m_renderer->DrawVideoFrame(frame, waitFence); // 2. bind shared slot + fence
     m_renderer->RenderFrame();                   // 3. sample + draw
     m_renderer->EndFrame();                      // 4. present
@@ -125,7 +125,7 @@ void MonitorCompositor::PresentStaticTexture(const std::string& path) {
     }
     // Static content has no per-frame updates: draw once; the swap chain
     // keeps presenting the last frame.
-    m_renderer->BeginFrame();
+    if (!m_renderer->BeginFrame()) return;  // P0-4: skip on fence timeout
     m_renderer->RenderFrame();
     m_renderer->EndFrame();
     m_frameCount.fetch_add(1, std::memory_order_relaxed);

@@ -42,18 +42,18 @@
 
 **Baseline implementation order (adopted 2026-10-07 — correctness first, no perf chasing until P0-P3 done):**
 
-- [ ] **P0-1 WorkerW/desktop-layer crash protection** — BUG-001 P0-A/B/C must survive layer reconstruction; add R13 stale-client detach (check every `DuplicateHandle`, revalidate, explicit detach)
-- [ ] **P0-2 HDR state/color pipeline [R16 + G3]** — determine actual OS HDR state at init, create SDR+HDR PSOs, correct swapchain; on HDR/topology change refresh state, select PSO/output, resize only when required. Never decide from monitor capability alone
-- [ ] **P0-3 SW-decoder pool corruption + per-frame rebuild [R3 + R4]** — HW = P010/NV12 GPU pool, SW SDR = BGRA pool, SW HDR = RGBA16 pool; pool creation one-time per resolution/format generation regardless of HW/SW path
-- [ ] **P0-4 D3D12 allocator fencing [R17]** — FrameContext[N] ring, reset a context only after its fence completes
-- [ ] **P1-5 Seek/stale-frame clearing [R10]** — add `FrameScheduler::Clear()`, call on explicit seek, loop wrap, recovery seek
-- [ ] **P1-6 Stop resets full A/V timeline [R8]** — Stop = decoder seek 0 + audio seek 0 + scheduler clear + position 0
-- [ ] **P1-7 Restore loop+speed+volume+mute in one path [R9]** — LOAD and recovery restore all playback properties, not just loop/speed
-- [ ] **P1-8 Seek/Close lifetime race [R15]** — single ownership mechanism for decoder lifetime
-- [ ] **P1-9 FFmpeg interrupt callback [R14]** — `AVIOInterruptCB` tied to the decoder stop flag so `Close()` cannot hang in `av_read_frame`
-- [ ] **P1-10 0-frame/EOF handling [R5]** — bounded EOF attempts plus backoff; 0-frame loop must not hang `Open`, failed seek + loop must not spin
-- [ ] **P1-11 Audio ring overflow [R6]** — clamp/downmix to the actual ring channel count
-- [ ] **P1-12 Swapchain latency flag [R7]** — `Resize` must preserve `FRAME_LATENCY_WAITABLE_OBJECT`; **P1-13 A/V drift [R20]** — `SetSpeed` reaches audio, position follows decoder PTS
+- [x] **P0-1 WorkerW/desktop-layer crash protection** — BUG-001 P0-A/B/C must survive layer reconstruction; add R13 stale-client detach (check every `DuplicateHandle`, revalidate, explicit detach) **[DONE 2026-10-07 — see everything.md]**
+- [x] **P0-2 HDR state/color pipeline [R16 + G3]** — determine actual OS HDR state at init, create SDR+HDR PSOs, correct swapchain; on HDR/topology change refresh state, select PSO/output, resize only when required. Never decide from monitor capability alone **[DONE 2026-10-07 — see everything.md]**
+- [x] **P0-3 SW-decoder pool corruption + per-frame rebuild [R3 + R4]** — HW = P010/NV12 GPU pool, SW SDR = BGRA pool, SW HDR = RGBA16 pool; pool creation one-time per resolution/format generation regardless of HW/SW path **[DONE 2026-10-07 — see everything.md]**
+- [x] **P0-4 D3D12 allocator fencing [R17]** — FrameContext[N] ring, reset a context only after its fence completes **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-5 Seek/stale-frame clearing [R10]** — add `FrameScheduler::Clear()`, call on explicit seek, loop wrap, recovery seek **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-6 Stop resets full A/V timeline [R8]** — Stop = decoder seek 0 + audio seek 0 + scheduler clear + position 0 **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-7 Restore loop+speed+volume+mute in one path [R9]** — LOAD and recovery restore all playback properties, not just loop/speed **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-8 Seek/Close lifetime race [R15]** — single ownership mechanism for decoder lifetime **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-9 FFmpeg interrupt callback [R14]** — `AVIOInterruptCB` tied to the decoder stop flag so `Close()` cannot hang in `av_read_frame` **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-10 0-frame/EOF handling [R5]** — bounded EOF attempts plus backoff; 0-frame loop must not hang `Open`, failed seek + loop must not spin **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-11 Audio ring overflow [R6]** — clamp/downmix to the actual ring channel count **[DONE 2026-10-07 — see everything.md]**
+- [x] **P1-12 Swapchain latency flag [R7]** — `Resize` must preserve `FRAME_LATENCY_WAITABLE_OBJECT`; **P1-13 A/V drift [R20]** — `SetSpeed` reaches audio, position follows decoder PTS **[DONE 2026-10-07 — see everything.md]**
 - [ ] **P2-14 Static render-once gating [R2]** — static wallpaper renders once, `frameDirty = false`, no rendering until something changes
 - [ ] **P2-15 Cadence control [R18]** — cadence = min(maxFps, decoder cadence); clamp IPC `maxFps` to sane bounds
 - [ ] **P2-16 Hot-reload/spectrum outside dirty gate [R19]** — reachable even when the render gate is inactive
@@ -63,24 +63,24 @@
 
 - [x] **R1 · CRITICAL** — hot-reload `LoadTexture()` deadlocks the render thread inside `Begin/End` — **fixed 2026-10-07**: hot-reload block moved before `BeginFrame()` + the dirty gate in `Engine.cpp` (also fixes R19 starvation for static scenes, arms dirty on success); new `FrameLockPolicy` (`graphics/renderer/FrameLockPolicy.hpp`) tracks the frame window + owner thread — `BeginFrame` arms, `EndFrame` disarms, `LoadTexture` fails loudly (`InvalidState`) on same-thread reentry instead of self-deadlocking while cross-thread callers still block normally. Verified: `FrameLockGuardTest` 3/3 (RED: C1083 on missing header), full wallpaper suite green except 2 pre-existing fixture-gap failures (`VideoScenePlayback` needs `test.mp4`, `RapidSceneSwitching` expects success for `Z:\missing` — same known test-gap family), live CLI static load + file overwrite → `Hot-reloaded static image` in log, process alive (old code would hang the render thread)
 - [x] **R2 · HIGH** — static scenes present at full rate forever — **fixed 2026-10-07**: the dirty flag is now cleared after any presented frame (`Engine.cpp` after `EndFrame`), not just in the video branch; load/hot-reload/transform paths still arm it. Verified: `StaticRenderOnceTest.StaticScenePresentsOnceThenIdles` (RED: 91→180 presents in 1.5 s idle; GREEN: frozen), suite otherwise unchanged (same 2 pre-existing fixture failures), live CLI static: 0.33 s CPU over 20 s idle, file touch → `Hot-reloaded` + one re-present, no hang
-- [ ] **R3 · CRITICAL** — software decode uploads RGB bytes into a YUV pool, corrupt frames; the promised RGBA16 pool was never implemented (`FfmpegVideoDecoder.cpp:707-709,935-949`)
-- [ ] **R4 · CRITICAL** — `EnsurePool` fast-path requires `m_processor`, null on software decode, so the pool is rebuilt every frame and the renderer 8-slot cache exhausts, freezing video (`FfmpegVideoDecoder.cpp:683-687,742-760,913`)
-- [ ] **R5 · HIGH** — 0-frame file with loop hangs `Open` forever; failed seek + loop busy-spins at 100% CPU (`FfmpegVideoDecoder.cpp:593-602`, `VideoPlaybackController.cpp:280-282`)
-- [ ] **R6 · HIGH** — audio ring overflows on multichannel sources: stride uses `max(frameCh, m_channels)` vs a ring allocated for `m_channels` (`AudioPlayer.cpp:331-352`)
-- [ ] **R7 · HIGH** — `SwapChain::Resize` strips `FRAME_LATENCY_WAITABLE_OBJECT`, ~1 fps stutter after any display-change resize (`SwapChain.cpp:126-130` vs `:46`)
-- [ ] **R8 · HIGH** — `Stop()` splits A/V + position: audio rewinds to 0 while video and the clock resume mid-stream (`VideoPlaybackController.cpp:145-152`, `AudioPlayer.cpp:143-147`)
-- [ ] **R9 · HIGH** — `LOAD`/recovery drops volume and mute, only loop+speed are re-pushed (`Engine.cpp:427-428`); per-monitor videos have no volume/mute at all
-- [ ] **R10 · HIGH** — `Seek` never clears `FrameScheduler`: a stale pre-seek frame is presented (`VideoPlaybackController.cpp:180-194`, `FrameScheduler.cpp:11-18`)
+- [x] **R3 · CRITICAL** — software decode uploads RGB bytes into a YUV pool, corrupt frames; the promised RGBA16 pool was never implemented (`FfmpegVideoDecoder.cpp:707-709,935-949`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R4 · CRITICAL** — `EnsurePool` fast-path requires `m_processor`, null on software decode, so the pool is rebuilt every frame and the renderer 8-slot cache exhausts, freezing video (`FfmpegVideoDecoder.cpp:683-687,742-760,913`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R5 · HIGH** — 0-frame file with loop hangs `Open` forever; failed seek + loop busy-spins at 100% CPU (`FfmpegVideoDecoder.cpp:593-602`, `VideoPlaybackController.cpp:280-282`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R6 · HIGH** — audio ring overflows on multichannel sources: stride uses `max(frameCh, m_channels)` vs a ring allocated for `m_channels` (`AudioPlayer.cpp:331-352`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R7 · HIGH** — `SwapChain::Resize` strips `FRAME_LATENCY_WAITABLE_OBJECT`, ~1 fps stutter after any display-change resize (`SwapChain.cpp:126-130` vs `:46`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R8 · HIGH** — `Stop()` splits A/V + position: audio rewinds to 0 while video and the clock resume mid-stream (`VideoPlaybackController.cpp:145-152`, `AudioPlayer.cpp:143-147`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R9 · HIGH** — `LOAD`/recovery drops volume and mute, only loop+speed are re-pushed (`Engine.cpp:427-428`); per-monitor videos have no volume/mute at all **[DONE 2026-10-07 — see everything.md]**
+- [x] **R10 · HIGH** — `Seek` never clears `FrameScheduler`: a stale pre-seek frame is presented (`VideoPlaybackController.cpp:180-194`, `FrameScheduler.cpp:11-18`) **[DONE 2026-10-07 — see everything.md]**
 - [ ] **R11 · MAJOR** — unhandled `std::filesystem::exists` throw on hostile paths crashes the runtime (`wallpaper_cli_main.cpp:815`); harden `Utf8ToWiden` with `MB_ERR_INVALID_CHARS`
 - [ ] **R12 · MAJOR** — zero-length frame conflated with EOF: one bad frame silently kills the session (`wallpaper_cli_main.cpp:508,707`). Answer `malformed frame`, continue
-- [ ] **R13 · MAJOR** — `DuplicateHandle` results ignored; stale client process never revalidated, no detach (`wallpaper_cli_main.cpp:1056-1076`)
-- [ ] **R14 · MAJOR** — `Close()` can hang in blocking `av_read_frame`, no interrupt callback (`FfmpegVideoDecoder.cpp:609`)
-- [ ] **R15 · MAJOR** — `Seek` vs `Close` race on `m_decoder`; unlocked raw reads in diagnostics
-- [ ] **R16 · MAJOR** — HDR output state snapshot-once: stale PSO, late `SetForceSdr`, no mid-session toggle detection (`D3D12Renderer.cpp:374,506,1169`)
-- [ ] **R17 · MAJOR** — single command allocator reset per frame with no fence gating (`D3D12Renderer.cpp:1102-1108`)
+- [x] **R13 · MAJOR** — `DuplicateHandle` results ignored; stale client process never revalidated, no detach (`wallpaper_cli_main.cpp:1056-1076`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R14 · MAJOR** — `Close()` can hang in blocking `av_read_frame`, no interrupt callback (`FfmpegVideoDecoder.cpp:609`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R15 · MAJOR** — `Seek` vs `Close` race on `m_decoder`; unlocked raw reads in diagnostics **[DONE 2026-10-07 — see everything.md]**
+- [x] **R16 · MAJOR** — HDR output state snapshot-once: stale PSO, late `SetForceSdr`, no mid-session toggle detection (`D3D12Renderer.cpp:374,506,1169`) **[DONE 2026-10-07 — see everything.md]**
+- [x] **R17 · MAJOR** — single command allocator reset per frame with no fence gating (`D3D12Renderer.cpp:1102-1108`) **[DONE 2026-10-07 — see everything.md]**
 - [ ] **R18 · MEDIUM** — `PaceLoop` ignores decoder cadence; idle loop wakes at `maxFps`; IPC `maxFps` unclamped (`Engine.cpp:1504`, `wallpaper_cli_main.cpp:748`)
 - [ ] **R19 · MEDIUM** — hot-reload + spectrum blocks starve behind the P16 gate (`Engine.cpp:1449-1474` vs `:1415-1418`)
-- [ ] **R20 · MEDIUM** — `SetSpeed` never reaches audio; engine position is wall-clock, never decoder PTS (drifts on speed/loop/recovery)
+- [x] **R20 · MEDIUM** — `SetSpeed` never reaches audio; engine position is wall-clock, never decoder PTS (drifts on speed/loop/recovery) **[DONE 2026-10-07 — see everything.md]**
 - [ ] **G1 · MISSING** — no power awareness (battery/display-off/lid): full-rate decode/upload/present forever
 - [ ] **G2 · MISSING** — no session-lock pause (Win+L keeps presenting behind the lock screen at full rate)
 - [ ] **G3 · PARTIAL** — display-topology holes: HDR toggle, secondary-only changes and DPI (hardcoded 1.0) never reconcile

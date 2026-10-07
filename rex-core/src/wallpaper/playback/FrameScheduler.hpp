@@ -16,9 +16,12 @@ namespace rex::wallpaper {
 //
 // ─── Semantics ──────────────────────────────────────────────────────────
 //
-// Latest-frame-wins: the consumer always receives the most recently pushed
-// frame; intermediate frames are counted as dropped. This is the correct
-// policy for wallpaper playback (never queue more than one frame of latency).
+// PTS-due selection (Phase 2: clock separation): the consumer asks "which
+// decoded frame is due at wall time T" and receives the newest published
+// frame with pts <= T (+ tolerance). Bypassed frames and frames overwritten
+// unseen count as dropped (GetDroppedCount); equal-PTS repeats are free.
+// A decoder shortfall therefore costs frames, never time — playback stays
+// at 1x while unique-frame rate follows decode throughput.
 //
 // Frame slots are a stable ring array and the underlying pool textures are
 // owned by the decoder for the process lifetime, so the returned pointer
@@ -37,15 +40,28 @@ namespace rex::wallpaper {
 class FrameScheduler {
 public:
     static constexpr size_t kNumSlots = 8;
+    /// Selection tolerance: a frame up to this far past the wall target
+    /// still counts as due (prevents systematic one-frame lateness on
+    /// fractional rates like 59.94).
+    static constexpr double kSelectToleranceSec = 0.008;
 
     /// Producer: publish a frame. Overwrites the oldest unpublished slot;
     /// that slot is only read by the consumer after it has already moved
     /// past it, so no torn reads are possible.
     void Push(const VideoFrame& frame);
 
-    /// Consumer: returns the latest published frame since the last call,
-    /// or nullptr if nothing new arrived. Never blocks.
+    /// Consumer: returns the newest published frame due at targetPts
+    /// (pts <= targetPts + tolerance), or nullptr when nothing is due.
+    /// Skipped and overwritten-unseen frames accumulate in the drop
+    /// counter. Never blocks.
     const VideoFrame* Tick(double targetPts);
+
+    /// Cumulative dropped frames (bypassed by selection + overwritten
+    /// unseen; equal-PTS repeats excluded). Written by the consumer in
+    /// Tick; safe to read from any thread (telemetry).
+    uint64_t GetDroppedCount() const {
+        return m_dropped.load(std::memory_order_acquire);
+    }
 
     /// Drop any unpublished frame (P1-5 / R10). Called on seek, loop wrap
     /// and recovery resume so a pre-seek frame is never presented: after
@@ -72,6 +88,8 @@ private:
     // Last consumed write. Written by the consumer in Tick AND by Clear
     // from other threads — hence atomic (was consumer-local plain uint64).
     std::atomic<uint64_t> m_lastConsumedWrite{0};
+    // Cumulative drops, consumer-written (see Tick), read by telemetry.
+    std::atomic<uint64_t> m_dropped{0};
 };
 
 } // namespace rex::wallpaper

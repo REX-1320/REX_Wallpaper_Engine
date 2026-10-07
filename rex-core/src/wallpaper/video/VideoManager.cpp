@@ -580,6 +580,24 @@ void VideoManager::SetMonitorSpeed(const std::string& monitorId, float speed) {
     }
 }
 
+void VideoManager::SetMonitorVolume(const std::string& monitorId, float volume) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        if (entry.monitorController) entry.monitorController->SetVolume(volume);
+        return;
+    }
+}
+
+void VideoManager::SetMonitorMute(const std::string& monitorId, bool mute) {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        if (entry.monitorController) entry.monitorController->SetMute(mute);
+        return;
+    }
+}
+
 double VideoManager::GetMonitorPosition(const std::string& monitorId) const {
     std::lock_guard<std::mutex> lock(m_monitorMutex);
     for (auto& entry : m_monitorEntries) {

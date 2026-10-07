@@ -63,6 +63,17 @@ public:
     void Seek(double seconds);
     void SetVolume(float volume);  // 0..1, applied on render
     void SetMute(bool mute);
+    /// Playback tempo (P1-13 / R20): the render step consumes speed x device
+    /// frames of content per callback (linear resample), so audio stays in
+    /// sync with video-paced playback. Rate resample, not pitch-corrected:
+    /// pitch follows speed (1.5x sounds sharper). Clamped to 0.25..4.
+    void SetSpeed(float speed);
+
+    /// Linear-interpolation resample of interleaved S16 (P1-13): maps
+    /// srcFrames content frames onto dstFrames device frames, per channel.
+    /// Endpoints exact; no overflow (float math + S16 clamp). Pure function.
+    static void ResampleLinear(const int16_t* src, size_t srcFrames,
+                               int channels, int16_t* dst, size_t dstFrames);
 
     int  GetSampleRate() const { return m_sampleRate; }
     int  GetChannels()   const { return m_channels; }
@@ -111,6 +122,10 @@ private:
     std::atomic<bool> m_looping{true};
     std::atomic<bool> m_muted{false};
     std::atomic<float> m_volume{1.0f};
+    std::atomic<float> m_speed{1.0f};
+    // Fractional content-frame debt for tempo resample (< 1 frame always;
+    // keeps long-term rate exact across callbacks). Under m_ringMutex.
+    double m_speedError = 0.0;
     std::atomic<bool> m_seekRequested{false};
     std::atomic<double> m_seekTime{0.0};
     std::atomic<double> m_position{0.0};

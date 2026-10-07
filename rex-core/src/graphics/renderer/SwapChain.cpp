@@ -123,15 +123,30 @@ shared::Result<void> SwapChain::Resize(
     // output); may change the buffer format.
     UpdateHdrSelection();
 
+    // P1-12: ResizeBuffers drops states not re-passed in Flags — without
+    // FRAME_LATENCY_WAITABLE_OBJECT the cached waitable goes dead and
+    // WaitForFrame() burns a 1 s timeout per frame (~1 fps stutter). The
+    // HDR path's internal resize already passes it; do the same here and
+    // re-query the waitable (ResizeBuffers may replace it).
     HRESULT hr = m_swapChain->ResizeBuffers(
         m_bufferCount,
         static_cast<UINT>(std::max(width, 1)),
         static_cast<UINT>(std::max(height, 1)),
-        m_format, 0);
+        m_format, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
 
     if (FAILED(hr)) {
         return shared::Result<void>(shared::ErrorCode::DriverError,
                                     "ResizeBuffers failed");
+    }
+
+    if (m_frameLatencyWaitable) {
+        CloseHandle(m_frameLatencyWaitable);
+        m_frameLatencyWaitable = nullptr;
+    }
+    Microsoft::WRL::ComPtr<IDXGISwapChain2> swapChain2;
+    if (SUCCEEDED(m_swapChain.As(&swapChain2))) {
+        swapChain2->SetMaximumFrameLatency(2);
+        m_frameLatencyWaitable = swapChain2->GetFrameLatencyWaitableObject();
     }
 
     m_swapChain->SetColorSpace1(m_isHdr ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020

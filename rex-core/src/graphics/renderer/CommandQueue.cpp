@@ -106,4 +106,22 @@ UINT64 CommandQueue::Signal() {
     return m_fenceValue;
 }
 
+bool CommandQueue::WaitForValue(UINT64 value, DWORD timeoutMs) {
+    if (!m_queue || !m_fence) return false;
+    if (m_fence->GetCompletedValue() >= value) return true;
+    // Dedicated event (not m_fenceEvent): WaitForGPU may use that one
+    // concurrently from another thread, and sharing an auto-reset event
+    // across two waiters loses wakeups.
+    HANDLE ev = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!ev) return false;
+    HRESULT hr = m_fence->SetEventOnCompletion(value, ev);
+    bool reached = SUCCEEDED(hr) &&
+                   WaitForSingleObject(ev, timeoutMs) == WAIT_OBJECT_0;
+    if (FAILED(hr)) {
+        REX_LOG_ERROR("CommandQueue", "SetEventOnCompletion failed: {:08x}", hr);
+    }
+    CloseHandle(ev);
+    return reached;
+}
+
 } // namespace rex::graphics

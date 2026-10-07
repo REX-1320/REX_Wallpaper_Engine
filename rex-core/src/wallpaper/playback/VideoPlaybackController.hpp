@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -132,6 +133,22 @@ public:
         return framePts < lastPts;
     }
 
+    /// Loop-relative wall target (Phase 2): a looping decoder wraps its
+    /// PTS every duration seconds while the wall clock marches on. The
+    /// scheduler compares PTS against the wall, so the target must wrap
+    /// with the content — otherwise nothing is ever due past the first
+    /// loop and the render loop starves while drops explode. Pure.
+    static double WrapTarget(double targetPts, double duration, bool looping) {
+        if (!looping || duration <= 0.0 || targetPts < 0.0) {
+            return targetPts;
+        }
+        double wrapped = std::fmod(targetPts, duration);
+        if (wrapped < 0.0) {
+            wrapped += duration;
+        }
+        return wrapped;
+    }
+
 private:
     void DecoderThread();
 
@@ -171,6 +188,12 @@ private:
     std::atomic<bool> m_looping{true};
     std::atomic<float> m_speed{1.0f};
     std::atomic<double> m_position{0.0};
+    // Last wall-clock target handed to Tick (Phase 2: the playback
+    // clock). The decode thread parks against it; render-thread written,
+    // decode-thread read — hence atomic.
+    std::atomic<double> m_lastWallTarget{0.0};
+    // Decode-ahead park threshold in seconds (Phase 2).
+    static constexpr double kMaxDecodeAheadSec = 0.5;
 
     double m_duration  = 0.0;
     double m_frameRate = 30.0;

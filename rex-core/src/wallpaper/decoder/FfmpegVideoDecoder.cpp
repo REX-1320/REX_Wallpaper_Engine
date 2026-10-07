@@ -43,6 +43,19 @@ FfmpegVideoDecoder::~FfmpegVideoDecoder() {
     Close();
 }
 
+// P1-9: polled by FFmpeg inside every blocking demuxer call on this
+// decoder's format context. Runs on FFmpeg's IO thread — reads only the
+// atomic flag, never takes a lock.
+int FfmpegVideoDecoder::InterruptCallback(void* opaque) {
+    const auto* self = static_cast<const FfmpegVideoDecoder*>(opaque);
+    if (!self) return 0;
+    return self->m_stopRequested.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+void FfmpegVideoDecoder::RequestStop() {
+    m_stopRequested.store(true, std::memory_order_release);
+}
+
 shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHardware,
                                               ID3D11DeviceContext* context11,
                                               HANDLE fenceHandle) {
@@ -104,8 +117,22 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
 
     // â”€â”€ FFmpeg: open input â”€â”€
     av_log_set_level(AV_LOG_ERROR);
-    m_fmtCtx = nullptr;
+    // P1-9: preallocate so the interrupt callback is installed BEFORE
+    // open_input — a dead share then fails fast instead of hanging a later
+    // av_read_frame until the FFmpeg timeout. (open_input frees a
+    // preallocated context on failure and nulls it.)
+    m_stopRequested.store(false, std::memory_order_release);
+    m_fmtCtx = avformat_alloc_context();
+    if (!m_fmtCtx) {
+        m_fence11.Reset();
+        m_device11.Reset();
+        return shared::Result<void>(shared::ErrorCode::OutOfMemory,
+                                    "cannot allocate format context");
+    }
+    m_fmtCtx->interrupt_callback.callback = &FfmpegVideoDecoder::InterruptCallback;
+    m_fmtCtx->interrupt_callback.opaque = this;
     if (avformat_open_input(&m_fmtCtx, std::string(path).c_str(), nullptr, nullptr) < 0) {
+        m_fmtCtx = nullptr;
         m_fence11.Reset();
         m_device11.Reset();
         return shared::Result<void>(shared::ErrorCode::FileNotFound, "cannot open input file");
@@ -251,6 +278,9 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
 }
 
 void FfmpegVideoDecoder::Close() {
+    // P1-9 first: abort any thread blocked in av_read_frame BEFORE tearing
+    // anything down (the controller joins the decode thread after this).
+    m_stopRequested.store(true, std::memory_order_release);
     m_open.store(false, std::memory_order_release);
 
     if (m_decCtx) {
@@ -294,7 +324,7 @@ void FfmpegVideoDecoder::Close() {
     m_poolW = 0;
     m_poolH = 0;
     m_poolNext = 0;
-    m_poolHdr = false;
+    m_poolFormat = DXGI_FORMAT_UNKNOWN;
     m_hdrContent = false;
     m_fenceValue = 0;
     m_frameIndex = 0;
@@ -566,6 +596,7 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
     if (!m_open.load(std::memory_order_acquire) || !m_decCtx) return false;
 
     const auto t0 = Clock::now();
+    EofLoopGuard eofGuard;
     while (true) {
         const int r = avcodec_receive_frame(m_decCtx, m_frame);
         if (r == 0) {
@@ -592,7 +623,11 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             // decoder needs more packets; fall through to read one
         } else if (r == AVERROR_EOF) {
             if (m_eof) {
-                if (m_looping.load(std::memory_order_relaxed) && SeekInternal(0.0)) {
+                // P1-10: one internal seek per call. A second consecutive
+                // EOF means the seek produced no frames (0-frame file):
+                // return instead of cycling forever.
+                if (m_looping.load(std::memory_order_relaxed) &&
+                    eofGuard.AllowSeek() && SeekInternal(0.0)) {
                     continue;
                 }
                 return false;
@@ -607,6 +642,11 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
 
         if (!m_pktPending) {
             const int pr = av_read_frame(m_fmtCtx, m_pkt);
+            if (pr == AVERROR_EXIT) {
+                // Interrupted by RequestStop()/Close() — prompt shutdown,
+                // not an error (stays silent to avoid log spam per close).
+                return false;
+            }
             if (pr == AVERROR_EOF) {
                 if (!m_eof) {
                     m_eof = true;
@@ -679,10 +719,26 @@ DecoderDiagnostics FfmpegVideoDecoder::GetDiagnostics() const {
     return d;
 }
 
-bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height) {
+// P0-3 / R3+R4: the pool is keyed by (size, exact format), not by
+// (size, hdr flag + m_processor). The old fast path required m_processor,
+// null on software decode, so SW rebuilt all 8 textures + shared handles
+// EVERY frame (exhausting the renderer's slot cache); and the format came
+// from m_hdrContent alone, so RGB bytes landed in a YUV pool.
+DXGI_FORMAT FfmpegVideoDecoder::PoolTextureFormat(bool hardwarePath,
+                                                 bool hdrContent) {
+    if (hardwarePath) {
+        // GPU path: the video processor writes YUV surfaces.
+        return hdrContent ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    }
+    // Software path: swscale writes packed RGB (BGRA SDR / RGBA64 HDR).
+    return hdrContent ? DXGI_FORMAT_R16G16B16A16_UNORM
+                      : DXGI_FORMAT_B8G8R8A8_UNORM;
+}
+
+bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
+                                    DXGI_FORMAT format) {
     if (m_poolW == width && m_poolH == height &&
-        m_poolTex.size() == kPoolSize && m_processor &&
-        m_poolHdr == m_hdrContent) {
+        m_poolTex.size() == kPoolSize && m_poolFormat == format) {
         return true;
     }
 
@@ -696,17 +752,24 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height) {
     m_poolW = width;
     m_poolH = height;
     m_poolNext = 0;
-    m_poolHdr = m_hdrContent;
+    m_poolFormat = format;
 
+    const char* fmtName = "unknown";
+    switch (format) {
+        case DXGI_FORMAT_NV12:               fmtName = "NV12 (SDR bypass VP)"; break;
+        case DXGI_FORMAT_P010:               fmtName = "P010 (GPU HDR path)"; break;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:     fmtName = "BGRA (SW SDR)"; break;
+        case DXGI_FORMAT_R16G16B16A16_UNORM: fmtName = "RGBA16 (SW HDR)"; break;
+        default: break;
+    }
     REX_LOG_INFO(kModule, "pool rebuilt: {} slots, {}x{}, {} (bounded)",
-                 kPoolSize, width, height,
-                 m_hdrContent ? "P010 (GPU HDR path)" : "NV12 (SDR bypass VP)");
+                 kPoolSize, width, height, fmtName);
 
     // SDR: NV12 pool (bypass VP, shader does YUV→RGB).
     // HDR + HW: P010 pool (GPU-resident, shader does BT.2020 PQ decode).
     // HDR + SW: RGBA16_UNORM pool (software swscale outputs RGBA64).
-    const DXGI_FORMAT poolFormat =
-        m_hdrContent ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    // SDR + SW: BGRA pool (software swscale outputs BGRA).
+    const DXGI_FORMAT poolFormat = format;
 
     for (size_t i = 0; i < m_poolTex.size(); ++i) {
         D3D11_TEXTURE2D_DESC pd = {};
@@ -810,7 +873,8 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
         s_loggedFormat = true;
     }
 
-    if (!EnsurePool(desc11.Width, desc11.Height)) {
+    if (!EnsurePool(desc11.Width, desc11.Height,
+                     PoolTextureFormat(true /* GPU path */, m_hdrContent))) {
         return false;
     }
 
@@ -911,7 +975,8 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
     }
 
     if (!EnsurePool(static_cast<UINT>(srcFrame->width),
-                    static_cast<UINT>(srcFrame->height))) {
+                     static_cast<UINT>(srcFrame->height),
+                     PoolTextureFormat(false /* SW path */, m_hdrContent))) {
         if (dlFrame) av_frame_free(&dlFrame);
         return false;
     }

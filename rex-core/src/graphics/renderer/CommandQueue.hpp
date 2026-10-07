@@ -45,6 +45,17 @@ public:
     /// Signal the fence, returning the new fence value.
     UINT64 Signal();
 
+    /// Last fence value the GPU completed (no wait).
+    UINT64 GetCompletedValue() const {
+        return m_fence ? m_fence->GetCompletedValue() : 0;
+    }
+
+    /// Block until the fence reaches `value` (or `timeoutMs` elapses).
+    /// Returns true when reached. Never resets command memory itself —
+    /// the caller decides what a timeout means (P0-4: escalate to
+    /// device-loss recovery, never Reset() in-flight memory).
+    bool WaitForValue(UINT64 value, DWORD timeoutMs);
+
     /// Get the underlying command queue.
     ID3D12CommandQueue* Get() const { return m_queue.Get(); }
 

@@ -186,6 +186,10 @@ public:
     /// Set loop/speed for a per-monitor video.
     void SetMonitorLoop(const std::string& monitorId, bool loop);
     void SetMonitorSpeed(const std::string& monitorId, float speed);
+    // P1-7: per-monitor audio knobs (previously loop/speed only; layered
+    // videos had no volume/mute control at all).
+    void SetMonitorVolume(const std::string& monitorId, float volume);
+    void SetMonitorMute(const std::string& monitorId, bool mute);
     /// Get position/duration of a per-monitor video.
     double GetMonitorPosition(const std::string& monitorId) const;
     double GetMonitorDuration(const std::string& monitorId) const;
