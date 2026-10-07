@@ -1,4 +1,5 @@
 #include "WorkerWManager.hpp"
+#include "LayerRepairPolicy.hpp"
 #include <shared/Logger.hpp>
 #include <string>
 #include <vector>
@@ -81,6 +82,38 @@ WorkerWManager::~WorkerWManager() {
     Release();
 }
 
+// ─── Window-thread marshalling (BUG-001 / P0-C) ─────────────────────────────
+
+bool WorkerWManager::EnsureWindowThread() {
+    if (m_windowThread && m_windowThread->IsRunning()) return true;
+    if (!m_windowThread) {
+        m_windowThread = std::make_unique<DesktopWindowThread>();
+    }
+    if (m_windowThread->Start()) {
+        REX_LOG_INFO("WorkerW", "Desktop window thread started (TID {})",
+                     m_windowThread->GetThreadId());
+        return true;
+    }
+    REX_LOG_ERROR("WorkerW", "Failed to start desktop window thread — "
+                             "window ops will run on the calling thread");
+    m_windowThread.reset();
+    return false;
+}
+
+bool WorkerWManager::RunOnWindowThread(std::function<bool()> op, DWORD timeoutMs) {
+    if (!m_windowThread || !m_windowThread->IsRunning()) {
+        REX_LOG_WARN("WorkerW",
+                     "Window thread unavailable; running window op inline");
+        return op();
+    }
+    if (m_windowThread->Send(std::move(op), timeoutMs)) return true;
+    // Timeout: the task may still be queued and will run later, so the caller
+    // must treat this as a failure and re-verify rather than assume state.
+    REX_LOG_ERROR("WorkerW", "Window thread task did not complete within {} ms",
+                  timeoutMs);
+    return false;
+}
+
 shared::Result<void> WorkerWManager::Acquire() {
     std::lock_guard<std::mutex> opLock(m_opMutex);
     if (m_acquired) {
@@ -90,8 +123,18 @@ shared::Result<void> WorkerWManager::Acquire() {
 
     REX_LOG_INFO("WorkerW", "Acquiring WorkerW...");
 
+    EnsureWindowThread();
+
     m_syntheticWorkerW = false;
-    m_workerW = FindBlankWorkerW();
+    // Discovery can cost seconds (WM_SPAWNWORKERW with 1 s timeouts) — give
+    // the window thread room so a slow-but-successful discovery is not
+    // misreported as a failure.
+    if (!RunOnWindowThread([this] { m_workerW = FindBlankWorkerW(true); return true; },
+                           10000)) {
+        m_workerW = nullptr;
+        return shared::Result<void>(shared::ErrorCode::NotFound,
+                                    "WorkerW discovery did not complete");
+    }
     if (!m_workerW) {
         return shared::Result<void>(shared::ErrorCode::NotFound,
                                     "Failed to find wallpaper WorkerW");
@@ -106,22 +149,38 @@ shared::Result<void> WorkerWManager::Acquire() {
     REX_LOG_INFO("WorkerW", "Virtual desktop: {}x{} offset ({}, {})",
                  m_width, m_height, m_virtualLeft, m_virtualTop);
 
-    m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
-    if (!m_renderWindow) {
+    // Create + reparent in one window-thread task so the render window is
+    // never parented by a different thread than the one that created it.
+    const bool created = RunOnWindowThread([this] {
+        m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
+        if (!m_renderWindow) return false;
+        ReparentToWorkerW(m_renderWindow, m_workerW);
+        return true;
+    });
+    if (!created || !m_renderWindow) {
+        RunOnWindowThread([this] {
+            if (m_renderWindow) DestroyWindow(m_renderWindow);
+            m_renderWindow = nullptr;
+            return true;
+        });
         m_workerW = nullptr;
         m_state.store(DesktopHostState::Suspect, std::memory_order_release);
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Failed to create render window");
     }
 
-    ReparentToWorkerW(m_renderWindow, m_workerW);
-
-    if (!VerifyWallpaperLayer()) {
+    if (!VerifyWithRetry(5, 300)) {
         // Tear down what we just built: leaving a render window behind on
         // a failed acquire leaks an HWND per attempt and can leave a
         // stray visible layer over the desktop.
-        DestroyWindow(m_renderWindow);
-        m_renderWindow = nullptr;
+        RunOnWindowThread([this] {
+            if (m_renderWindow) {
+                DestroyWindow(m_renderWindow);
+                m_renderWindow = nullptr;
+            }
+            return true;
+        });
+        DestroySyntheticWorkerW();
         m_workerW = nullptr;
         m_state.store(DesktopHostState::Suspect, std::memory_order_release);
         return shared::Result<void>(shared::ErrorCode::UnknownError,
@@ -136,25 +195,126 @@ shared::Result<void> WorkerWManager::Acquire() {
 
 void WorkerWManager::Release() {
     std::lock_guard<std::mutex> opLock(m_opMutex);
-    if (!m_acquired) return;
+    if (!m_acquired) {
+        // Nothing acquired, but a previous attempt may still own windows.
+        if (m_renderWindow || m_syntheticWorkerW) {
+            RunOnWindowThread([this] {
+                if (m_renderWindow) {
+                    DestroyWindow(m_renderWindow);
+                    m_renderWindow = nullptr;
+                }
+                return true;
+            });
+            DestroySyntheticWorkerW();
+            m_workerW = nullptr;
+        }
+        StopWindowThread();
+        return;
+    }
 
     REX_LOG_INFO("WorkerW", "Releasing WorkerW...");
 
-    if (m_renderWindow) {
-        DestroyWindow(m_renderWindow);
-        m_renderWindow = nullptr;
-    }
+    RunOnWindowThread([this] {
+        if (m_renderWindow) {
+            DestroyWindow(m_renderWindow);
+            m_renderWindow = nullptr;
+        }
+        return true;
+    });
 
     if (m_syntheticWorkerW && m_workerW) {
         REX_LOG_INFO("WorkerW", "Destroying synthetic WorkerW: {}",
                      fmt::ptr(m_workerW));
-        DestroyWindow(m_workerW);
-        m_syntheticWorkerW = false;
+        DestroySyntheticWorkerW();
     }
 
     m_workerW = nullptr;
     m_acquired = false;
     REX_LOG_INFO("WorkerW", "WorkerW released");
+
+    // The window thread is torn down only on a full release — reacquire and
+    // re-anchor keep using it, so Explorer always finds a thread that
+    // dispatches messages for our windows.
+    StopWindowThread();
+}
+
+// ─── Non-destructive repair (BUG-001) ──────────────────────────────────────
+//
+// A layer that Explorer merely pushed above the desktop icons is still alive
+// and still the right window — it only needs to move back down the z-order.
+// The previous behaviour (destroy + recreate + WM_SPAWNWORKERW storm + engine
+// reload) is what produced the visible jump above the icons and the ~1 s of
+// frozen desktop input.
+
+bool WorkerWManager::TryReanchorLayer() {
+    if (!m_renderWindow || !IsWindow(m_renderWindow) ||
+        !m_workerW || !IsWindow(m_workerW)) {
+        return false;
+    }
+
+    // Anchor directly below the icon layer when we can identify it, so the
+    // wallpaper ends up behind the icons instead of merely at the bottom.
+    HWND anchor = HWND_BOTTOM;
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    if (progman) {
+        HWND defView = FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr);
+        if (defView) {
+            anchor = defView;
+        } else {
+            for (HWND child = GetWindow(progman, GW_CHILD); child;
+                 child = GetWindow(child, GW_HWNDNEXT)) {
+                wchar_t cls[32] = {};
+                GetClassNameW(child, cls, 32);
+                if (lstrcmpW(cls, L"WorkerW") == 0 &&
+                    FindWindowExW(child, nullptr, L"SHELLDLL_DefView", nullptr)) {
+                    anchor = child;
+                    break;
+                }
+            }
+        }
+    }
+
+    REX_LOG_INFO("WorkerW", "Re-anchoring wallpaper layer {:p} below anchor {:p}",
+                 fmt::ptr(m_workerW), fmt::ptr(anchor));
+    // Marshalled: SetWindowPos across processes must run on the thread that
+    // owns our windows.
+    const bool moved = RunOnWindowThread([this, anchor] {
+        SetWindowPos(m_workerW, anchor, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        SetWindowPos(m_renderWindow, HWND_BOTTOM, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        return true;
+    });
+    if (!moved) return false;
+
+    if (!VerifyWallpaperLayer()) {
+        REX_LOG_WARN("WorkerW", "Re-anchor did not verify; a rebuild is required");
+        return false;
+    }
+    return true;
+}
+
+void WorkerWManager::DestroySyntheticWorkerW() {
+    if (!m_syntheticWorkerW) return;
+    // Marshalled: the synthetic layer is owned by the window thread. A call
+    // from inside a window-thread task runs inline (DesktopWindowThread::Send
+    // detects that), so this never self-deadlocks.
+    RunOnWindowThread([this] {
+        if (m_workerW && IsWindow(m_workerW)) {
+            REX_LOG_INFO("WorkerW", "Destroying synthetic WorkerW: {}",
+                         fmt::ptr(m_workerW));
+            DestroyWindow(m_workerW);
+        }
+        m_syntheticWorkerW = false;
+        m_workerW = nullptr;
+        return true;
+    });
+}
+
+void WorkerWManager::StopWindowThread() {
+    if (!m_windowThread) return;
+    m_windowThread->Stop();
+    m_windowThread.reset();
 }
 
 void WorkerWManager::StartMonitor(WorkerWRecoveryCallback onRecovery) {
@@ -226,6 +386,21 @@ bool WorkerWManager::VerifyWallpaperLayer() {
             "Verify failed: render window parent {:p} != wallpaper WorkerW {:p}",
             fmt::ptr(actualParent), fmt::ptr(m_workerW));
         return false;
+    }
+
+    // Our own synthetic layer must never be able to eat desktop input. It is
+    // created transparent/no-activate; if a future edit drops those styles
+    // the symptom is a dead desktop whenever the shell reorders us above the
+    // icons, so treat it as a hard invariant.
+    if (m_syntheticWorkerW) {
+        const LONG_PTR synthEx = GetWindowLongPtrW(m_workerW, GWL_EXSTYLE);
+        if ((synthEx & WS_EX_TRANSPARENT) == 0 || (synthEx & WS_EX_NOACTIVATE) == 0) {
+            REX_LOG_ERROR("WorkerW",
+                "Verify failed: synthetic WorkerW {:p} is not input-transparent "
+                "(exstyle=0x{:X}) — it would swallow desktop clicks while above the icons",
+                fmt::ptr(m_workerW), static_cast<unsigned long long>(synthEx));
+            return false;
+        }
     }
 
     HWND defView = FindWindowExW(m_workerW, nullptr, L"SHELLDLL_DefView", nullptr);
@@ -309,8 +484,14 @@ bool WorkerWManager::VerifyWallpaperLayer() {
                 reinterpret_cast<LPARAM>(&defView));
             if (defView) {
                 iconParent = GetParent(defView);
-                if (iconParent && iconParent != m_workerW) {
-                    iconLayer = iconParent;
+                HWND resolved = iconParent;
+                if (resolved) {
+                    for (HWND w = m_workerW; w; w = GetParent(w)) {
+                        if (w == resolved) { resolved = defView; break; }
+                    }
+                }
+                if (resolved && resolved != m_workerW) {
+                    iconLayer = resolved;
                     wchar_t cls[32] = {};
                     GetClassNameW(iconLayer, cls, 32);
                     REX_LOG_DEBUG("WorkerW",
@@ -393,7 +574,16 @@ bool WorkerWManager::VerifyWallpaperLayer() {
 
 // ─── Reacquire (shared by Explorer-restart and layer-invalid paths) ────────
 
-bool WorkerWManager::ReacquireWorkerW() {
+bool WorkerWManager::VerifyWithRetry(int attempts, int delayMs) {
+    if (attempts < 1) attempts = 1;
+    for (int i = 0; i < attempts; ++i) {
+        if (i > 0 && delayMs > 0) Sleep(static_cast<DWORD>(delayMs));
+        if (VerifyWallpaperLayer()) return true;
+    }
+    return false;
+}
+
+bool WorkerWManager::ReacquireWorkerW(bool requestWorkerWSpawn) {
     // The recovery callback (engine reload) may call back into
     // Acquire/Release, so it must run WITHOUT m_opMutex held. Everything
     // below up to the unlock scope runs under the lock; the callback runs
@@ -404,15 +594,34 @@ bool WorkerWManager::ReacquireWorkerW() {
         std::lock_guard<std::mutex> opLock(m_opMutex);
         m_state.store(DesktopHostState::Repairing, std::memory_order_release);
         REX_LOG_INFO("WorkerW", "Repairing wallpaper layer (reacquire)...");
-        if (m_renderWindow) {
-            DestroyWindow(m_renderWindow);
-            m_renderWindow = nullptr;
+        EnsureWindowThread();
+
+        // Destroy on the owning thread (the monitor thread does not pump).
+        RunOnWindowThread([this] {
+            if (m_renderWindow) {
+                DestroyWindow(m_renderWindow);
+                m_renderWindow = nullptr;
+            }
+            return true;
+        });
+        // P0-1: a previous synthetic layer is OUR window — destroy it before
+        // discovery, and reset the flag so it follows the new discovery
+        // (FindBlankWorkerW sets it when it creates one). A stale `true`
+        // across a synthetic -> real transition makes VerifyWallpaperLayer
+        // demand TRANSPARENT|NOACTIVATE on Explorer's own WorkerW, failing
+        // every repair forever.
+        if (PlanSyntheticTransition(m_syntheticWorkerW, false).destroyOld) {
+            DestroySyntheticWorkerW();
+        } else {
+            m_workerW = nullptr;
         }
-        m_workerW = nullptr;
         m_acquired = false;
 
-        HWND workerW = FindBlankWorkerW();
-        if (!workerW) {
+        HWND workerW = nullptr;
+        if (!RunOnWindowThread([this, &workerW, requestWorkerWSpawn] {
+                workerW = FindBlankWorkerW(requestWorkerWSpawn);
+                return true;
+            }, 10000) || !workerW) {
             m_state.store(DesktopHostState::Suspect, std::memory_order_release);
             REX_LOG_ERROR("WorkerW", "Reacquire failed: no wallpaper WorkerW");
             return false;
@@ -424,22 +633,34 @@ bool WorkerWManager::ReacquireWorkerW() {
         m_virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
         m_virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
-        m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
-        if (!m_renderWindow) {
+        const bool created = RunOnWindowThread([this] {
+            m_renderWindow = CreateRenderWindow(m_workerW, m_width, m_height);
+            if (!m_renderWindow) return false;
+            ReparentToWorkerW(m_renderWindow, m_workerW);
+            return true;
+        });
+        if (!created || !m_renderWindow) {
             m_workerW = nullptr;
             m_state.store(DesktopHostState::Suspect, std::memory_order_release);
             REX_LOG_ERROR("WorkerW", "Reacquire failed: render window creation");
             return false;
         }
 
-        ReparentToWorkerW(m_renderWindow, m_workerW);
-
         // P10: verify BEFORE declaring success — the monitor loop treats a
         // true return as healthy, so an unverified repair could leave the
-        // render window above the icons for a full check interval.
-        if (!VerifyWallpaperLayer()) {
-            DestroyWindow(m_renderWindow);
-            m_renderWindow = nullptr;
+        // render window above the icons for a full check interval. The
+        // icon topology is transiently wrong right after an Explorer restart
+        // (DefView is briefly a direct Progman child before it is re-nested),
+        // so allow a few settled attempts before declaring the layer unusable.
+        if (!VerifyWithRetry(5, 300)) {
+            RunOnWindowThread([this] {
+                if (m_renderWindow) {
+                    DestroyWindow(m_renderWindow);
+                    m_renderWindow = nullptr;
+                }
+                return true;
+            });
+            DestroySyntheticWorkerW();
             m_workerW = nullptr;
             m_acquired = false;
             m_state.store(DesktopHostState::Suspect, std::memory_order_release);
@@ -515,23 +736,56 @@ void WorkerWManager::MonitorExplorer() {
         // ── Periodic invariant check (Explorer alive) ────────────────────
         // Explorer can recreate the desktop window structure while the
         // process stays alive (display mode change, shell refresh, other
-        // wallpaper apps, WE applying its own wallpaper, ...). If the
-        // render window is no longer parented into the wallpaper WorkerW,
-        // it can end up above the icons — reacquire before that shows.
+        // wallpaper apps, WE applying its own wallpaper, ...). A layer that
+        // ended up above the icons must be repaired — but a mispositioned
+        // layer only needs to move, not to be destroyed and rebuilt.
+        // A previously FAILED repair leaves m_acquired false; that state must
+        // also retry, otherwise one transient failure costs the wallpaper
+        // permanently (the engine keeps decoding into a destroyed window and
+        // the desktop silently reverts to Explorer's own wallpaper).
+        bool needsRepair = true;
+        bool requestSpawn = true;
         if (m_acquired) {
-            bool ok = m_renderWindow && IsWindow(m_renderWindow) &&
-                      m_workerW && IsWindow(m_workerW) &&
-                      VerifyWallpaperLayer();
+            const bool renderAlive = m_renderWindow && IsWindow(m_renderWindow);
+            const bool workerAlive  = m_workerW && IsWindow(m_workerW);
+            const bool layerValid   = renderAlive && workerAlive &&
+                                      VerifyWallpaperLayer();
+            // WM_SPAWNWORKERW only when a window is actually gone.
+            requestSpawn = NeedsWorkerWSpawn(renderAlive && workerAlive);
 
-            if (!ok) {
-                m_state.store(DesktopHostState::Suspect, std::memory_order_release);
-                REX_LOG_WARN("WorkerW",
-                    "Wallpaper layer invalid (Explorer refreshed windows); "
-                    "reacquiring...");
-                if (!ReacquireWorkerW()) {
-                    REX_LOG_ERROR("WorkerW",
-                        "Reacquire after layer invalidation failed");
+            const LayerRepair repair =
+                ChooseLayerRepair(renderAlive, workerAlive, layerValid, false);
+            if (repair == LayerRepair::Reanchor) {
+                if (TryReanchorLayer()) {
+                    // Cheap path taken: no destroy, no recreate, no engine
+                    // reload — the desktop never sees the layer disappear.
+                    REX_LOG_INFO("WorkerW",
+                                 "Wallpaper layer re-anchored below the icons");
+                    m_state.store(DesktopHostState::Verified,
+                                  std::memory_order_release);
+                    continue;
                 }
+                REX_LOG_WARN("WorkerW",
+                             "Layer invalid and re-anchor failed; reacquiring...");
+                needsRepair = true;
+            } else {
+                needsRepair = (repair != LayerRepair::None);
+            }
+        }
+
+        if (needsRepair) {
+            m_state.store(DesktopHostState::Suspect, std::memory_order_release);
+            if (m_acquired) {
+                REX_LOG_WARN("WorkerW",
+                             "Wallpaper layer invalid (Explorer refreshed windows); "
+                             "reacquiring...");
+            } else {
+                REX_LOG_WARN("WorkerW",
+                             "Wallpaper layer not acquired; retrying reacquire...");
+            }
+            if (!ReacquireWorkerW(requestSpawn)) {
+                REX_LOG_ERROR("WorkerW",
+                             "Reacquire failed; will retry on the next check");
             }
         }
     }
@@ -550,18 +804,23 @@ void WorkerWManager::MonitorExplorer() {
 //   6. verify selection properties (visible, parent, size)
 //   7. resize it to the virtual desktop bounds
 
-HWND WorkerWManager::FindBlankWorkerW() {
+HWND WorkerWManager::FindBlankWorkerW(bool requestWorkerWSpawn) {
     HWND progman = FindWindowW(L"Progman", nullptr);
     if (!progman) {
         REX_LOG_ERROR("WorkerW", "Progman not found — desktop layer unavailable");
         return nullptr;
     }
 
-    // Force Explorer to spawn the wallpaper WorkerW.
-    for (int i = 0; i < 4; i++) {
-        SendMessageTimeoutW(progman, WM_SPAWNWORKERW, 0, 0,
-                            SMTO_NORMAL, 1000, nullptr);
-        Sleep(100);
+    // Force Explorer to spawn the wallpaper WorkerW. Each send runs on
+    // Explorer's UI thread with a 1 s timeout, so this is only worth paying
+    // when the shell may not have a WorkerW yet (first discovery / Explorer
+    // restart) — never on a plain layer-invalid repair.
+    if (requestWorkerWSpawn) {
+        for (int i = 0; i < 4; i++) {
+            SendMessageTimeoutW(progman, WM_SPAWNWORKERW, 0, 0,
+                                SMTO_NORMAL, 1000, nullptr);
+            Sleep(100);
+        }
     }
 
     int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -720,7 +979,14 @@ HWND WorkerWManager::FindBlankWorkerW() {
         RegisterClassW(&wc);
 
         target = CreateWindowExW(
-            0, L"REXSyntheticWorkerW", L"",
+            // Input-transparent even in the failure case: if the shell ever
+            // leaves this layer above SHELLDLL_DefView, clicks must still
+            // reach the desktop icons instead of dying on our window. The
+            // render window inside is transparent too, but hit testing falls
+            // through to THIS window next — without these styles it swallowed
+            // every desktop click.
+            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            L"REXSyntheticWorkerW", L"",
             WS_CHILD | WS_VISIBLE,
             0, 0, screenW, screenH,
             progman, nullptr,

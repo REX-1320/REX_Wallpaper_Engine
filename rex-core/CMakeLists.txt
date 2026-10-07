@@ -42,6 +42,7 @@ endif()
 
 set(PLATFORM_WINDOWS_SOURCES
     src/platform/windows/WorkerWManager.cpp
+    src/platform/windows/DesktopWindowThread.cpp
     src/platform/windows/Windows.cpp
     src/platform/windows/WorkerWHost.cpp
     src/platform/windows/ProgmanHost.cpp
@@ -253,6 +254,7 @@ target_link_libraries(rex-core
         runtimeobject
         dwmapi
         winmm
+        shcore
         mmdevapi
         ole32
         uuid
@@ -368,6 +370,8 @@ if(BUILD_TESTING)
         tests/wallpaper/test_json_parser.cpp
         tests/wallpaper/test_runtime_settings.cpp
         tests/wallpaper/test_resource_state_tracker.cpp
+        tests/wallpaper/test_client_surface.cpp
+        tests/wallpaper/test_display_topology.cpp
         ${PLATFORM_WINDOWS_SOURCES}
         ${WALLPAPER_SOURCES}
         ${GRAPHICS_SOURCES}
@@ -396,6 +400,7 @@ if(BUILD_TESTING)
         runtimeobject
         dwmapi
         winmm
+        shcore
         ${FFMPEG_LIBRARIES}
         GTest::gtest
         GTest::gtest_main
@@ -675,6 +680,7 @@ target_link_libraries(rex-wallpaper-runtime PRIVATE
     runtimeobject
     dwmapi
     winmm
+        shcore
     ${FFMPEG_LIBRARIES}
 )
 

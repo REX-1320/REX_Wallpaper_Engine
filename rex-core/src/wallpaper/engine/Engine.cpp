@@ -1,4 +1,6 @@
 #include "Engine.hpp"
+#include "wallpaper/engine/RecoveryBackoff.hpp"
+#include "wallpaper/engine/DisplayTopology.hpp"
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "platform/windows/MonitorEdid.hpp"
 #include <shared/PreciseSleep.hpp>
@@ -9,6 +11,7 @@
 #include <psapi.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
+#include <ShellScalingApi.h>
 
 namespace rex::wallpaper {
 
@@ -107,13 +110,16 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
 
     // Create Renderer
     m_renderer = std::make_unique<D3D12Renderer>();
+    // P0-2: SetForceSdr BEFORE Initialize — the swapchain locks its
+    // SDR/HDR format at creation from this flag. Setting it after (as
+    // before) left an R16F/PQ swapchain behind a forced-SDR shader.
+    m_renderer->SetForceSdr(m_config.forceSdr);
     auto result = m_renderer->Initialize(renderWindow, width, height);
     if (result.IsError()) {
         REX_LOG_ERROR("Engine", "Failed to initialize renderer: {}", result.Error().message);
         host->Release();
         return result;
     }
-    m_renderer->SetForceSdr(m_config.forceSdr);
 
     // Video backend (FFmpeg D3D11VA -> D3D12 shared textures). Non-fatal:
     // video scenes simply won't play if this fails.
@@ -146,6 +152,7 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
     // Cache monitor state for hot-plug detection
     auto monitors = EnumerateMonitors();
     m_lastMonitorCount = static_cast<int>(monitors.size());
+    m_lastMonitors = monitors;
     for (const auto& m : monitors) {
         if (m.isPrimary) {
             m_lastPrimaryWidth  = m.width;
@@ -230,6 +237,14 @@ shared::Result<void> Engine::Shutdown() {
 shared::Result<void> Engine::ReinitializeRenderer() {
     REX_LOG_INFO("Engine", "Reinitializing renderer...");
 
+    // The renderer and the video backend are destroyed and rebuilt here on
+    // the render thread. m_mutex is held across the swap so no command or
+    // telemetry thread can be inside them (GetTelemetry, GetDuration,
+    // GetFrameSurface, LoadScene, ...) while they are being replaced.
+    // It must NOT be held across the caller: HandleDeviceLoss reloads the
+    // scene afterwards and LoadScene/Play take m_mutex themselves.
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     // Destroy old renderer (and the video backend that borrowed its device)
     if (m_videoManager) {
         m_videoManager->ShutdownMonitorCompositors();
@@ -256,13 +271,15 @@ shared::Result<void> Engine::ReinitializeRenderer() {
     int height = m_desktopHost->GetHeight();
 
     m_renderer = std::make_unique<D3D12Renderer>();
+    // P0-2: same ordering as Initialize — force-SDR must be visible to the
+    // swapchain before it is created, not after.
+    m_renderer->SetForceSdr(m_config.forceSdr);
     auto result = m_renderer->Initialize(renderWindow, width, height);
     if (result.IsError()) {
         REX_LOG_ERROR("Engine", "Failed to reinitialize renderer: {}",
                       result.Error().message);
         return result;
     }
-    m_renderer->SetForceSdr(m_config.forceSdr);
 
     // Recreate the video backend on the new device.
     m_videoManager = std::make_unique<VideoManager>();
@@ -297,7 +314,13 @@ shared::Result<void> Engine::HandleDeviceLoss() {
 
     // 1. Save playback state (before any teardown invalidates it).
     const bool wasPlaying = m_playing.load();
-    const SceneInfo savedScene = m_currentScene;
+    // m_currentScene carries std::strings that the command thread assigns
+    // under m_mutex — copying it raw here raced a concurrent LoadScene.
+    SceneInfo savedScene;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        savedScene = m_currentScene;
+    }
     double savedPosition = 0.0;
     if (m_videoManager && m_videoManager->IsOpen()) {
         savedPosition = m_videoManager->GetPosition();
@@ -357,6 +380,7 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
     m_scenesLoaded.fetch_add(1, std::memory_order_relaxed);
     m_currentScene = scene;
     m_currentPosition = 0.0;
+    m_positionBase.store(0.0, std::memory_order_relaxed);
 
     // Activate the renderer adapter for this scene type. Every later
     // SetProperty call is gated by what the adapter supports, so
@@ -423,7 +447,7 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
     } else if (scene.type == "audio") {
         // Audio visualisation: capture loopback audio for spectrum.
         if (!m_audioCapture) {
-            m_audioCapture = std::make_unique<AudioCapture>();
+            m_audioCapture = std::make_shared<AudioCapture>();
         }
         if (!m_audioCapture->IsRunning()) {
             m_audioCapture->Start();
@@ -484,6 +508,7 @@ shared::Result<void> Engine::UnloadScene() {
     m_playing = false;
     m_currentScene = SceneInfo{};
     m_currentPosition = 0.0;
+    m_positionBase.store(0.0, std::memory_order_relaxed);
 
     SetState(EngineState::Initialized);
     return shared::Result<void>();
@@ -526,7 +551,13 @@ shared::Result<void> Engine::Pause() {
 
     m_playing = false;
     SetState(EngineState::Paused);
-    m_stopwatch.Stop();
+    // Fold the elapsed time into the base before stopping: Start() re-stamps
+    // from zero, so without this every pause/resume rewound the reported
+    // position while the decoder kept playing from its own PTS.
+    m_positionBase.store(m_positionBase.load(std::memory_order_relaxed) +
+                         m_stopwatch.ElapsedSeconds(),
+                         std::memory_order_relaxed);
+    m_stopwatch.Reset();
 
     return shared::Result<void>();
 }
@@ -542,6 +573,7 @@ shared::Result<void> Engine::Stop() {
 
     m_playing = false;
     m_currentPosition = 0.0;
+    m_positionBase.store(0.0, std::memory_order_relaxed);
     SetState(EngineState::Stopped);
     m_stopwatch.Reset();
 
@@ -551,12 +583,17 @@ shared::Result<void> Engine::Stop() {
 double Engine::GetPosition() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_playing) {
-        return m_stopwatch.ElapsedSeconds();
+        return m_positionBase.load(std::memory_order_relaxed) +
+               m_stopwatch.ElapsedSeconds();
     }
     return m_currentPosition;
 }
 
 double Engine::GetDuration() const {
+    // m_videoManager is destroyed and rebuilt by the render thread during
+    // recovery; every reader must hold m_mutex or it can dereference a
+    // freed object (same rule as GetFrameSurface / GetFrameSlotHandle).
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_videoManager && m_videoManager->IsOpen()) {
         return m_videoManager->GetDuration();
     }
@@ -624,8 +661,14 @@ std::vector<MonitorInfo> Engine::EnumerateMonitors() const {
             info.id   = nameBuf;
             info.name = info.id;
 
-            // DPI scale — use default 1.0; can be enhanced with GetDpiForMonitor
+            // DPI scale — real per-monitor effective DPI (P0-2 / G3).
+            // Falls back to 1.0 when the query fails (Stale Shcore, remote
+            // session); coordinates stay in EnumDisplayMonitors space.
             UINT dpiX = 96, dpiY = 96;
+            if (FAILED(GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))
+                || dpiX == 0) {
+                dpiX = 96;
+            }
             info.dpiScale = static_cast<float>(dpiX) / 96.0f;
 
             // Stable identity across disconnects (EDID descriptor hash).
@@ -865,6 +908,9 @@ uint64_t Engine::GetFrameSlotHandle(uint32_t slot) const {
 }
 
 void Engine::GetTelemetry(EngineTelemetry& out) const {
+    // Locked: the 5 s telemetry sampler runs on its own thread while the
+    // render thread may be tearing these objects down in ReinitializeRenderer.
+    std::lock_guard<std::mutex> lock(m_mutex);
     out = EngineTelemetry{};
 
     if (m_videoManager) {
@@ -1030,7 +1076,8 @@ void Engine::Update(double deltaTime) {
         // GetPosition() here would try to acquire m_mutex from the render
         // thread, creating a deadlock with Shutdown() holding m_mutex and
         // waiting for the render thread to exit.
-        m_currentPosition = m_stopwatch.ElapsedSeconds();
+        m_currentPosition = m_positionBase.load(std::memory_order_relaxed) +
+                            m_stopwatch.ElapsedSeconds();
 
         if (m_frameCount % 60 == 0) {
             REX_LOG_DEBUG("Engine", "Frame {}: {:.2f} s, {:.2f} ms",
@@ -1052,9 +1099,15 @@ void Engine::CheckDisplayChanges() {
         }
     }
 
-    bool changed = (count != m_lastMonitorCount)
-                || (primaryW != m_lastPrimaryWidth)
-                || (primaryH != m_lastPrimaryHeight);
+    bool changed = MonitorTopologyChanged(m_lastMonitors, monitors);
+
+    // P0-2: re-evaluate HDR on EVERY topology check, not just on geometry
+    // changes — a same-resolution OS HDR toggle moves no pixels, so the
+    // predicate above never fires for it. RefreshHdrOutput is idempotent
+    // (the swapchain bails before any DXGI churn when nothing changed).
+    if (m_renderer) {
+        m_renderer->RefreshHdrOutput();
+    }
 
     if (!changed) return;
 
@@ -1064,6 +1117,7 @@ void Engine::CheckDisplayChanges() {
     m_lastMonitorCount = count;
     m_lastPrimaryWidth  = primaryW;
     m_lastPrimaryHeight = primaryH;
+    m_lastMonitors = monitors;
 
     // Multi-monitor mode: reconcile compositors with the new topology
     // (add connected, remove disconnected, update moved/resized).
@@ -1138,27 +1192,51 @@ void Engine::ApplyTransform() {
 void Engine::CheckFullScreenPause() {
     if (!m_config.pauseOnFullscreen) return;
 
-    // A foreground window that covers >=95% of its monitor's bounds is
-    // treated as full-screen. Monitor-aware: a game on a secondary monitor
-    // must not be judged against the whole virtual desktop.
+    // A foreground window counts as full-screen only when it covers
+    // (essentially) every pixel of its monitor. The old >=95% area test
+    // paused the wallpaper behind ANY maximized window: on a 3840x2160
+    // screen with a 48 px taskbar a maximized window covers 3840x2112 =
+    // 97.8%, so the wallpaper froze ~2 s after every Play. A maximized
+    // window always leaves the taskbar/appbar strip uncovered, which this
+    // test now requires to be (near-)zero.
     bool fullScreen = false;
     HWND fg = GetForegroundWindow();
-    if (fg && IsWindowVisible(fg) && !IsIconic(fg)) {
-        RECT fgRect;
-        if (GetWindowRect(fg, &fgRect) && fgRect.right > fgRect.left &&
-            fgRect.bottom > fgRect.top) {
-            MONITORINFO mi = {};
-            mi.cbSize = sizeof(mi);
-            if (GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST),
-                                &mi)) {
-                RECT inter;
-                IntersectRect(&inter, &fgRect, &mi.rcMonitor);
-                const int iw = inter.right - inter.left;
-                const int ih = inter.bottom - inter.top;
-                const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
-                const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-                fullScreen = (static_cast<int64_t>(iw) * ih * 100 >=
-                              static_cast<int64_t>(mw) * mh * 95);
+    if (fg && fg != GetDesktopWindow() && IsWindowVisible(fg) && !IsIconic(fg)) {
+        wchar_t fgClass[64] = {};
+        GetClassNameW(fg, fgClass, 64);
+        const bool isShellChrome =
+            lstrcmpW(fgClass, L"Progman") == 0 ||
+            lstrcmpW(fgClass, L"WorkerW") == 0 ||
+            lstrcmpW(fgClass, L"SHELLDLL_DefView") == 0 ||
+            lstrcmpW(fgClass, L"Shell_TrayWnd") == 0;
+        if (!isShellChrome) {
+            RECT fgRect;
+            if (GetWindowRect(fg, &fgRect) && fgRect.right > fgRect.left &&
+                fgRect.bottom > fgRect.top) {
+                MONITORINFO mi = {};
+                mi.cbSize = sizeof(mi);
+                if (GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST),
+                                    &mi)) {
+                    RECT inter;
+                    IntersectRect(&inter, &fgRect, &mi.rcMonitor);
+                    const int iw = inter.right - inter.left;
+                    const int ih = inter.bottom - inter.top;
+                    const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+                    const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                    // 2 px tolerance for borderless windows that sit 1 px
+                    // inside the edges; a taskbar/appbar strip is tens of
+                    // pixels and always fails this test.
+                    fullScreen = (mw - iw <= 2 && mh - ih <= 2);
+                    if (fullScreen) {
+                        char cls[64] = {};
+                        WideCharToMultiByte(CP_UTF8, 0, fgClass, -1, cls,
+                                            sizeof(cls), nullptr, nullptr);
+                        REX_LOG_INFO("Engine",
+                                     "Full-screen window: class={} rect={}x{} "
+                                     "(monitor {}x{})",
+                                     cls, iw, ih, mw, mh);
+                    }
+                }
             }
         }
     }
@@ -1169,14 +1247,29 @@ void Engine::CheckFullScreenPause() {
     // thread to exit, calling Pause()/Play() here would deadlock.
     // Instead, post an atomic signal that the render loop services before
     // the next GPU submit — fully lock-free on the render thread.
-    if (fullScreen && !m_fullScreenPaused && m_state == EngineState::Running) {
-        m_fullScreenPaused = true;
-        REX_LOG_INFO("Engine", "Full-screen app detected — requesting wallpaper pause");
-        m_fullScreenRequest.store(1, std::memory_order_release);
-    } else if (!fullScreen && m_fullScreenPaused) {
-        m_fullScreenPaused = false;
-        REX_LOG_INFO("Engine", "Full-screen app closed — requesting wallpaper resume");
-        m_fullScreenRequest.store(-1, std::memory_order_release);
+    //
+    // A shell overlay that flashes fullscreen for a moment (observed: a
+    // XamlWindow covering the monitor for ~1 s) must not freeze the
+    // wallpaper: the pause fires only after the state persists across checks.
+    if (fullScreen && !m_fullScreenPaused) {
+        using namespace std::chrono;
+        const auto now = steady_clock::now();
+        if (m_fullScreenSince.time_since_epoch().count() == 0) {
+            m_fullScreenSince = now;
+        }
+        if (m_state == EngineState::Running &&
+            now - m_fullScreenSince >= milliseconds(1500)) {
+            m_fullScreenPaused = true;
+            REX_LOG_INFO("Engine", "Full-screen app detected — requesting wallpaper pause");
+            m_fullScreenRequest.store(1, std::memory_order_release);
+        }
+    } else if (!fullScreen) {
+        m_fullScreenSince = {};
+        if (m_fullScreenPaused) {
+            m_fullScreenPaused = false;
+            REX_LOG_INFO("Engine", "Full-screen app closed — requesting wallpaper resume");
+            m_fullScreenRequest.store(-1, std::memory_order_release);
+        }
     }
 }
 
@@ -1210,7 +1303,14 @@ void Engine::RenderLoop() {
                 // render thread exclusively owns these during normal operation)
                 if (m_videoManager) m_videoManager->Pause();
                 m_playing = false;
-                m_stopwatch.Stop();
+                // Fold first (same reason as Pause()): the stopwatch restarts
+                // from zero, so the position must be banked or the next
+                // resume rewinds it while the decoder kept its own PTS.
+                m_positionBase.store(
+                    m_positionBase.load(std::memory_order_relaxed) +
+                        m_stopwatch.ElapsedSeconds(),
+                    std::memory_order_relaxed);
+                m_stopwatch.Reset();
                 SetState(EngineState::Paused);
                 REX_LOG_INFO("Engine", "Full-screen pause applied");
             } else if (req == -1 && m_state == EngineState::Paused) {
@@ -1229,33 +1329,46 @@ void Engine::RenderLoop() {
             CheckDisplayChanges();
         }
 
-        // ── Desktop host / shell restart recovery ─────────────────────
-        // The flag is set from the desktop host's monitor thread; we
-        // handle it here on the render thread so there's no mutex
-        // contention.
-        if (m_recoveryNeeded.exchange(false)) {
-            REX_LOG_INFO("Engine", "WorkerW recovery requested, reinitializing...");
-            SetState(EngineState::Error);
-            m_recoveryCount++;
+        // ── Desktop host / shell restart + device-loss recovery ────────
+        // Both sources funnel into ONE gated attempt. Previously each had
+        // its own block that `continue`d without pacing and without
+        // re-arming the flag: a host that could not be reacquired (Explorer
+        // still restarting) spun this thread at 100% CPU, and because the
+        // frame counter stopped advancing, ran the %30/%120 housekeeping on
+        // every pass. A single failed attempt also used to consume the
+        // request and never retry, bricking the wallpaper for the session.
+        const bool hostRecoveryRequested = m_recoveryNeeded.exchange(false);
+        const bool deviceLost = m_renderer && m_renderer->IsDeviceRemoved();
+        if (hostRecoveryRequested || deviceLost) {
+            const auto now = high_resolution_clock::now();
+            if (now >= m_nextRecoveryAttempt) {
+                REX_LOG_INFO("Engine", "Recovery requested ({}), reinitializing...",
+                             deviceLost ? "device removed" : "desktop host");
+                SetState(EngineState::Error);
+                m_recoveryCount++;
+                if (deviceLost) m_deviceResetCount++;
 
-            auto recoveryResult = HandleDeviceLoss();
-            if (recoveryResult.IsSuccess()) {
-                m_frameCount = 0;
+                auto recoveryResult = HandleDeviceLoss();
+                if (recoveryResult.IsSuccess()) {
+                    m_frameCount = 0;
+                    m_recoveryDelayMs = 0;
+                    m_nextRecoveryAttempt = now;
+                } else {
+                    // Re-arm and back off — the host normally comes back, so
+                    // keep retrying instead of giving up on the wallpaper.
+                    m_recoveryDelayMs = NextRecoveryDelayMs(m_recoveryDelayMs);
+                    m_nextRecoveryAttempt = now + milliseconds(m_recoveryDelayMs);
+                    m_recoveryNeeded.store(true, std::memory_order_release);
+                    REX_LOG_ERROR("Engine",
+                                  "Recovery failed: {} — retrying in {} ms",
+                                  recoveryResult.Error().message,
+                                  m_recoveryDelayMs);
+                }
             }
-            continue;
-        }
-
-        // ── Detect device loss ─────────────────────────────────────────
-        if (m_renderer && m_renderer->IsDeviceRemoved()) {
-            REX_LOG_ERROR("Engine", "Device lost, attempting recovery...");
-            SetState(EngineState::Error);
-            m_deviceResetCount++;
-            m_recoveryCount++;
-
-            auto recoveryResult = HandleDeviceLoss();
-            if (recoveryResult.IsSuccess()) {
-                m_frameCount = 0;
-            }
+            // Always pace: this thread must never busy-loop, whatever the
+            // recovery outcome was.
+            m_frameCount++;
+            PaceLoop(frameStart);
             continue;
         }
 
@@ -1267,9 +1380,27 @@ void Engine::RenderLoop() {
             // identical frames at ~refresh rate — burning 36-55% GPU when
             // the decoder ran slower than the display.
             const VideoFrame* pending = nullptr;
+            // Snapshot the command-thread-owned scene/capture state under a
+            // short lock. LoadScene/UnloadScene/Stop assign m_currentScene,
+            // m_hotReloadPath and m_audioCapture under m_mutex while this
+            // thread used to read them raw: a torn std::string read fed
+            // LoadTexture a half-updated buffer, and a reset unique_ptr was a
+            // use-after-free of a live AudioCapture. Everything below works
+            // on the local copies.
+            std::string renderSceneType;
+            std::string renderHotReloadPath;
+            std::filesystem::file_time_type renderHotReloadLastWrite{};
+            std::shared_ptr<AudioCapture> renderAudioCapture;
+            {
+                std::lock_guard<std::mutex> snapshotLock(m_mutex);
+                renderSceneType = m_currentScene.type;
+                renderHotReloadPath = m_hotReloadPath;
+                renderHotReloadLastWrite = m_hotReloadLastWrite;
+                renderAudioCapture = m_audioCapture;
+            }
             if (m_state == EngineState::Running && m_videoManager
                 && m_videoManager->IsOpen()
-                && m_currentScene.type == "video") {
+                && renderSceneType == "video") {
                 pending = m_videoManager->Tick(GetPosition());
                 if (pending && !(pending->valid)) pending = nullptr;
             }
@@ -1309,23 +1440,28 @@ void Engine::RenderLoop() {
 
             // ── Hot-reload: detect static image changes ──────────────
             if (m_state == EngineState::Running
-                && !m_hotReloadPath.empty()
+                && !renderHotReloadPath.empty()
                 && m_frameCount % 60 == 0) {
                 std::error_code ec;
-                auto lastWrite = std::filesystem::last_write_time(m_hotReloadPath, ec);
-                if (!ec && lastWrite != m_hotReloadLastWrite) {
-                    m_hotReloadLastWrite = lastWrite;
-                    if (m_renderer->LoadTexture(m_hotReloadPath).IsSuccess()) {
+                auto lastWrite = std::filesystem::last_write_time(renderHotReloadPath, ec);
+                if (!ec && lastWrite != renderHotReloadLastWrite) {
+                    if (m_renderer->LoadTexture(renderHotReloadPath).IsSuccess()) {
+                        // Publish the new timestamp under the lock so the
+                        // LoadScene seed and this writer never race.
+                        std::lock_guard<std::mutex> stampLock(m_mutex);
+                        m_hotReloadLastWrite = lastWrite;
                         REX_LOG_INFO("Engine", "Hot-reloaded static image: {}",
-                                     m_hotReloadPath);
+                                     renderHotReloadPath);
                     }
                 }
             }
 
             // Feed audio spectrum to renderer (zeroed if no audio capture).
-            if (m_audioCapture && m_audioCapture->IsRunning()) {
+            // Uses the per-frame snapshot: the command thread can replace
+            // the capture device mid-frame.
+            if (renderAudioCapture && renderAudioCapture->IsRunning()) {
                 std::array<float, 32> spectrum{};
-                if (m_audioCapture->GetSpectrum(spectrum)) {
+                if (renderAudioCapture->GetSpectrum(spectrum)) {
                     m_renderer->UpdateAudioSpectrum(spectrum);
                 }
             }
@@ -1383,6 +1519,7 @@ void Engine::SetupMonitorCompositors() {
 
 shared::Result<void> Engine::SetPerMonitorWallpaper(const std::string& monitorId,
                                                     const std::string& path) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_videoManager) {
         return shared::Result<void>(shared::ErrorCode::NotInitialized,
                                     "video manager not initialized");
@@ -1392,6 +1529,7 @@ shared::Result<void> Engine::SetPerMonitorWallpaper(const std::string& monitorId
 
 void Engine::SetSettingsService(
     std::shared_ptr<rex::settings::ISettingsService> settings) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_videoManager) {
         m_videoManager->SetSettingsService(std::move(settings));
     }

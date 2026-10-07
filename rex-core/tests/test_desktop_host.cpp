@@ -326,3 +326,79 @@ TEST(DesktopHostFactoryTest, AllStrategiesFailGracefully) {
     // If we get here without a crash, the test passes.
     SUCCEED();
 }
+
+// ============================================================================
+// Layer repair policy
+// ============================================================================
+//
+// Regression guard for BUG-001: every detected violation used to go straight
+// to a full destroy + recreate + engine reload, which is what made the
+// wallpaper visibly jump above the icons and freeze input for a second. A
+// mispositioned-but-alive layer only needs to be moved back below the icons.
+
+#include "platform/windows/LayerRepairPolicy.hpp"
+
+TEST(LayerRepairPolicyTest, HealthyLayerNeedsNoRepair) {
+    EXPECT_EQ(ChooseLayerRepair(true, true, true, false), LayerRepair::None);
+}
+
+TEST(LayerRepairPolicyTest, MispositionedLayerIsReanchoredNotRebuilt) {
+    EXPECT_EQ(ChooseLayerRepair(true, true, false, false), LayerRepair::Reanchor);
+}
+
+TEST(LayerRepairPolicyTest, FailedReanchorEscalatesToRebuild) {
+    EXPECT_EQ(ChooseLayerRepair(true, true, false, true), LayerRepair::Rebuild);
+}
+
+TEST(LayerRepairPolicyTest, DeadRenderWindowForcesRebuild) {
+    EXPECT_EQ(ChooseLayerRepair(false, true, false, false), LayerRepair::Rebuild);
+}
+
+TEST(LayerRepairPolicyTest, DeadWorkerWForcesRebuild) {
+    EXPECT_EQ(ChooseLayerRepair(true, false, false, false), LayerRepair::Rebuild);
+}
+
+TEST(LayerRepairPolicyTest, DeadWindowNeverReportsHealthy) {
+    // Even if a stale verification says the layer is fine, a dead HWND must
+    // never short-circuit the repair.
+    EXPECT_NE(ChooseLayerRepair(false, true, true, false), LayerRepair::None);
+    EXPECT_NE(ChooseLayerRepair(true, false, true, true), LayerRepair::None);
+}
+
+TEST(LayerRepairPolicyTest, SpawnRequestOnlyWhenHostIsGone) {
+    // WM_SPAWNWORKERW churn (4 sends x 1 s timeout) is only worth paying when
+    // the shell may not have a WorkerW yet; a live shell reordering its
+    // layers must not trigger it.
+    EXPECT_TRUE(NeedsWorkerWSpawn(false));
+    EXPECT_FALSE(NeedsWorkerWSpawn(true));
+}
+
+// ============================================================================
+// Synthetic-layer transition (P0-1 reconstruction survival)
+// ============================================================================
+//
+// Regression guard: ReacquireWorkerW used to keep a stale m_syntheticWorkerW
+// flag across reconstruction. After a synthetic -> real-WorkerW transition
+// the stale `true` made VerifyWallpaperLayer demand WS_EX_TRANSPARENT +
+// WS_EX_NOACTIVATE on Explorer's own WorkerW, so every repair failed
+// verification forever and the wallpaper never came back. The old synthetic
+// layer (our window) also leaked because nothing destroyed it.
+
+TEST(SyntheticLayerTransitionTest, OldSyntheticLayerIsDestroyedOnReacquire) {
+    // The previous synthetic layer is our window — it must be destroyed
+    // before discovery, no matter what discovery finds next.
+    EXPECT_TRUE(PlanSyntheticTransition(true, false).destroyOld);
+    EXPECT_TRUE(PlanSyntheticTransition(true, true).destroyOld);
+    // A real Explorer WorkerW is never ours — leave it alone.
+    EXPECT_FALSE(PlanSyntheticTransition(false, false).destroyOld);
+    EXPECT_FALSE(PlanSyntheticTransition(false, true).destroyOld);
+}
+
+TEST(SyntheticLayerTransitionTest, FlagFollowsDiscoveryNotHistory) {
+    // Synthetic -> real: the flag must reset, or verification demands
+    // input-transparency styles on Explorer's WorkerW and fails forever.
+    EXPECT_FALSE(PlanSyntheticTransition(true, false).synthetic);
+    EXPECT_TRUE(PlanSyntheticTransition(true, true).synthetic);
+    EXPECT_FALSE(PlanSyntheticTransition(false, false).synthetic);
+    EXPECT_TRUE(PlanSyntheticTransition(false, true).synthetic);
+}

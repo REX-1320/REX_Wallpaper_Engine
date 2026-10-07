@@ -1,5 +1,6 @@
 
 #include "D3D12Renderer.hpp"
+#include "graphics/renderer/HdrSyncPolicy.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include <shared/Logger.hpp>
 #include <d3dcompiler.h>
@@ -139,13 +140,27 @@ float SampleSpectrum(float x) {
 }
 
 float4 main(VSOutput input) : SV_TARGET {
-    const float masterMax = max(disp.y, 1.0);
     const float peak = max(disp.x, 100.0);
+    // Normalisation reference for PQ/HLG input, in nits.
+    //
+    // PQ/HLG decode yields absolute luminance, so this divides it down to a
+    // 0..~5 range that the tone curve expects. The divisor is the *display
+    // referred paper white* (adj.w, 203 nits by default), NOT the mastering
+    // display max (cb[9]): ITU-R BT.2408 puts HDR reference white at 203 nits,
+    // which must land near 90% of an SDR signal. Dividing by the mastering max
+    // instead put 203 nits at 59% of signal -- mid-grey -- which is the
+    // "HDR looks wrong / too dark" symptom. A prior revision justified
+    // masterMax with an ffmpeg zscale+tonemap comparison; that reference was
+    // broken (its chain omitted the output OETF, so it rendered BT.709 values
+    // without a BT.709 transfer function) and the mean-error numbers it cites
+    // are void. Content peak still caps the signal via min(norm, peak) below.
+    const float norm = max(adj.w, 1.0);
     float3 rgb;
 
     if (extra.z > 0.5) {
         float4 c = texY.Sample(sam, input.uv);
-        rgb = c.rgb;
+        rgb = (mode.y > 0.5) ? (PqToLinear(saturate(c.rgb)) / norm)
+                             : SrgbToLinear(c.rgb);
     } else if (extra.x > 1.5) {
         float  yRaw  = texY.Sample(sam, input.uv).r;
         float2 uvRaw = texUV.Sample(sam, input.uv).rg;
@@ -167,19 +182,15 @@ float4 main(VSOutput input) : SV_TARGET {
         float g = yN - 0.16455 * cbN - 0.57135 * crN;
         float b = yN + 1.8814 * cbN;
         rgb = float3(r, g, b);
-        // Gamut-map to BT.709 BEFORE the tone map (verified: better hue
-        // preservation, fewer clipped highlights than ACES-first). NOTE the
-        // mul(v, M) row-vector order: these NPMs are column-stored, and
-        // mul(M, v) breaks white (D65 -> 1.52/0.44/1.04 pink-green tint).
-        rgb = max(mul(rgb, BT2020_TO_BT709), 0.0);
         if (mode.y > 1.5) {
-            rgb = HlgToLinear(saturate(rgb)) / masterMax;
+            rgb = HlgToLinear(saturate(rgb)) / norm;
         } else {
-            rgb = PqToLinear(saturate(rgb)) / masterMax;
+            rgb = PqToLinear(saturate(rgb)) / norm;
         }
+        rgb = max(mul(rgb, BT2020_TO_BT709), 0.0);
     } else if (mode.y > 0.5) {
         float4 c = texY.Sample(sam, input.uv);
-        rgb = PqToLinear(saturate(c.rgb)) / masterMax;
+        rgb = PqToLinear(saturate(c.rgb)) / norm;
     } else {
         float  y  = texY.Sample(sam, input.uv).r;
         float2 uv = texUV.Sample(sam, input.uv).rg;
@@ -205,11 +216,24 @@ float4 main(VSOutput input) : SV_TARGET {
             g = yN - 0.1873 * cbN - 0.4681 * crN;
             b = yN + 1.8556 * cbN;
         }
-        rgb = float3(r, g, b);
+        // Y'CbCr -> R'G'B' is defined on *non-linear* (OETF-encoded) components,
+        // so the matrix above produces gamma-encoded R'G'B', not linear light.
+        // Every later stage (tone curve, output transfer) works in linear light,
+        // so linearise here. Omitting this re-applied the sRGB OETF twice and
+        // washed every SDR video out (source 128 rendered as 188).
+        rgb = SrgbToLinear(saturate(float3(r, g, b)));
     }
 
     if (mode.w < 0.5) {
-        rgb = saturate(rgb * (adj.x * adj.y));
+        // SDR output adjustments. Clamp to [0,1] only for SDR input: HDR input
+        // is normalised by paper white, so 1.0 *is* paper white and anything
+        // above it is legitimate highlight headroom that the tone curve has to
+        // be allowed to roll off. Clamping first collapsed every value >= paper
+        // white onto one code, blowing out all highlight gradation (397, 594,
+        // 806 and 1004 nits all rendered identically).
+        const bool hdrInput = (mode.y > 0.5) || (extra.x > 1.5);
+        rgb = rgb * (adj.x * adj.y);
+        rgb = hdrInput ? max(rgb, 0.0) : saturate(rgb);
         float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
         rgb = lerp(luma, rgb, adj.z);
     }
@@ -237,8 +261,14 @@ float4 main(VSOutput input) : SV_TARGET {
     if (mode.w > 0.5) {
         float3 lin;
         if (mode.y > 0.5 || extra.x > 1.5) {
-            lin = min(rgb * masterMax * min(1.0, peak / masterMax), peak);
+            // HDR input: PQ/HLG decode already yields absolute luminance, which
+            // was divided by `norm` (paper white) on the way in, so scale it
+            // back and cap at the display peak.
+            lin = min(rgb * min(norm, peak), peak);
         } else {
+            // SDR input: rgb is linear with 1.0 == SDR white, which maps to
+            // paper white (cb[7]). The mastering display max (cb[9]) has no
+            // meaning for SDR content -- it falls back to a 1000 nit default.
             lin = rgb * adj.w;
         }
         return float4(LinearToPq((mode.y > 0.5 || extra.x > 1.5) ? lin : mul(lin, BT709_TO_BT2020)), 1.0);
@@ -246,7 +276,6 @@ float4 main(VSOutput input) : SV_TARGET {
 
     if (mode.y > 0.5 || extra.x > 1.5) {
         rgb = AcesFit(rgb);
-        rgb = mul(rgb, BT2020_TO_BT709);
     }
     return float4(LinearToSrgb(saturate(rgb)), 1.0);
 }
@@ -563,6 +592,11 @@ void D3D12Renderer::Shutdown() {
     // Device has no persistent state to clean up
 
     m_initialized = false;
+    // Clear the loss flag with the device it described. It used to survive
+    // Shutdown(), so a shut-down renderer kept reporting "device removed"
+    // forever and the engine re-entered device-loss recovery every single
+    // frame when the desktop host could not be reacquired.
+    m_deviceRemoved = false;
     REX_LOG_INFO("D3D12", "Renderer shutdown complete");
 }
 
@@ -857,6 +891,7 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     // std::system_error (MSVC detects the re-lock) and abort the process.
     ID3D12Device* dev = m_device.Get();
 
+    bool textureRecreated = false;
     if (!m_texture || m_texWidth != width || m_texHeight != height) {
         if (m_texture) {
             ActiveQueue().WaitForGPU();
@@ -864,6 +899,7 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
             m_textureUploadBuffer.Reset();
         }
         m_textureRecreations++;
+        textureRecreated = true;
 
         D3D12_HEAP_PROPERTIES heapProps = {};
         heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -965,6 +1001,21 @@ shared::Result<void> D3D12Renderer::UpdateTexturePixels(
         return ctxRes;
     }
     copyList->Reset(copyAllocator.Get(), nullptr);
+
+    // A texture that already exists was left in PIXEL_SHADER_RESOURCE by the
+    // previous upload (and by every frame that sampled it). Without this
+    // transition the CopyTextureRegion below records a destination in the
+    // wrong state — a debug-layer error and an undefined copy from the
+    // second upload onwards. A freshly created texture is already COPY_DEST.
+    if (!textureRecreated) {
+        D3D12_RESOURCE_BARRIER toCopyDest = {};
+        toCopyDest.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toCopyDest.Transition.pResource   = m_texture.Get();
+        toCopyDest.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        toCopyDest.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyList->ResourceBarrier(1, &toCopyDest);
+    }
 
     D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
     dstLoc.pResource        = m_texture.Get();
@@ -1247,9 +1298,50 @@ void D3D12Renderer::Resize(int width, int height) {
 
     ActiveQueue().WaitForGPU();
     m_swapChain.Resize(m_device.Get(), width, height);
+    // The window may have moved outputs (or the OS HDR toggle flipped):
+    // the swapchain re-evaluated its selection above — follow it.
+    SyncHdrStateLocked();
 
     m_width  = width;
     m_height = height;
+}
+
+// ─── HDR output refresh (P0-2 / R16) ─────────────────────────────────────
+// m_isHdrOutput was snapshot-once at Initialize and the HDR PSO existed
+// only when starting HDR: after an OS toggle the renderer bound the wrong
+// PSO (SDR PSO on an R16F/PQ swapchain or vice versa).
+
+void D3D12Renderer::RefreshHdrOutput() {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    SyncHdrStateLocked();
+}
+
+void D3D12Renderer::SyncHdrStateLocked() {
+    if (!m_initialized) return;
+    auto sr = m_swapChain.RefreshHdrSelection(m_device.Get());
+    if (sr.IsError()) {
+        REX_LOG_WARN("D3D12", "HDR refresh failed: {}; keeping {} output",
+                     sr.Error().message.c_str(),
+                     m_isHdrOutput ? "HDR" : "SDR");
+        return;
+    }
+    const auto action = graphics::PlanHdrSync(
+        m_isHdrOutput, m_swapChain.IsHDR(),
+        m_pipelineStateHdr.Get() != nullptr);
+    if (action.updateFlag) {
+        m_isHdrOutput = m_swapChain.IsHDR();
+        REX_LOG_INFO("D3D12", "HDR output {} (swapchain {})",
+                     m_isHdrOutput ? "enabled" : "disabled",
+                     m_isHdrOutput ? "R16F/PQ" : "UNORM/sRGB");
+    }
+    if (action.createHdrPso) {
+        if (!CreatePipelineState(DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                 m_pipelineStateHdr)) {
+            REX_LOG_ERROR("D3D12",
+                          "HDR PSO creation failed; staying on SDR output");
+            m_isHdrOutput = false;
+        }
+    }
 }
 
 // ─── Upload Texture to GPU (static) ───────────────────────────────────────

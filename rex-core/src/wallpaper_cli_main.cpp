@@ -6,7 +6,7 @@
 #include <shared/Result.hpp>
 
 #include "wallpaper/runtime/Json.hpp"
-
+#include "wallpaper/runtime/ClientSurface.hpp"
 #include <cstdlib>
 #include <csignal>
 #include <filesystem>
@@ -549,40 +549,20 @@ static void WriteEvent(const std::string& event, const json::Json& data = json::
 // 64-bit handle/fence values are transmitted as 0x-prefixed hex strings:
 // the protocol's JSON numbers are doubles and would lose precision above 2^53.
 
-static constexpr UINT kMaxPreviewSlots = 8;
+// Client frame-surface state (R13): the lifecycle helpers live in
+// wallpaper/runtime/ClientSurface.hpp so they are unit-testable; the
+// command handlers below only wire them to the protocol.
+static constexpr UINT kMaxPreviewSlots =
+    rex::wallpaper::kMaxClientPreviewSlots;
 
-static struct ClientSurfaceState {
-    DWORD pid = 0;
-    HANDLE process = nullptr;      // PROCESS_DUP_HANDLE handle to the host
-    uint64_t generation = 0;
-    UINT slotCount = 0;
-    HANDLE fence = nullptr;
-    HANDLE slots[kMaxPreviewSlots] = {};
-    bool duplicated = false;       // true when handles were DuplicateHandle'd
-                                   // into this process (we own them)
-} g_clientSurface;
+static rex::wallpaper::ClientSurfaceState g_clientSurface;
 
 static void CloseClientSurface() {
-    if (g_clientSurface.duplicated) {
-        if (g_clientSurface.fence) {
-            CloseHandle(g_clientSurface.fence);
-            g_clientSurface.fence = nullptr;
-        }
-        for (UINT i = 0; i < kMaxPreviewSlots; ++i) {
-            if (g_clientSurface.slots[i]) {
-                CloseHandle(g_clientSurface.slots[i]);
-                g_clientSurface.slots[i] = nullptr;
-            }
-        }
-    } else {
-        g_clientSurface.fence = nullptr;
-        for (UINT i = 0; i < kMaxPreviewSlots; ++i) {
-            g_clientSurface.slots[i] = nullptr;
-        }
-    }
-    g_clientSurface.slotCount = 0;
-    g_clientSurface.generation = 0;
-    g_clientSurface.duplicated = false;
+    rex::wallpaper::CloseSurfaceHandles(g_clientSurface);
+}
+
+static void DetachClientSurface() {
+    rex::wallpaper::DetachClient(g_clientSurface);
 }
 
 static json::Json HexU64(uint64_t value) {
@@ -733,7 +713,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             if (framePollThread.joinable()) {
                 framePollThread.join();
             }
-            CloseClientSurface();
+            DetachClientSurface();
             if (engine) engine->Shutdown();
             WriteResponse(id, true);
             REX_LOG_INFO("Runtime", "Wallpaper runtime shutdown complete");
@@ -920,8 +900,13 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                 continue;
             }
             std::string eventName;
-            auto result = engine->Play();
+            // Only PLAY may call Play(). It used to run unconditionally before
+            // the branch below, so PAUSE/STOP/UNLOAD briefly resumed decode and
+            // audio and re-stamped the stopwatch — playback position then
+            // reported as ~0 instead of where the user left it.
+            rex::shared::Result<void> result;
             if (cmd == "PLAY") {
+                result = engine->Play();
                 eventName = "PLAYING";
             } else if (cmd == "PAUSE") {
                 result = engine->Pause();
@@ -1007,11 +992,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                 WriteResponse(id, false, "SET_CLIENT_PID requires a 'pid'");
                 continue;
             }
-            CloseClientSurface();
-            if (g_clientSurface.process) {
-                CloseHandle(g_clientSurface.process);
-                g_clientSurface.process = nullptr;
-            }
+            DetachClientSurface();
             g_clientSurface.process = OpenProcess(
                 PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
             if (!g_clientSurface.process) {
@@ -1024,6 +1005,15 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             }
             g_clientSurface.pid = pid;
             REX_LOG_INFO("Runtime", "client frame surface bound to pid {}", pid);
+            WriteResponse(id, true);
+            continue;
+        }
+
+        if (cmd == "DETACH_CLIENT") {
+            // R13: explicit detach — drops the surface handles AND the
+            // process binding (CloseClientSurface alone keeps pid/process).
+            DetachClientSurface();
+            REX_LOG_INFO("Runtime", "client frame surface detached");
             WriteResponse(id, true);
             continue;
         }
@@ -1045,21 +1035,47 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             if (s.generation != g_clientSurface.generation ||
                 g_clientSurface.fence == nullptr) {
                 CloseClientSurface();
+                // R13: a bound client that exited leaves a signaled process
+                // handle — duplicating into it yields stale handles, so
+                // detach instead of serializing them as valid.
+                if (g_clientSurface.process &&
+                    !rex::wallpaper::IsProcessAlive(g_clientSurface.process)) {
+                    REX_LOG_WARN("Runtime", "client pid {} exited; detaching frame surface",
+                                 g_clientSurface.pid);
+                    DetachClientSurface();
+                    WriteResponse(id, false,
+                                  "client process exited (surface detached)");
+                    continue;
+                }
                 g_clientSurface.generation = s.generation;
                 g_clientSurface.slotCount = std::min<UINT>(s.slotCount, kMaxPreviewSlots);
                 if (g_clientSurface.process) {
-                    DuplicateHandle(GetCurrentProcess(),
+                    const BOOL fenceOk = DuplicateHandle(GetCurrentProcess(),
                                     reinterpret_cast<HANDLE>(s.fenceHandle),
                                     g_clientSurface.process, &g_clientSurface.fence,
                                     0, FALSE, DUPLICATE_SAME_ACCESS);
+                    BOOL slotsOk = TRUE;
                     for (UINT i = 0; i < g_clientSurface.slotCount; ++i) {
                         const HANDLE local = reinterpret_cast<HANDLE>(engine->GetFrameSlotHandle(i));
                         if (!local) continue;
-                        DuplicateHandle(GetCurrentProcess(), local,
+                        slotsOk &= DuplicateHandle(GetCurrentProcess(), local,
                                         g_clientSurface.process, &g_clientSurface.slots[i],
                                         0, FALSE, DUPLICATE_SAME_ACCESS);
                     }
                     g_clientSurface.duplicated = true;
+                    // R13: never serialize a NULL handle as valid — drop the
+                    // surface and report failure instead.
+                    if (!fenceOk || !slotsOk ||
+                        !rex::wallpaper::ValidateDuplicatedSurface(
+                            g_clientSurface.fence, g_clientSurface.slots,
+                            g_clientSurface.slotCount)) {
+                        REX_LOG_WARN("Runtime",
+                                     "client handle duplication failed; dropping surface");
+                        CloseClientSurface();
+                        WriteResponse(id, false,
+                                      "client handle duplication failed");
+                        continue;
+                    }
                 } else {
                     g_clientSurface.fence = reinterpret_cast<HANDLE>(s.fenceHandle);
                     for (UINT i = 0; i < g_clientSurface.slotCount; ++i) {
@@ -1192,7 +1208,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
     if (framePollThread.joinable()) {
         framePollThread.join();
     }
-    CloseClientSurface();
+    DetachClientSurface();
     if (engine) engine->Shutdown();
     REX_LOG_INFO("Runtime", "Wallpaper runtime exiting (stdin closed)");
     return 0;

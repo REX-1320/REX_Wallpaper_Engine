@@ -150,6 +150,22 @@ HRESULT SwapChain::Present(UINT syncInterval, UINT flags) {
     return m_swapChain->Present(syncInterval, flags);
 }
 
+shared::Result<void> SwapChain::RefreshHdrSelection(ID3D12Device* device) {
+    if (!m_swapChain) {
+        return shared::Result<void>(shared::ErrorCode::NotInitialized,
+                                    "SwapChain not initialized");
+    }
+    const DXGI_FORMAT before = m_format;
+    // May ResizeBuffers(0,0) internally when the format changes.
+    UpdateHdrSelection();
+    if (m_format == before) {
+        return shared::Result<void>();
+    }
+    // The format changed behind the existing RTVs — they describe the old
+    // buffers, so re-fetch them.
+    return CreateRenderTargetViews(device);
+}
+
 void SwapChain::WaitForFrame() const {
     if (m_frameLatencyWaitable) {
         WaitForSingleObjectEx(m_frameLatencyWaitable, 1000, FALSE);

@@ -43,6 +43,11 @@ public:
     shared::Result<void> Resize(
         ID3D12Device* device, int width, int height);
 
+    /// Re-evaluate the HDR selection outside a resize (same-resolution OS
+    /// HDR toggle, window moved outputs). Recreates the RTVs when the
+    /// back-buffer format changed. No-op when the selection is unchanged.
+    shared::Result<void> RefreshHdrSelection(ID3D12Device* device);
+
     /// Present the current frame. Returns the HRESULT from Present.
     /// Caller should check IsDeviceRemoved() if the result is an error.
     HRESULT Present(UINT syncInterval = 1, UINT flags = 0);

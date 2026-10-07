@@ -47,6 +47,10 @@ public:
                                     graphics::CommandQueue* sharedQueue);
     void Shutdown();
     void Resize(int width, int height);
+    /// Re-evaluate the HDR output state (OS toggle, window moved outputs)
+    /// and sync the cached flag + HDR PSO. Safe to call when nothing
+    /// changed (idempotent). Also runs inside Resize.
+    void RefreshHdrOutput();
 
     // ─── Texture Loading ────────────────────────────────────────────────
     shared::Result<void> LoadTexture(std::string_view path);
@@ -153,6 +157,10 @@ private:
     /// Rebuilds m_transformMatrix from rotation/flip (row-major, matches
     /// the vertex shader's row-vector mul(v, M)). Caller holds m_renderMutex.
     void UpdateTransformMatrix();
+
+    /// Syncs m_isHdrOutput with the live swapchain state and creates the
+    /// HDR PSO on demand (P0-2 / R16). Caller holds m_renderMutex.
+    void SyncHdrStateLocked();
 
     // ─── Color pipeline ─────────────────────────────────────────────────
     /// Fills the root-constant payload (b0) from the active frame's

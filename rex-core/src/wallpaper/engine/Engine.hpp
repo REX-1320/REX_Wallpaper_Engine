@@ -6,9 +6,11 @@
 #include <shared/Stopwatch.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <memory>
 #include <thread>
+#include <vector>
 #include <filesystem>
 
 #include "platform/windows/IDesktopHost.hpp"
@@ -126,6 +128,9 @@ private:
     int m_lastMonitorCount = 0;
     int m_lastPrimaryWidth = 0;
     int m_lastPrimaryHeight = 0;
+    // Full last-seen topology: the change predicate compares geometry,
+    // identity, primary role and DPI (P0-2 / G3), not just count + size.
+    std::vector<MonitorInfo> m_lastMonitors;
 
     // Scene lifecycle counters (for the memory-retention diagnostics)
     std::atomic<uint64_t> m_scenesLoaded{0};
@@ -134,11 +139,19 @@ private:
     std::unique_ptr<rex::platform::windows::IDesktopHost> m_desktopHost;
     std::unique_ptr<D3D12Renderer> m_renderer;
     std::unique_ptr<VideoManager> m_videoManager;
-    std::unique_ptr<AudioCapture> m_audioCapture;
+    // shared_ptr (not unique): the render thread keeps a per-frame snapshot
+    // so the command thread can replace the device without freeing it from
+    // under a live frame.
+    std::shared_ptr<AudioCapture> m_audioCapture;
     std::unique_ptr<IRendererAdapter> m_adapter;
     std::thread m_renderThread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_recoveryNeeded{false};
+    // Recovery retry pacing (render-thread only, see RecoveryBackoff.hpp).
+    // m_recoveryDelayMs is the backoff ladder position, m_nextRecoveryAttempt
+    // the earliest time the next attempt may run.
+    int m_recoveryDelayMs = 0;
+    std::chrono::steady_clock::time_point m_nextRecoveryAttempt{};
 
     // ─── Dirty-frame gating & present telemetry (P16) ──────────────────
     // Set by frame adoption on the render thread and by IPC-thread
@@ -164,6 +177,17 @@ private:
     /// wallpaper behind a full-screen app, so we resume only what we
     /// paused ourselves (never a user-initiated pause).
     bool m_fullScreenPaused = false;
+    /// First sighting of the current full-screen episode (render-thread
+    /// only). A shell overlay that flashes fullscreen for a moment must not
+    /// freeze the wallpaper — the pause fires only after it persists.
+    std::chrono::steady_clock::time_point m_fullScreenSince{};
+    /// Position clock base (seconds). The Stopwatch restarts from zero on
+    /// every Start(), so pause/resume used to rewind the reported position
+    /// while the decoder kept its own PTS. The base is folded forward at
+    /// every pause and zeroed with m_currentPosition; position is always
+    /// base + stopwatch-elapsed. Atomic because the render thread folds it
+    /// while GetPosition() reads it under m_mutex.
+    std::atomic<double> m_positionBase{0.0};
 };
 
 } // namespace rex::wallpaper
