@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 #include <rex/wallpaper/IWallpaperEngine.hpp>
 
+#include <chrono>
+#include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace rex::wallpaper;
@@ -416,5 +419,123 @@ TEST(EngineTest, VideoScenePlayback) {
     engine->Stop();
 
     engine->UnloadScene();
+    engine->Shutdown();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Recovery Retry Policy
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Regression guard for the device-loss hot-spin: the render loop retried
+// recovery on the very next iteration with no delay and no re-arm, so a host
+// that could not be reacquired (Explorer still restarting) pinned the render
+// thread at 100% CPU and ran the %30/%120 housekeeping on every pass.
+
+#include "wallpaper/engine/RecoveryBackoff.hpp"
+
+TEST(RecoveryBackoffTest, FirstRetryIsDelayedNotImmediate) {
+    EXPECT_GT(rex::wallpaper::NextRecoveryDelayMs(0), 0);
+}
+
+TEST(RecoveryBackoffTest, DelayDoublesAfterEachFailure) {
+    const int first = rex::wallpaper::NextRecoveryDelayMs(0);
+    const int second = rex::wallpaper::NextRecoveryDelayMs(first);
+    EXPECT_GT(second, first);
+}
+
+TEST(RecoveryBackoffTest, DelayNeverExceedsCap) {
+    int delay = 0;
+    for (int i = 0; i < 50; ++i) {
+        delay = rex::wallpaper::NextRecoveryDelayMs(delay);
+    }
+    EXPECT_EQ(delay, rex::wallpaper::kMaxRecoveryDelayMs);
+}
+
+TEST(RecoveryBackoffTest, NonPositiveInputIsTreatedAsFirstFailure) {
+    EXPECT_EQ(rex::wallpaper::NextRecoveryDelayMs(-1),
+              rex::wallpaper::NextRecoveryDelayMs(0));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Playback-settings truth (P1-7 / R9)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// LOAD and device-loss recovery rebuild the video backend through LoadScene,
+// which restores knobs from the current scene — so the setters must keep the
+// scene in sync. Before the fix SetLoop/SetSpeed/SetMute wrote only side
+// members: a later recovery silently reverted them (notably: unmuted).
+// No Initialize needed — pure engine state, deterministic everywhere.
+
+TEST(PlaybackSettingsTest, SetLoopSyncsToCurrentScene) {
+    auto engine = CreateWallpaperEngine();
+    ASSERT_TRUE(engine->GetCurrentScene().loop);
+    EXPECT_TRUE(engine->SetLoop(false).IsSuccess());
+    EXPECT_FALSE(engine->GetCurrentScene().loop);
+    EXPECT_TRUE(engine->SetLoop(true).IsSuccess());
+    EXPECT_TRUE(engine->GetCurrentScene().loop);
+}
+
+TEST(PlaybackSettingsTest, SetSpeedSyncsToCurrentScene) {
+    auto engine = CreateWallpaperEngine();
+    EXPECT_TRUE(engine->SetSpeed(2.0f).IsSuccess());
+    EXPECT_FLOAT_EQ(engine->GetCurrentScene().speed, 2.0f);
+}
+
+TEST(PlaybackSettingsTest, SetMuteSyncsToCurrentScene) {
+    auto engine = CreateWallpaperEngine();
+    ASSERT_FALSE(engine->GetCurrentScene().muted);
+    EXPECT_TRUE(engine->SetMute(true).IsSuccess());
+    EXPECT_TRUE(engine->GetCurrentScene().muted);
+}
+
+TEST(PlaybackSettingsTest, SetVolumeSyncsToCurrentScene) {
+    auto engine = CreateWallpaperEngine();
+    EXPECT_TRUE(engine->SetVolume(0.3f).IsSuccess());
+    EXPECT_FLOAT_EQ(engine->GetCurrentScene().volume, 0.3f);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Static render-once (R2)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A static scene must present once (load arms the dirty flag) and then idle:
+// no per-frame presents until something changes. Before the fix the dirty
+// flag was only cleared in the video branch, so static scenes presented at
+// full loop rate forever.
+
+TEST(StaticRenderOnceTest, StaticScenePresentsOnceThenIdles) {
+    constexpr const char* kImage =
+        "C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg";
+    if (!std::filesystem::exists(kImage)) {
+        GTEST_SKIP() << "stock wallpaper image missing";
+    }
+    auto engine = CreateWallpaperEngine();
+    ASSERT_NE(engine, nullptr);
+    ASSERT_TRUE(engine->Initialize(WallpaperConfig{}).IsSuccess());
+
+    SceneInfo scene;
+    scene.id = "static_once";
+    scene.sourcePath = kImage;
+    scene.type = "static";
+    ASSERT_TRUE(engine->LoadScene(scene).IsSuccess());
+    ASSERT_TRUE(engine->Play().IsSuccess());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    EngineTelemetry t1{};
+    engine->GetTelemetry(t1);
+    if (t1.presentCount < 1) {
+        EXPECT_TRUE(engine->Stop().IsSuccess());
+        EXPECT_TRUE(engine->UnloadScene().IsSuccess());
+        engine->Shutdown();
+        GTEST_SKIP() << "no presents flow on this machine (headless?)";
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    EngineTelemetry t2{};
+    engine->GetTelemetry(t2);
+    EXPECT_EQ(t2.presentCount, t1.presentCount)
+        << "static scene keeps presenting with no changes (R2)";
+
+    EXPECT_TRUE(engine->Stop().IsSuccess());
+    EXPECT_TRUE(engine->UnloadScene().IsSuccess());
     engine->Shutdown();
 }

@@ -1503,6 +1503,11 @@ void Engine::RenderLoop() {
             m_renderer->RenderFrame();
             m_renderer->EndFrame();
 
+            // R2: whatever just presented is now on screen — disarm the
+            // dirty flag for every scene type, not just video. Without
+            // this, static scenes re-present at full loop rate forever.
+            m_frameDirty.store(false, std::memory_order_release);
+
             auto frameEnd = high_resolution_clock::now();
             double deltaMs = duration<double, std::milli>(
                 frameEnd - frameStart).count();
