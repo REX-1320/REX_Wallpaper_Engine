@@ -188,6 +188,18 @@ float4 main(VSOutput input) : SV_TARGET {
             rgb = PqToLinear(saturate(rgb)) / norm;
         }
         rgb = max(mul(rgb, BT2020_TO_BT709), 0.0);
+    } else if (extra.x > 0.5) {
+        // RGB video slot (P0-3: software-decode BGRA/RGBA16 pool): already
+        // RGB, skip the YUV matrix. Mirrors the static-RGBA branch above
+        // plus the P010 branch's transfer split (HLG vs PQ vs SDR).
+        float4 c = texY.Sample(sam, input.uv);
+        if (mode.y > 1.5) {
+            rgb = HlgToLinear(saturate(c.rgb)) / norm;
+        } else if (mode.y > 0.5) {
+            rgb = PqToLinear(saturate(c.rgb)) / norm;
+        } else {
+            rgb = SrgbToLinear(c.rgb);
+        }
     } else if (mode.y > 0.5) {
         float4 c = texY.Sample(sam, input.uv);
         rgb = PqToLinear(saturate(c.rgb)) / norm;
@@ -325,12 +337,16 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
         return qResult;
     }
 
-    // ── Command allocator + list ───────────────────────────────────────
-    m_commandAllocator = m_device.CreateCommandAllocator();
-    if (!m_commandAllocator) {
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "Failed to create command allocator");
+    // ── Frame-context ring (P0-4): one allocator per in-flight frame ──
+    for (UINT i = 0; i < graphics::kFrameContextCount; ++i) {
+        m_frameContexts[i].allocator = m_device.CreateCommandAllocator();
+        if (!m_frameContexts[i].allocator) {
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "Failed to create command allocator");
+        }
+        m_frameContexts[i].fenceValue = 0;
     }
+    m_frameNumber = 0;
 
     // ── Swap Chain ─────────────────────────────────────────────────────
     // --force-sdr: lock swapchain to SDR format before first frame
@@ -382,7 +398,7 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
 
     // ── Initialize command list ───────────────────────────────────────
     m_commandList = m_device.CreateCommandList(
-        m_commandAllocator.Get(), m_pipelineState.Get());
+        m_frameContexts[0].allocator.Get(), m_pipelineState.Get());
     if (!m_commandList) {
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Failed to create command list");
@@ -460,12 +476,16 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
     }
 
     // Skip local command queue — use the shared one.
-    // ── Command allocator + list ───────────────────────────────────────
-    m_commandAllocator = m_device.CreateCommandAllocator();
-    if (!m_commandAllocator) {
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "Failed to create command allocator");
+    // ── Frame-context ring (P0-4): one allocator per in-flight frame ──
+    for (UINT i = 0; i < graphics::kFrameContextCount; ++i) {
+        m_frameContexts[i].allocator = m_device.CreateCommandAllocator();
+        if (!m_frameContexts[i].allocator) {
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "Failed to create command allocator");
+        }
+        m_frameContexts[i].fenceValue = 0;
     }
+    m_frameNumber = 0;
 
     // ── Swap Chain ─────────────────────────────────────────────────────
     if (m_forceSdr) {
@@ -514,7 +534,7 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
 
     // ── Initialize command list ───────────────────────────────────────
     m_commandList = m_device.CreateCommandList(
-        m_commandAllocator.Get(), m_pipelineState.Get());
+        m_frameContexts[0].allocator.Get(), m_pipelineState.Get());
     if (!m_commandList) {
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Failed to create command list");
@@ -582,7 +602,11 @@ void D3D12Renderer::Shutdown() {
     m_rootSignature.Reset();
     m_srvHeap.Reset();
     m_commandList.Reset();
-    m_commandAllocator.Reset();
+    for (auto& ctx : m_frameContexts) {
+        ctx.allocator.Reset();
+        ctx.fenceValue = 0;
+    }
+    m_frameNumber = 0;
 
     // Shutdown shared primitives (order: swap chain → queue → device)
     m_swapChain.Shutdown();
@@ -603,6 +627,14 @@ void D3D12Renderer::Shutdown() {
 // ─── Texture Loading ──────────────────────────────────────────────────────
 
 shared::Result<void> D3D12Renderer::LoadTexture(std::string_view path) {
+    // R1: never lock the frame mutex on the frame owner thread inside a
+    // frame — std::mutex is non-recursive, so that self-deadlocks. Fail
+    // loudly; cross-thread callers still block normally for exclusion.
+    if (m_frameLock.IsReentrantCall()) {
+        return shared::Result<void>(shared::ErrorCode::InvalidState,
+                                    "LoadTexture called inside an open frame "
+                                    "on the frame owner thread");
+    }
     if (!m_initialized) {
         return shared::Result<void>(shared::ErrorCode::NotInitialized,
                                     "Renderer not initialized");
@@ -1100,14 +1132,37 @@ shared::Result<void> D3D12Renderer::AcquireCopyContext(
     return shared::Result<void>();
 }
 
-void D3D12Renderer::BeginFrame() {
+bool D3D12Renderer::BeginFrame() {
     m_renderMutex.lock();
+    // R1: arm the reentry detector while the frame lock is held; EndFrame
+    // (and the early-out below) disarm it before unlocking.
+    m_frameLock.EnterFrame();
 
     m_swapChain.WaitForFrame();
 
-    m_commandAllocator->Reset();
-    m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get());
+    // P0-4: reset only a context whose fence completed. With max frame
+    // latency 2 the ring always has a ready context absent a real GPU
+    // hitch; on a hitch wait bounded, then escalate to device-loss
+    // recovery instead of recycling in-flight command memory.
+    FrameContext& ctx = m_frameContexts[graphics::FrameContextIndex(
+        m_frameNumber, graphics::kFrameContextCount)];
+    if (!graphics::FrameContextReady(ctx.fenceValue,
+                                      ActiveQueue().GetCompletedValue())) {
+        constexpr DWORD kFrameFenceWaitMs = 2000;
+        if (!ActiveQueue().WaitForValue(ctx.fenceValue, kFrameFenceWaitMs)) {
+            REX_LOG_ERROR("D3D12", "Frame fence {} not reached in {} ms; "
+                                   "flagging device removed",
+                          ctx.fenceValue, kFrameFenceWaitMs);
+            m_deviceRemoved = true;
+            m_frameLock.ExitFrame();
+            m_renderMutex.unlock();
+            return false;
+        }
+    }
+    ctx.allocator->Reset();
+    m_commandList->Reset(ctx.allocator.Get(), m_pipelineState.Get());
     m_stateTracker.Reset();
+    return true;
 }
 
 void D3D12Renderer::RenderFrame() {
@@ -1278,7 +1333,13 @@ void D3D12Renderer::EndFrame() {
         }
     }
 
-    ActiveQueue().Signal();
+    // P0-4: tag the context whose allocator backs this frame's list, so
+    // the next wrap-around waits for it instead of resetting live memory.
+    m_frameContexts[graphics::FrameContextIndex(
+        m_frameNumber, graphics::kFrameContextCount)].fenceValue =
+            ActiveQueue().Signal();
+    ++m_frameNumber;
+    m_frameLock.ExitFrame();
     m_renderMutex.unlock();
 }
 

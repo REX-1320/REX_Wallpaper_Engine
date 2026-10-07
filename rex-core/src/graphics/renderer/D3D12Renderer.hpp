@@ -3,6 +3,8 @@
 #include "Device.hpp"
 #include "SwapChain.hpp"
 #include "CommandQueue.hpp"
+#include "FrameContextPolicy.hpp"
+#include "FrameLockPolicy.hpp"
 #include "DescriptorHeapManager.hpp"
 #include "ResourceStateTracker.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
@@ -123,7 +125,12 @@ public:
     void UpdateAudioSpectrum(const std::array<float, 32>& spectrum);
 
     // ─── Frame Rendering ────────────────────────────────────────────────
-    void BeginFrame();
+    /// Opens a frame: waits for a free frame context (P0-4) and resets
+    /// the command list against its allocator. Returns false when the
+    /// GPU did not release a context in time — the caller must skip
+    /// RenderFrame/EndFrame for this pass (the device is flagged removed
+    /// so recovery runs). Holds m_renderMutex until EndFrame.
+    bool BeginFrame();
     void RenderFrame();
     void EndFrame();
     void SetClearColor(float r, float g, float b);
@@ -180,8 +187,17 @@ private:
     graphics::CommandQueue* m_sharedQueue = nullptr; // non-owning; set when shared
     graphics::ResourceStateTracker m_stateTracker;
 
-    // ─── Per-frame command state ───────────────────────────────────────
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    m_commandAllocator;
+    // ─── Per-frame command state (P0-4 / R17) ──────────────────────────
+    // One allocator per in-flight frame: an allocator is Reset() only
+    // after its fence value completed (see FrameContextPolicy). The single
+    // command list is re-associated with the current context's allocator
+    // in BeginFrame.
+    struct FrameContext {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+        UINT64 fenceValue = 0;  // queue fence signaled after this ctx's work
+    };
+    FrameContext m_frameContexts[graphics::kFrameContextCount];
+    UINT64 m_frameNumber = 0;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
 
     // ─── Pipeline state ────────────────────────────────────────────────
@@ -277,6 +293,11 @@ private:
 
     // ─── Thread safety ────────────────────────────────────────────────
     mutable std::mutex m_renderMutex;
+    // R1: same-thread reentry detector for the frame window. BeginFrame
+    // arms it (after locking), EndFrame disarms it (before unlocking);
+    // LoadTexture refuses with an error instead of self-deadlocking when
+    // called on the frame owner thread inside a frame.
+    FrameLockPolicy m_frameLock;
 
     /// Returns the command queue used for GPU submissions: the shared
     /// queue when compositing, or the local queue for the main renderer.

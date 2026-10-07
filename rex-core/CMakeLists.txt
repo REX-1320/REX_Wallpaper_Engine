@@ -372,6 +372,10 @@ if(BUILD_TESTING)
         tests/wallpaper/test_resource_state_tracker.cpp
         tests/wallpaper/test_client_surface.cpp
         tests/wallpaper/test_display_topology.cpp
+        tests/wallpaper/test_decoder_pool.cpp
+        tests/wallpaper/test_frame_context.cpp
+        tests/wallpaper/test_decoder_lifetime.cpp
+        tests/wallpaper/test_hot_reload_guard.cpp
         ${PLATFORM_WINDOWS_SOURCES}
         ${WALLPAPER_SOURCES}
         ${GRAPHICS_SOURCES}

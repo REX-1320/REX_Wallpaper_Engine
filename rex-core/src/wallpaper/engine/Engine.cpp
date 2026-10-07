@@ -431,9 +431,9 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
                 m_playing = false;
                 return videoResult;
             } else {
-                // Apply scene-level playback settings immediately.
-                m_videoManager->SetLoop(scene.loop);
-                m_videoManager->SetSpeed(std::clamp(scene.speed, 0.25f, 4.0f));
+                // Apply scene-level playback settings immediately (all four
+                // knobs in one path — P1-7).
+                ApplyPlaybackSettings();
                 // Adaptive resolution: pick the stream that best fits the
                 // target monitor. A stream switch may rebuild the pool with
                 // new NT handles; the ClearVideoFrame() below drops the
@@ -767,6 +767,7 @@ shared::Result<void> Engine::SetVolume(float value) {
 shared::Result<void> Engine::SetMute(bool mute) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_muted = mute;
+    m_currentScene.muted = mute;
     if (m_videoManager) {
         m_videoManager->SetMute(mute);
     }
@@ -777,6 +778,7 @@ shared::Result<void> Engine::SetMute(bool mute) {
 shared::Result<void> Engine::SetLoop(bool loop) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_loop = loop;
+    m_currentScene.loop = loop;
     if (m_videoManager) {
         m_videoManager->SetLoop(loop);
     }
@@ -787,11 +789,28 @@ shared::Result<void> Engine::SetLoop(bool loop) {
 shared::Result<void> Engine::SetSpeed(float speed) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_speed = std::clamp(speed, 0.25f, 4.0f);
+    m_currentScene.speed = m_speed.load();
     if (m_videoManager) {
         m_videoManager->SetSpeed(m_speed.load());
     }
     REX_LOG_DEBUG("Engine", "Speed set to {:.2f}", m_speed.load());
     return shared::Result<void>();
+}
+
+// P1-7: single path restoring ALL playback knobs (loop/speed/volume/mute)
+// from the current scene. LoadScene AND device-loss recovery funnel through
+// here — previously only loop+speed were pushed, so every LOAD and every
+// recovery dropped volume and unmuted.
+void Engine::ApplyPlaybackSettings() {
+    if (!m_videoManager) return;
+    m_videoManager->SetLoop(m_currentScene.loop);
+    m_videoManager->SetSpeed(std::clamp(m_currentScene.speed, 0.25f, 4.0f));
+    m_videoManager->SetVolume(m_currentScene.volume);
+    m_videoManager->SetMute(m_currentScene.muted);
+    REX_LOG_DEBUG("Engine", "Playback settings pushed: loop={} speed={:.2f} "
+                            "volume={:.2f} mute={}",
+                  m_currentScene.loop, m_currentScene.speed,
+                  m_currentScene.volume, m_currentScene.muted);
 }
 
 // ─── Renderer Adapter ────────────────────────────────────────────────────
@@ -1405,13 +1424,46 @@ void Engine::RenderLoop() {
                 if (pending && !(pending->valid)) pending = nullptr;
             }
 
+            // ── Hot-reload: detect static image changes ──────────────
+            // R1: this MUST run outside BeginFrame/EndFrame — LoadTexture
+            // takes m_renderMutex, which BeginFrame holds for the whole
+            // frame (same-thread reentry used to self-deadlock). It also
+            // runs before the dirty gate so static scenes (which usually
+            // early-continue below) actually pick up file changes (R19).
+            if (m_state == EngineState::Running
+                && !renderHotReloadPath.empty()
+                && m_frameCount % 60 == 0) {
+                std::error_code ec;
+                auto lastWrite = std::filesystem::last_write_time(renderHotReloadPath, ec);
+                if (!ec && lastWrite != renderHotReloadLastWrite) {
+                    if (m_renderer->LoadTexture(renderHotReloadPath).IsSuccess()) {
+                        // Publish the new timestamp under the lock so the
+                        // LoadScene seed and this writer never race.
+                        std::lock_guard<std::mutex> stampLock(m_mutex);
+                        m_hotReloadLastWrite = lastWrite;
+                        REX_LOG_INFO("Engine", "Hot-reloaded static image: {}",
+                                     renderHotReloadPath);
+                        // New pixels: make sure the next pass presents them
+                        // even when nothing else armed the dirty flag.
+                        m_frameDirty.store(true, std::memory_order_release);
+                    }
+                }
+            }
+
             if (!pending && !m_frameDirty.load(std::memory_order_acquire)) {
                 m_frameCount++;              // keep %30/%120 housekeeping alive
                 PaceLoop(frameStart);
                 continue;
             }
 
-            m_renderer->BeginFrame();
+            // P0-4: a false return means the GPU did not release a frame
+            // context in time (device flagged removed) — skip this pass so
+            // nothing is recorded into a stale list; recovery runs next.
+            if (!m_renderer->BeginFrame()) {
+                m_frameCount++;
+                PaceLoop(frameStart);
+                continue;
+            }
 
             if (pending && m_renderer) {
                 m_renderer->DrawVideoFrame(*pending,
@@ -1436,24 +1488,6 @@ void Engine::RenderLoop() {
                 }
             } else {
                 m_darkCleared = false;
-            }
-
-            // ── Hot-reload: detect static image changes ──────────────
-            if (m_state == EngineState::Running
-                && !renderHotReloadPath.empty()
-                && m_frameCount % 60 == 0) {
-                std::error_code ec;
-                auto lastWrite = std::filesystem::last_write_time(renderHotReloadPath, ec);
-                if (!ec && lastWrite != renderHotReloadLastWrite) {
-                    if (m_renderer->LoadTexture(renderHotReloadPath).IsSuccess()) {
-                        // Publish the new timestamp under the lock so the
-                        // LoadScene seed and this writer never race.
-                        std::lock_guard<std::mutex> stampLock(m_mutex);
-                        m_hotReloadLastWrite = lastWrite;
-                        REX_LOG_INFO("Engine", "Hot-reloaded static image: {}",
-                                     renderHotReloadPath);
-                    }
-                }
             }
 
             // Feed audio spectrum to renderer (zeroed if no audio capture).
