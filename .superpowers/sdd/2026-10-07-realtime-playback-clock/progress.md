@@ -19,3 +19,8 @@
 ## Task 2 (Phase 0 R2) — complete
 - Commit: fix(engine): R2 static render-once (786570b). Tests: StaticRenderOnceTest RED (91 -> 180 presents in 1.5 s idle, no changes) then GREEN (frozen); full suite: same 2 pre-existing fixture failures, nothing new. Live: CLI static 0.33 s CPU / 20 s idle; touch -> Hot-reloaded + single re-present; no hang.
 - Note for reviewer: static scenes no longer get per-pass audio-spectrum feeds while idling (spectrum block sits after the gate). P2-16 owns spectrum-outside-gate separately; no static+visualizer feature exists today — cost if wrong: a future audio-reactive static wallpaper would freeze its visualization (would need P2-16 first).
+
+## Task 3 (Phase 1 telemetry) — complete
+- Commit: feat(telemetry) Phase 1 (2120200). Tests: StageTelemetryTest 3/3 GREEN (RED was C2039 on missing members); full suite: same 2 pre-existing fixture failures. Live Case B on AV1 4K60: source 59.94, decode/convert/render/present ~32.6, schedulerDrops 3, queueDepth 0, repeatedFrames 0, displayHz 160, decodeMsP50 0.43ms — matches expectations (decode is the ceiling; drops appear in Phases 2-3).
+- Ruling: staged-semantics as pre-flighted — schedulerDrops = legacy decoded-minus-consumed until Phase 2 PTS-honest counting; presentFps measured (not renderFps copy) so it stays honest for static scenes too; convertFps counted controller-side (DecodeFrame-ok + published) with no decoder change — cost if wrong: none, Phase 2/3 upgrade in place.
+- Incident: concurrent session rewrote test_video_pipeline.cpp mid-task (appended StageTelemetry tests lost once; impl edits intact) — re-appended, rebuilt, verified tests present in binary via --gtest_list_tests. Commit message notes it. Lesson: commit promptly; test files are shared ground.
