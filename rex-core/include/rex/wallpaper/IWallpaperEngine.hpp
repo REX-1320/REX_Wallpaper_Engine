@@ -130,6 +130,7 @@ struct EngineTelemetry {
     uint64_t repeatedFrames = 0;    // re-presents of the same frame (Phase 3)
     uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
     int      displayHz      = 0;    // current monitor refresh rate (0 = unknown)
+    double   pacingMs       = 0.0;  // live decode-pacing interval
     int      videoWidth      = 0;
     int      videoHeight     = 0;
     uint64_t ringSlotCount   = 0;

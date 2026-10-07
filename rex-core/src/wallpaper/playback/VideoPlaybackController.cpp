@@ -1,6 +1,7 @@
 #include "wallpaper/playback/VideoPlaybackController.hpp"
 
 #include <shared/Logger.hpp>
+#include <shared/PreciseSleep.hpp>
 
 #include <chrono>
 
@@ -277,9 +278,6 @@ const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
     // the render loop past the first loop and explodes the drop counter.
     const double wrapped = WrapTarget(
         targetPts, m_duration, m_looping.load(std::memory_order_relaxed));
-    // The wall target is the playback clock (Phase 2): the decode thread
-    // parks against it instead of pacing to the source rate.
-    m_lastWallTarget.store(wrapped, std::memory_order_relaxed);
     const VideoFrame* frame = m_scheduler.Tick(wrapped);
     if (frame) {
         m_consumerFrameCount++;
@@ -319,6 +317,7 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     t.convertFps = secs > 0.0 ? static_cast<double>(m_convertFrameCount) / secs : 0.0;
     t.schedulerDrops = m_framesDropped.load(std::memory_order_relaxed);
     t.queueDepth = m_scheduler.PendingCount();
+    t.pacingMs = m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
     t.ringSlotCount = m_scheduler.GetNumSlots();
     t.ringBytes = static_cast<uint64_t>(m_width) * static_cast<uint64_t>(m_height) *
                   4 * m_scheduler.GetNumSlots();
@@ -353,6 +352,7 @@ void VideoPlaybackController::DecoderThread() {
         VideoFrame frame;
         bool ok = false;
         bool looping = true;
+        const auto t0 = Clock::now();
         {
             std::lock_guard lock(m_decodeMutex);
             auto decoder = m_decoder;
@@ -399,15 +399,28 @@ void VideoPlaybackController::DecoderThread() {
             m_lastFrame.frameIndex = frame.frameIndex;
         }
 
-        // Clock separation (Phase 2): decode flat-out so the freshest
-        // frame is always available; park only when safely ahead of the
-        // wall target (pause/stall backstop) instead of pacing to the
-        // source rate. A decode shortfall now costs frames, never time.
-        // (Speed scaling of the wall target itself lands in Phase 4.)
-        const double ahead = m_position.load(std::memory_order_relaxed)
-                           - m_lastWallTarget.load(std::memory_order_relaxed);
-        if (ahead > kMaxDecodeAheadSec) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Decode pacing (Phase 2 revised): throttle to the source frame
+        // rate (speed-scaled) so the 8-slot ring always holds frames near
+        // the wall target. Paced decode keeps the lead at ~1 frame; a
+        // decode shortfall (AV1 33 < 60) still costs frames, and Phase 3
+        // re-presents at wall cadence so time stays 1x. The queue-depth
+        // park below covers post-hitch bursts. (Full wall-rate scaling
+        // of the timeline lands in Phase 4.)
+        //
+        // The wait MUST be PreciseSleepUntil, not sleep_for: plain sleeps
+        // quantize to the 15.6 ms Windows quantum, so a 16.7 ms pace wakes
+        // after ~31 ms and EVERY 60 fps source decodes at ~32 fps (proven
+        // live 2026-10-07: pacingMs 16.67 + decodeMsP50 0.5 ms yet
+        // decoderFps stuck at 33.0). The high-res waitable timer is
+        // immune to the quantum.
+        const double intervalMs =
+            m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
+        rex::shared::PreciseSleepUntil(
+            t0 + std::chrono::duration<double, std::milli>(intervalMs));
+        // Queue-depth backstop: after a hitch the decoder bursts; park
+        // when the ring is nearly full instead of churning overwrites.
+        if (m_scheduler.PendingCount() >= FrameScheduler::kNumSlots - 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
 }

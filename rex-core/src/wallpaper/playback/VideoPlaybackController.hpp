@@ -40,6 +40,8 @@ struct VideoPlaybackTelemetry {
                                     // (Phase 1 semantics: decoded-minus-
                                     // consumed; PTS-honest counting in Phase 2)
     uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
+    double   pacingMs       = 0.0;  // live decode-pacing interval (Phase 2
+                                    // debug: m_frameIntervalMs / m_speed)
     double   uploadLatencyMs = 0.0;
     // P13 per-stage percentiles (see DecoderDiagnostics).
     double   decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
@@ -124,13 +126,20 @@ public:
 
     VideoPlaybackTelemetry GetTelemetry() const;
 
-    /// Discontinuity rule (P1-5 / R10): a frame whose PTS runs strictly
-    /// backward vs the last published one means the decoder seeked
-    /// internally (loop wrap) — the scheduler must be cleared so the
-    /// pre-seek frame is never presented. Equal PTS (frame repeats) is
-    /// NOT a seek and must not clear.
+    /// Discontinuity rule (P1-5 / R10, Phase 2 refinement): a frame whose
+    /// PTS runs strictly backward vs the last published one means the
+    /// decoder seeked internally (loop wrap) — the scheduler must be
+    /// cleared so the pre-seek frame is never presented. Equal PTS
+    /// (frame repeats) is NOT a seek and must not clear. NEITHER is
+    /// ordinary B-frame reorder jitter: decode-order PTS steps backward
+    /// by a frame or two on every B-frame (proven via packet trace:
+    /// 0.033 -> 0.016 -> 0.066 -> 0.050 ...), so only a backward jump
+    /// that is large (> 1 s) or lands at stream start (~0) counts.
     static bool IsBackwardJump(double lastPts, double framePts) {
-        return framePts < lastPts;
+        if (!(framePts < lastPts)) {
+            return false;
+        }
+        return (lastPts - framePts > 1.0) || (framePts <= 1e-9);
     }
 
     /// Loop-relative wall target (Phase 2): a looping decoder wraps its
@@ -188,12 +197,6 @@ private:
     std::atomic<bool> m_looping{true};
     std::atomic<float> m_speed{1.0f};
     std::atomic<double> m_position{0.0};
-    // Last wall-clock target handed to Tick (Phase 2: the playback
-    // clock). The decode thread parks against it; render-thread written,
-    // decode-thread read — hence atomic.
-    std::atomic<double> m_lastWallTarget{0.0};
-    // Decode-ahead park threshold in seconds (Phase 2).
-    static constexpr double kMaxDecodeAheadSec = 0.5;
 
     double m_duration  = 0.0;
     double m_frameRate = 30.0;

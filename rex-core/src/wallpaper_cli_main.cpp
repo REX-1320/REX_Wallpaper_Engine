@@ -7,6 +7,9 @@
 
 #include "wallpaper/runtime/Json.hpp"
 #include "wallpaper/runtime/ClientSurface.hpp"
+#include "wallpaper/runtime/FrameProtocol.hpp"
+#include "wallpaper/runtime/RuntimeGuard.hpp"
+#include "wallpaper/runtime/SafePath.hpp"
 #include <cstdlib>
 #include <csignal>
 #include <filesystem>
@@ -79,9 +82,16 @@ static std::string WidenToUtf8(const std::wstring& wide) {
 
 static std::wstring Utf8ToWiden(const std::string& utf8) {
     if (utf8.empty()) return {};
-    int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (utf8.size() > 32767u * 4) return {};  // cannot widen to a valid path
+    int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                   utf8.c_str(), -1, nullptr, 0);
+    // P2-17: invalid sequences (or empty result) fail loudly instead of
+    // substituting U+FFFD — and size <= 0 must never reach the allocation
+    // below (size - 1 would wrap to a gigantic wstring → terminate).
+    if (size <= 1) return {};
     std::wstring wide(static_cast<size_t>(size - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, wide.data(), size);
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                        utf8.c_str(), -1, wide.data(), size);
     return wide;
 }
 
@@ -500,15 +510,23 @@ static void WriteFrame(const std::string& frame) {
     WriteExact(out, frame.data(), len);
 }
 
-static bool ReadFrame(std::string& out) {
+// P2-17: tri-state read. Zero/oversized prefixes are malformed input, not
+// EOF — the dispatcher answers `malformed frame` and continues instead of
+// tearing the session down. Only a closed/truncated stream ends the loop.
+enum class ReadFrameResult { Ok, Eof, Malformed };
+
+static ReadFrameResult ReadFrame(std::string& out) {
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
-    if (in == INVALID_HANDLE_VALUE || in == nullptr) return false;
+    if (in == INVALID_HANDLE_VALUE || in == nullptr) return ReadFrameResult::Eof;
     uint32_t len = 0;
-    if (!ReadExact(in, &len, 4)) return false;
-    if (len == 0 || len > (16u * 1024u * 1024u)) return false;
+    if (!ReadExact(in, &len, 4)) return ReadFrameResult::Eof;
+    if (rex::wallpaper::ClassifyFrameLength(len) !=
+        rex::wallpaper::FrameLengthVerdict::Ok) {
+        return ReadFrameResult::Malformed;
+    }
     out.assign(static_cast<size_t>(len), '\0');
-    if (!ReadExact(in, out.data(), len)) return false;
-    return true;
+    if (!ReadExact(in, out.data(), len)) return ReadFrameResult::Eof;
+    return ReadFrameResult::Ok;
 }
 
 static json::Json Obj(std::initializer_list<std::pair<const char*, json::Json>> items) {
@@ -661,6 +679,17 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
     REX_LOG_INFO("Runtime", "Wallpaper runtime started (maxFps={}, hwAccel={})",
                  maxFps, hardwareAcceleration);
 
+    // P3-G5: refuse a second concurrent runtime — two processes fight over
+    // the WorkerW layer (verified: startup/shutdown of one silently kills
+    // the other). Fail fast and loudly instead.
+    const rex::wallpaper::RuntimeInstanceGuard instanceGuard;
+    if (!instanceGuard.IsOwner()) {
+        REX_LOG_ERROR("Runtime", "another wallpaper runtime already owns the "
+                                 "desktop layer; refusing to start");
+        std::fprintf(stderr, "REX: another wallpaper runtime is already running\n");
+        return 3;
+    }
+
     std::shared_ptr<IWallpaperEngine> engine;
     std::mutex engineGuard;   // guards engine assignment vs the FRAME_READY poller
     WallpaperConfig config;
@@ -684,7 +713,15 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
     std::thread telemetryThread;
 
     std::string frame;
-    while (ReadFrame(frame)) {
+    while (true) {
+        const ReadFrameResult fr = ReadFrame(frame);
+        if (fr == ReadFrameResult::Eof) break;
+        if (fr == ReadFrameResult::Malformed) {
+            // P2-17: protocol violation, not death — answer and continue.
+            REX_LOG_WARN("Runtime", "Malformed length prefix; continuing");
+            WriteResponse(0, false, "malformed frame");
+            continue;
+        }
         auto parsed = json::Json::Parse(frame);
         if (!parsed) {
             REX_LOG_WARN("Runtime", "Malformed frame: {}", frame.c_str());
@@ -725,7 +762,16 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                 WriteResponse(id, false, "already initialized");
                 continue;
             }
-            config.maxFps = params["maxFps"].AsInt(config.maxFps);
+            // P3-G5: protocol handshake. Absent version = pre-handshake
+            // host, accepted; a mismatch fails loudly instead of running
+            // on silent defaults.
+            if (params.Has("protocolVersion") &&
+                !rex::wallpaper::IsSupportedProtocolVersion(
+                    params["protocolVersion"].AsInt(0))) {
+                WriteResponse(id, false, "protocol version mismatch");
+                continue;
+            }
+            config.maxFps = std::clamp(params["maxFps"].AsInt(config.maxFps), 0, 240);
             config.enableHardwareAcceleration =
                 params["hardwareAcceleration"].AsBool(config.enableHardwareAcceleration);
             // Fullscreen auto-pause knob (default on). Exposed so tests and
@@ -792,7 +838,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                 WriteResponse(id, false, "LOAD requires a 'path'");
                 continue;
             }
-            if (!std::filesystem::exists(Utf8ToWiden(path))) {
+            if (!rex::wallpaper::SafeExists(Utf8ToWiden(path))) {
                 WriteResponse(id, false, "file not found: " + path);
                 continue;
             }
@@ -1160,6 +1206,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("presentFps", json::Json(t.presentFps));
             tel.emplace("repeatedFrames", json::Json(static_cast<double>(t.repeatedFrames)));
             tel.emplace("queueDepth", json::Json(static_cast<double>(t.queueDepth)));
+            tel.emplace("pacingMs", json::Json(t.pacingMs));
             tel.emplace("displayHz", json::Json(t.displayHz));
             tel.emplace("decodeMsP50", json::Json(t.decodeMsP50));
             tel.emplace("decodeMsP95", json::Json(t.decodeMsP95));
@@ -1323,7 +1370,7 @@ static int RunBenchmark(const BenchFlags& flags) {
         std::cerr << "REX: --benchmark requires --file <video>\n";
         return 2;
     }
-    if (!std::filesystem::exists(flags.file)) {
+    if (!rex::wallpaper::SafeExists(flags.file)) {
         std::cerr << "REX: benchmark file not found: "
                   << WidenToUtf8(flags.file) << "\n";
         return 2;
@@ -2310,7 +2357,7 @@ int wmain(int argc, wchar_t** argv) {
         std::cerr << "REX: --file <path> is required\n";
         return 2;
     }
-    if (!std::filesystem::exists(file)) {
+    if (!rex::wallpaper::SafeExists(file)) {
         std::cerr << "REX: file not found\n";
         return 2;
     }

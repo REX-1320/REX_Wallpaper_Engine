@@ -80,7 +80,16 @@ What lands: `sourceFps` (stream), `decodedFps` (decoder thread rate), `convertFp
 - [ ] **Step 4: Verify live (the §18 question, AV1 4K60)** — Expected Case B printout: source 59.94, decode≈convert≈render≈present≈33, schedulerDrops≈0 (nothing to skip when decode is the ceiling — drops appear in Phase 2+3 when presentation outruns decode), `displayHz` = real monitor rate (160 per WMI — confirm via DXGI).
 - [ ] **Step 5: Commit** `feat(telemetry): per-stage fps, drops, displayHz`
 
-### Phase 2, Task 4: PTS scheduler + flat-out decode (clock separation, §§5,8–9)
+### Phase 2, Task 4: PTS scheduler + accurate paced decode (clock separation, §§5,8–9)
+
+> PROVEN LIVE 2026-10-07: the ~33 fps lock on all 60 fps content was
+> Windows sleep quantization (sleep_for(16.7 ms) wakes after ~31 ms),
+> NOT decoder throughput. Shipped: source-rate pacing via
+> shared::PreciseSleepUntil + PTS-due selection + loop-relative target +
+> queue-depth park + B-frame-tolerant IsBackwardJump. Do NOT reintroduce:
+> flat-out decode (starves an 8-slot ring: 219 presents/75 s, drops
+> > 1.5M) or naive PTS comparison across loop-phase drift. AV1 4K60
+> refutes any VCN-ceiling theory: 59.1 fps, decodeMsP50 0.3 ms.
 
 **Files:**
 - Modify: `rex-core/src/wallpaper/playback/FrameScheduler.{hpp,cpp}` (`Tick(targetPts)`: newest valid frame with `pts <= targetPts + 8 ms`; skipped + overwritten-unseen counted; `GetDroppedCount()`; `Clear` re-baselines)

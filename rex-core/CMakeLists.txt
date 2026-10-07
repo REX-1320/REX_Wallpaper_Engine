@@ -297,6 +297,7 @@ if(BUILD_TESTING)
     # Core component tests (compositor, IPC, sandbox, desktop host)
     add_executable(rex-core-tests
         tests/test_compositor.cpp
+        tests/test_precise_sleep.cpp
         tests/test_ipc.cpp
         tests/test_sandbox.cpp
         tests/test_desktop_host.cpp
@@ -377,6 +378,10 @@ if(BUILD_TESTING)
         tests/wallpaper/test_decoder_lifetime.cpp
         tests/wallpaper/test_decoder_eof.cpp
         tests/wallpaper/test_audio_resample.cpp
+        tests/wallpaper/test_cadence.cpp
+        tests/wallpaper/test_protocol_safety.cpp
+        tests/wallpaper/test_runtime_guard.cpp
+        tests/wallpaper/test_power_policy.cpp
         ${PLATFORM_WINDOWS_SOURCES}
         ${WALLPAPER_SOURCES}
         ${GRAPHICS_SOURCES}
