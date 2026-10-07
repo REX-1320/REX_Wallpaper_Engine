@@ -47,12 +47,31 @@ public:
     /// or nullptr if nothing new arrived. Never blocks.
     const VideoFrame* Tick(double targetPts);
 
+    /// Drop any unpublished frame (P1-5 / R10). Called on seek, loop wrap
+    /// and recovery resume so a pre-seek frame is never presented: after
+    /// Clear, Tick returns nullptr until the next Push. Safe from any
+    /// thread (Seek/command thread, decode thread); the consumer stays
+    /// lock-free.
+    void Clear();
+
     size_t GetNumSlots() const { return kNumSlots; }
+
+    /// Published-but-unconsumed frame count now (Phase 1 queue depth).
+    /// Clamped to the ring size: anything older was overwritten unseen.
+    size_t PendingCount() const {
+        const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
+        const uint64_t lc = m_lastConsumedWrite.load(std::memory_order_acquire);
+        if (wc <= lc) return 0;
+        const uint64_t pending = wc - lc;
+        return static_cast<size_t>(pending > kNumSlots ? kNumSlots : pending);
+    }
 
 private:
     std::array<VideoFrame, kNumSlots> m_slots{};
     std::atomic<uint64_t> m_writeCount{0};
-    uint64_t m_lastConsumedWrite = 0;  // consumer-local
+    // Last consumed write. Written by the consumer in Tick AND by Clear
+    // from other threads — hence atomic (was consumer-local plain uint64).
+    std::atomic<uint64_t> m_lastConsumedWrite{0};
 };
 
 } // namespace rex::wallpaper

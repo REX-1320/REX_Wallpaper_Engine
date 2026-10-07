@@ -2,6 +2,8 @@
 
 #include "graphics/renderer/Device.hpp"
 
+#include <rex/wallpaper/IWallpaperEngine.hpp>
+
 #include <gtest/gtest.h>
 
 #include <windows.h>
@@ -112,6 +114,117 @@ TEST(VideoPipeline, HardwareDecodeProducesSharedFrames) {
     vm.Stop();
     vm.Close();
     vm.Shutdown();
+}
+
+// In-repo long fixture (60 s — no loop wrap interferes with the Stop
+// measurement); override via REX_TEST_VIDEO_LONG.
+std::string FindLongTestVideo() {
+    if (const char* env = std::getenv("REX_TEST_VIDEO_LONG")) {
+        if (*env && std::filesystem::exists(env)) return env;
+    }
+    const std::string repoFixture =
+        "D:/REX_doc/bench-media/cadence_1080p_60s.mp4";
+    if (std::filesystem::exists(repoFixture)) return repoFixture;
+    return std::string();
+}
+
+TEST(StopTimelineTest, StopRestartsPlaybackFromZero) {
+    // P1-6 / R8: Stop must reset the whole A/V timeline (decoder seek 0 +
+    // audio 0 + scheduler clear + position 0). Before the fix the decoder
+    // kept its PTS, so Stop -> Play resumed video mid-stream while audio
+    // restarted at 0.
+    const std::string path = FindLongTestVideo();
+    if (path.empty()) {
+        GTEST_SKIP() << "no long test video (set REX_TEST_VIDEO_LONG)";
+    }
+
+    rex::graphics::Device d3d12;
+    if (d3d12.Initialize().IsError()) {
+        GTEST_SKIP() << "D3D12 device unavailable";
+    }
+
+    WallpaperConfig config;
+    config.enableHardwareAcceleration = false;  // deterministic SW path
+
+    VideoManager vm;
+    if (vm.Initialize(config, d3d12.Get()).IsError()) {
+        GTEST_SKIP() << "VideoManager init unavailable";
+    }
+    ASSERT_TRUE(vm.OpenVideo(path).IsSuccess());
+
+    vm.Play();
+    // Play ~2 s so a non-reset decoder would be clearly mid-stream.
+    const VideoFrame* pre = nullptr;
+    for (int i = 0; i < 600 && vm.GetPosition() < 2.0; ++i) {
+        const VideoFrame* f = vm.Tick(0.0);
+        if (f && f->valid) pre = f;
+        Sleep(16);
+    }
+    ASSERT_NE(pre, nullptr) << "no frames decoded before Stop";
+    EXPECT_GE(vm.GetPosition(), 1.5);
+
+    vm.Stop();
+    EXPECT_EQ(vm.GetPosition(), 0.0);
+
+    vm.Play();
+    // First valid frame after Stop -> Play must come from ~0, not from
+    // where the decoder was (~2 s). Margin 1.0 s separates reset (<0.5
+    // typical) from resume (>1.5).
+    const VideoFrame* post = nullptr;
+    for (int i = 0; i < 600; ++i) {
+        const VideoFrame* f = vm.Tick(0.0);
+        if (f && f->valid) {
+            post = f;
+            break;
+        }
+        Sleep(16);
+    }
+    ASSERT_NE(post, nullptr) << "no frames decoded after Stop -> Play";
+    EXPECT_LT(post->pts, 1.0) << "decoder was not rewound by Stop";
+
+    vm.Stop();
+    vm.Close();
+    vm.Shutdown();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-stage telemetry contract (Phase 1)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The §18 question (is the ~33 fps ceiling in decode, convert, scheduler
+// or present?) needs separate counters per stage. These tests pin the
+// contract: the fields exist, default to zero, and displayHz reports the
+// real monitor rate.
+
+TEST(StageTelemetryTest, PlaybackTelemetryHasStageFieldsDefaultZero) {
+    VideoPlaybackTelemetry t;
+    EXPECT_DOUBLE_EQ(t.sourceFps, 0.0);
+    EXPECT_DOUBLE_EQ(t.convertFps, 0.0);
+    EXPECT_EQ(t.schedulerDrops, 0ULL);
+}
+
+TEST(StageTelemetryTest, EngineTelemetryHasStageFieldsDefaultZero) {
+    EngineTelemetry t;
+    EXPECT_DOUBLE_EQ(t.sourceFps, 0.0);
+    EXPECT_DOUBLE_EQ(t.convertFps, 0.0);
+    EXPECT_EQ(t.schedulerDrops, 0ULL);
+    EXPECT_DOUBLE_EQ(t.presentFps, 0.0);
+    EXPECT_EQ(t.repeatedFrames, 0ULL);
+    EXPECT_EQ(t.queueDepth, 0ULL);
+    EXPECT_EQ(t.displayHz, 0);
+}
+
+TEST(StageTelemetryTest, PrimaryMonitorReportsRefreshRate) {
+    auto engine = CreateWallpaperEngine();
+    ASSERT_NE(engine, nullptr);
+    bool sawMonitor = false;
+    for (const auto& m : engine->EnumerateMonitors()) {
+        sawMonitor = true;
+        if (m.isPrimary) {
+            EXPECT_GT(m.refreshHz, 0) << "primary monitor has no refresh rate";
+        }
+    }
+    EXPECT_TRUE(sawMonitor) << "no monitors enumerated";
 }
 
 } // namespace

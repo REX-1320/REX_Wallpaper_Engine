@@ -32,6 +32,13 @@ struct VideoPlaybackTelemetry {
     uint64_t cpuToGpuCopies  = 0;
     double   decoderFps      = 0.0;
     double   renderFps       = 0.0;
+    // ─── Per-stage diagnostics (Phase 1) ──────────────────────────────
+    double   sourceFps      = 0.0;  // stream frame rate (decoder-reported)
+    double   convertFps     = 0.0;  // ConvertAndSignal+publish rate, same window
+    uint64_t schedulerDrops = 0;    // frames skipped between decode & consume
+                                    // (Phase 1 semantics: decoded-minus-
+                                    // consumed; PTS-honest counting in Phase 2)
+    uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
     double   uploadLatencyMs = 0.0;
     // P13 per-stage percentiles (see DecoderDiagnostics).
     double   decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
@@ -116,14 +123,43 @@ public:
 
     VideoPlaybackTelemetry GetTelemetry() const;
 
+    /// Discontinuity rule (P1-5 / R10): a frame whose PTS runs strictly
+    /// backward vs the last published one means the decoder seeked
+    /// internally (loop wrap) — the scheduler must be cleared so the
+    /// pre-seek frame is never presented. Equal PTS (frame repeats) is
+    /// NOT a seek and must not clear.
+    static bool IsBackwardJump(double lastPts, double framePts) {
+        return framePts < lastPts;
+    }
+
 private:
     void DecoderThread();
 
-    std::unique_ptr<FfmpegVideoDecoder> m_decoder;
-    std::unique_ptr<AudioPlayer> m_audio;
+    // ─── Owned workers (P1-8 / R15: single ownership mechanism) ──────
+    // shared_ptr snapshots: every accessor copies under m_decodeMutex and
+    // uses the copy, so Close() resetting the members can never
+    // use-after-free a concurrent Seek/DecodeFrame/GetSlotHandle. The mutex
+    // still serializes MUTATION (Seek vs DecodeFrame on one decoder).
+    std::shared_ptr<FfmpegVideoDecoder> m_decoder;
+    std::shared_ptr<AudioPlayer> m_audio;
     FrameScheduler m_scheduler;
 
-    std::mutex m_decodeMutex;  // serializes DecodeFrame vs Seek
+    mutable std::mutex m_decodeMutex;  // serializes mutation; snapshots lifetime
+
+    // P1-9: leaf mutex guarding ONLY the shared_ptr objects (copy/reset).
+    // Never held across decoder calls: Close() snapshots here to
+    // RequestStop() BEFORE joining, while the decode thread may sit blocked
+    // in av_read_frame holding m_decodeMutex — taking that mutex pre-join
+    // would deadlock. Order everywhere: m_decodeMutex, then m_decoderMutex.
+    mutable std::mutex m_decoderMutex;
+    std::shared_ptr<FfmpegVideoDecoder> SnapshotDecoder() const {
+        std::lock_guard plock(m_decoderMutex);
+        return m_decoder;
+    }
+    std::shared_ptr<AudioPlayer> SnapshotAudio() const {
+        std::lock_guard plock(m_decoderMutex);
+        return m_audio;
+    }
     // P13 item 6: decode + publish frame #1 synchronously inside Open()
     // (also builds the surface pool before the decode thread starts).
     bool m_prewarmEnabled = true;
@@ -142,6 +178,11 @@ private:
     int    m_width  = 0;
     int    m_height = 0;
 
+    // Last published frame PTS (P1-5): backward jumps mean the decoder
+    // seeked internally (loop wrap) → clear the scheduler. Always
+    // accessed under m_decodeMutex (Seek, prewarm, decode thread).
+    double m_lastPublishedPts = -1.0;
+
     // ─── Telemetry ──────────────────────────────────────────────────────
     std::atomic<uint64_t> m_framesDecoded{0};
     std::atomic<uint64_t> m_framesConsumed{0};
@@ -150,6 +191,7 @@ private:
     Clock::time_point m_fpsStartTime;
     uint64_t m_decoderFrameCount  = 0;
     uint64_t m_consumerFrameCount = 0;
+    uint64_t m_convertFrameCount  = 0;  // DecodeFrame-ok + published (Phase 1)
 
     // ─── Thread management ──────────────────────────────────────────────
     std::atomic<bool> m_threadRunning{false};

@@ -90,6 +90,10 @@ private:
     /// Push the current rotation/flip to the main renderer and the
     /// per-monitor compositors.
     void ApplyTransform();
+    /// Push loop+speed+volume+mute from the current scene to the video
+    /// backend in one path (P1-7). Called on LOAD and inherited by
+    /// device-loss recovery (which reloads through LoadScene).
+    void ApplyPlaybackSettings();
     /// True when the active host provides a wallpaper layer (MultiMonitor).
     bool IsMultiMonitorMode() const {
         return m_desktopHost && m_desktopHost->GetWallpaperLayerWindow() != nullptr;
@@ -158,6 +162,12 @@ private:
     // property setters; consumed (and cleared) only in RenderLoop.
     std::atomic<bool> m_frameDirty{false};
     std::atomic<uint64_t> m_presentCount{0};
+    // Present-rate sampler (Phase 1): GetTelemetry folds presentCount
+    // deltas into presentFps. Mutable: GetTelemetry is const and already
+    // holds m_mutex.
+    mutable uint64_t m_presentRateBase{0};
+    mutable std::chrono::steady_clock::time_point m_presentRateTime{};
+    mutable double m_presentFps{0.0};
     // Render-thread only: dark clear applied once per texture-less state.
     bool m_darkCleared = false;
     // ─── Static image hot-reload (render-thread internal) ─────────────

@@ -82,6 +82,9 @@ struct MonitorInfo {
     bool    isPrimary  = false;
     float   dpiScale   = 1.0f;
     bool    connected  = true;
+    // Current-mode refresh rate in Hz (0 = unknown). Populated by
+    // Engine::EnumerateMonitors via EnumDisplaySettings (Phase 1).
+    int     refreshHz  = 0;
     // Stable identity across disconnects (EDID hash; 0 = not available).
     uint64_t edidHash  = 0;
 };
@@ -118,6 +121,15 @@ struct EngineTelemetry {
     uint64_t framesDropped   = 0;
     double   decoderFps      = 0.0;
     double   renderFps       = 0.0;
+    // ─── Per-stage diagnostics (Phase 1) ──────────────────────────────
+    double   sourceFps      = 0.0;  // stream frame rate
+    double   convertFps     = 0.0;  // ConvertAndSignal+publish rate
+    uint64_t schedulerDrops = 0;    // skipped between decode & consume
+    double   presentFps     = 0.0;  // Present() rate (== renderFps until
+                                    // Phase 3 re-present; then >= renderFps)
+    uint64_t repeatedFrames = 0;    // re-presents of the same frame (Phase 3)
+    uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
+    int      displayHz      = 0;    // current monitor refresh rate (0 = unknown)
     int      videoWidth      = 0;
     int      videoHeight     = 0;
     uint64_t ringSlotCount   = 0;

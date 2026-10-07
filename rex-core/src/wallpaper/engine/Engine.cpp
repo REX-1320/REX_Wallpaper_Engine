@@ -349,6 +349,11 @@ shared::Result<void> Engine::HandleDeviceLoss() {
         if (savedScene.type == "video" && m_videoManager &&
             m_videoManager->IsOpen()) {
             m_videoManager->Seek(savedPosition);
+            // P1-13: re-base the wall clock on the seek target — otherwise
+            // the video resumes mid-stream under a ~0 position.
+            m_positionBase.store(savedPosition, std::memory_order_release);
+            m_stopwatch.Reset();
+            m_stopwatch.Start();
         }
     }
 
@@ -582,11 +587,25 @@ shared::Result<void> Engine::Stop() {
 
 double Engine::GetPosition() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_playing) {
-        return m_positionBase.load(std::memory_order_relaxed) +
-               m_stopwatch.ElapsedSeconds();
+    if (!m_playing) {
+        return m_currentPosition;
     }
-    return m_currentPosition;
+    double pos = m_positionBase.load(std::memory_order_relaxed) +
+                 m_stopwatch.ElapsedSeconds();
+    // P1-13: the wall clock drifts from decoder PTS (speed changes, loop
+    // wraps, recovery seeks). Reconcile against duration: wrap when looping,
+    // clamp otherwise. No duration (static/unopened) → wall clock as-is.
+    const double dur = (m_videoManager && m_videoManager->IsOpen())
+                           ? m_videoManager->GetDuration()
+                           : 0.0;
+    if (dur > 0.0) {
+        if (m_currentScene.loop) {
+            pos = std::fmod(pos, dur);
+        } else if (pos > dur) {
+            pos = dur;
+        }
+    }
+    return pos;
 }
 
 double Engine::GetDuration() const {
@@ -670,6 +689,16 @@ std::vector<MonitorInfo> Engine::EnumerateMonitors() const {
                 dpiX = 96;
             }
             info.dpiScale = static_cast<float>(dpiX) / 96.0f;
+
+            // Refresh rate (Phase 1): current-mode frequency for the
+            // CadenceController. 0 when unknowable (remote session);
+            // values <= 1 are driver placeholders, not real rates.
+            DEVMODEW dm = {};
+            dm.dmSize = sizeof(dm);
+            if (EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)
+                && dm.dmDisplayFrequency > 1) {
+                info.refreshHz = static_cast<int>(dm.dmDisplayFrequency);
+            }
 
             // Stable identity across disconnects (EDID descriptor hash).
             info.edidHash = rex::platform::windows::GetMonitorEdidHash(hMon);
@@ -939,6 +968,11 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.framesDropped  = vt.framesDropped;
         out.decoderFps     = vt.decoderFps;
         out.renderFps      = vt.renderFps;
+        out.sourceFps      = vt.sourceFps;
+        out.convertFps     = vt.convertFps;
+        out.schedulerDrops = vt.schedulerDrops;
+        out.queueDepth     = vt.queueDepth;
+        // repeatedFrames stays 0 until Phase 3 starts re-presenting.
         out.ringSlotCount  = vt.ringSlotCount;
         out.ringBytes      = vt.ringBytes;
         out.decodeMsP50    = vt.decodeMsP50;
@@ -1052,6 +1086,34 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
     }
 
     out.presentCount = m_presentCount.load(std::memory_order_relaxed);
+    // Present-rate sampler: fold count deltas into presentFps, refreshed
+    // at most every 0.5 s so back-to-back GET_STATUS calls stay stable.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(
+            now - m_presentRateTime).count();
+        if (dt >= 0.5) {
+            if (m_presentRateTime.time_since_epoch().count() != 0) {
+                m_presentFps = (static_cast<double>(out.presentCount)
+                                - static_cast<double>(m_presentRateBase)) / dt;
+            }
+            m_presentRateBase = out.presentCount;
+            m_presentRateTime = now;
+        }
+        out.presentFps = m_presentFps;
+    }
+
+    // Display refresh rate for the current monitor (Phase 1): fresh
+    // enumeration matched by monitor id; 0 when unknown.
+    out.displayHz = 0;
+    if (!m_currentMonitor.id.empty()) {
+        for (const auto& info : EnumerateMonitors()) {
+            if (info.id == m_currentMonitor.id) {
+                out.displayHz = info.refreshHz;
+                break;
+            }
+        }
+    }
 }
 
 void Engine::DumpStats() const {
