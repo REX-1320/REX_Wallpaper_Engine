@@ -204,8 +204,7 @@ TEST(FrameSchedulerTest, FS11_EqualPtsRepeatIsNotADrop) {    FrameScheduler sche
     EXPECT_EQ(scheduler.GetDroppedCount(), 0ULL);
 }
 
-TEST(FrameSchedulerTest, FS12_PendingCountTracksUnconsumedClamped) {
-    // Queue-depth park (Phase 2) relies on this: unconsumed count now,
+TEST(FrameSchedulerTest, FS12_PendingCountTracksUnconsumedClamped) {    // Queue-depth park (Phase 2) relies on this: unconsumed count now,
     // clamped to the ring size once overwrites begin.
     FrameScheduler scheduler;
     EXPECT_EQ(scheduler.PendingCount(), 0U);
@@ -229,6 +228,47 @@ TEST(FrameSchedulerTest, FS12_PendingCountTracksUnconsumedClamped) {
         scheduler.Push(f);
     }
     EXPECT_EQ(scheduler.PendingCount(), 8U);
+}
+
+TEST(FrameSchedulerTest, FS13_StarvedDropsCountedExactlyOnce) {
+    // 20 pushed, none consumed: 19 drop, 1 presents. A second identical
+    // Tick adds nothing (regression: starved Ticks re-added the same
+    // stale gap until the counter exploded 25x).
+    FrameScheduler scheduler;
+    for (int i = 0; i < 20; ++i) {
+        VideoFrame f{};
+        f.valid = true;
+        f.slot = i % 8;
+        f.frameIndex = i + 1;
+        f.pts = i * 0.016;
+        scheduler.Push(f);
+    }
+    const VideoFrame* result = scheduler.Tick(10.0);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->frameIndex, 20u);
+    EXPECT_EQ(scheduler.GetDroppedCount(), 19ULL);
+    EXPECT_EQ(scheduler.Tick(10.0), nullptr);
+    EXPECT_EQ(scheduler.GetDroppedCount(), 19ULL);
+}
+
+TEST(FrameSchedulerTest, FS14_FutureFramesNotDroppedThenDue) {
+    // All-future Tick counts nothing; a later Tick selects and counts
+    // only the bypassed.
+    FrameScheduler scheduler;
+    for (int i = 0; i < 3; ++i) {
+        VideoFrame f{};
+        f.valid = true;
+        f.slot = i;
+        f.frameIndex = i + 1;
+        f.pts = 1.0 + i * 0.016;
+        scheduler.Push(f);
+    }
+    EXPECT_EQ(scheduler.Tick(0.0), nullptr);
+    EXPECT_EQ(scheduler.GetDroppedCount(), 0ULL);
+    const VideoFrame* result = scheduler.Tick(1.05);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->frameIndex, 3u);
+    EXPECT_EQ(scheduler.GetDroppedCount(), 2ULL);
 }
 
 

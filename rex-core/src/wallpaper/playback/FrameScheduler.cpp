@@ -14,12 +14,27 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
     if (wc == 0 || wc == lc) {
         return nullptr;
     }
-    // Only the last kNumSlots writes still occupy intact slots; anything
-    // older was overwritten unseen — count it dropped.
+    // Only the last kNumSlots writes still occupy intact slots. Vanished
+    // writes (overwritten unseen) count as dropped, but each exactly
+    // once: without the high-water mark every starved Tick re-adds the
+    // same stale gap and the counter explodes (14k drops for 586 decoded
+    // frames, proven live 2026-10-07).
     uint64_t start = lc + 1;
     const uint64_t oldestIntact = wc > kNumSlots ? wc - kNumSlots + 1 : 1;
+    const uint64_t countedThrough =
+        m_countedThrough.load(std::memory_order_acquire);
+    if (oldestIntact > countedThrough) {
+        // Vanished and never accounted: (lo, oldestIntact). Write
+        // oldestIntact itself is still intact. Each write counted once
+        // via the high-water mark no matter how many starved Ticks pass.
+        const uint64_t lo = countedThrough > lc ? countedThrough : lc;
+        if (oldestIntact > lo + 1) {
+            m_dropped.fetch_add(oldestIntact - lo - 1,
+                                std::memory_order_relaxed);
+        }
+        m_countedThrough.store(oldestIntact, std::memory_order_release);
+    }
     if (start < oldestIntact) {
-        m_dropped.fetch_add(oldestIntact - start, std::memory_order_relaxed);
         start = oldestIntact;
     }
     // Newest due frame. No PTS-monotonicity assumption: B-frames decode
@@ -54,8 +69,9 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
 }
 
 void FrameScheduler::Clear() {
-    m_lastConsumedWrite.store(m_writeCount.load(std::memory_order_acquire),
-                              std::memory_order_release);
+    const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
+    m_lastConsumedWrite.store(wc, std::memory_order_release);
+    m_countedThrough.store(wc, std::memory_order_release);  // re-baseline
 }
 
 } // namespace rex::wallpaper

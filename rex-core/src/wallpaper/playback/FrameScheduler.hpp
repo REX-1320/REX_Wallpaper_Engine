@@ -90,6 +90,11 @@ private:
     std::atomic<uint64_t> m_lastConsumedWrite{0};
     // Cumulative drops, consumer-written (see Tick), read by telemetry.
     std::atomic<uint64_t> m_dropped{0};
+    // High-water mark for vanished-write accounting (see Tick): each
+    // overwritten-unseen write is counted at most once, no matter how
+    // many starved Ticks observe the same stale gap. Reset by Clear
+    // alongside the consumed write.
+    std::atomic<uint64_t> m_countedThrough{0};
 };
 
 } // namespace rex::wallpaper

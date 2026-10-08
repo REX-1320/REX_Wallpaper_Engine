@@ -42,6 +42,8 @@ struct VideoPlaybackTelemetry {
     uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
     double   pacingMs       = 0.0;  // live decode-pacing interval (Phase 2
                                     // debug: m_frameIntervalMs / m_speed)
+    double   playbackSpeed  = 1.0;  // content rate (Phase 3): decoderFps /
+                                    // sourceFps; 1.0 = realtime
     double   uploadLatencyMs = 0.0;
     // P13 per-stage percentiles (see DecoderDiagnostics).
     double   decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;

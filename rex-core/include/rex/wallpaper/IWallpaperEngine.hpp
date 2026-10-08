@@ -131,6 +131,11 @@ struct EngineTelemetry {
     uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
     int      displayHz      = 0;    // current monitor refresh rate (0 = unknown)
     double   pacingMs       = 0.0;  // live decode-pacing interval
+    // ─── Wall-cadence presentation (Phase 3) ──────────────────────────
+    double   effectiveVideoFps = 0.0;  // unique video frames presented/s
+                                       // (excludes cadence re-presents)
+    double   playbackSpeed  = 1.0;  // content rate: decoderFps / sourceFps
+                                    // (1.0 = realtime; < 1 = decode-bound)
     int      videoWidth      = 0;
     int      videoHeight     = 0;
     uint64_t ringSlotCount   = 0;

@@ -388,6 +388,7 @@ if(BUILD_TESTING)
         tests/wallpaper/test_cadence.cpp
         tests/wallpaper/test_protocol_safety.cpp
         tests/wallpaper/test_runtime_guard.cpp
+        tests/wallpaper/test_hot_reload_guard.cpp
         tests/wallpaper/test_power_policy.cpp
         ${PLATFORM_WINDOWS_SOURCES}
         ${WALLPAPER_SOURCES}

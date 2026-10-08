@@ -201,6 +201,7 @@ TEST(StageTelemetryTest, PlaybackTelemetryHasStageFieldsDefaultZero) {
     EXPECT_DOUBLE_EQ(t.sourceFps, 0.0);
     EXPECT_DOUBLE_EQ(t.convertFps, 0.0);
     EXPECT_EQ(t.schedulerDrops, 0ULL);
+    EXPECT_DOUBLE_EQ(t.playbackSpeed, 1.0);
 }
 
 TEST(StageTelemetryTest, EngineTelemetryHasStageFieldsDefaultZero) {
@@ -212,6 +213,8 @@ TEST(StageTelemetryTest, EngineTelemetryHasStageFieldsDefaultZero) {
     EXPECT_EQ(t.repeatedFrames, 0ULL);
     EXPECT_EQ(t.queueDepth, 0ULL);
     EXPECT_EQ(t.displayHz, 0);
+    EXPECT_DOUBLE_EQ(t.effectiveVideoFps, 0.0);
+    EXPECT_DOUBLE_EQ(t.playbackSpeed, 1.0);
 }
 
 TEST(StageTelemetryTest, PrimaryMonitorReportsRefreshRate) {

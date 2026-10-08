@@ -318,6 +318,12 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     t.schedulerDrops = m_framesDropped.load(std::memory_order_relaxed);
     t.queueDepth = m_scheduler.PendingCount();
     t.pacingMs = m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
+    // Content rate (Phase 3): decode throughput over source rate.
+    // 1.0 = realtime; below means decode-bound (repeats fill the gap).
+    t.playbackSpeed = m_frameRate > 0.0
+        ? (secs > 0.0 ? static_cast<double>(m_decoderFrameCount) / secs : 0.0)
+          / m_frameRate
+        : 1.0;
     t.ringSlotCount = m_scheduler.GetNumSlots();
     t.ringBytes = static_cast<uint64_t>(m_width) * static_cast<uint64_t>(m_height) *
                   4 * m_scheduler.GetNumSlots();
