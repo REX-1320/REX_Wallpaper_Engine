@@ -32,3 +32,12 @@
 - Ruling: reverted my own flat-out design within the same task after live evidence killed it (systematic-debugging over plan-following; plan file updated with the lesson) — cost if wrong: none, live numbers decide.
 - Ruling: IsBackwardJump threshold (>1s or lands ~0) changes P1-5 semantics for B-frame jitter (previously cleared every few frames, harmless under latest-wins, fatal under PTS selection) — existing Discontinuity tests still green; short-loop (<1s content) wrap relies on the lands-~0 arm — cost if wrong: missed clear on exotic content (fail-safe direction: stale frame shows briefly).
 - Housekeeping: one pointless blank-line remove/re-add in test_frame_scheduler.cpp today (wrong-file edit, instantly reverted, net-zero — verified via reasoning, not diff).
+
+## Task 5 (Phase 3 cadence + re-present) — complete
+- Commits: (thiseneva T5 batch; Engine part previously swept into 8c7b08d by the concurrent session with my hunks intact — verified by live runs after). Tests: CadenceControllerTest 8/8 (table), StageTelemetry extended (effectiveVideoFps/playbackSpeed defaults), full suite same 2 pre-existing fixture failures.
+- Live (all on merged tree unless noted): 120fps@cap120 → dec/render/present ~117 1:1, drops 1; 120fps@cap60 → present 59.1 with honest skips (cap binds presentation only); 0.25x → present holds ~59 via 1854 repeats, playbackSpeed 0.244; 1x → src 60, dec 58.5, pres 59.2, drops 4 (high-water fix verified live: was 435 pre-fix), eff dip at wrap correctly shows seek gap.
+- Multi-video survey (user-requested): H.264 1440p60/4K60/4K30/1080p25/59.94, HEVC 4K60, VP9 4K60, AV1 4K60, H.264 1440p120 — video fps == decoding in all cases (within 2% startup ramp); 120fps uncapped → ~117 everywhere.
+- Ruling: CadenceController (mine, presentation-target) vs CadencePolicy (theirs, wake-interval) coexist — different units, no conflict; final review reconciles naming. Their test_cadence.cpp vs my test_cadence_controller.cpp likewise.
+- Ruling: effectiveVideoFps/playbackSpeed added in T5 although v2 plan only expected them in T4 acceptance — closes the plan gap; playbackSpeed = decoderFps/sourceFps (wrap-immune, no anchors needed).
+- Ruling: 30fps-on-160Hz renders at 30 (formula-literal) rather than repeating at display cadence (table prose) — minor imperfection, user can revisit.
+- TDD note: CadenceControllerTest values came from the plan table (spec-first) and passed on first run post-header; behavioral RED for T5 was the live 219-presents starvation from T4 (fixed by re-present design, proven by the 0.25x/120fps runs).
