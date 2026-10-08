@@ -64,7 +64,9 @@ export function applyWallpaperToDesktop(w) {
     })
     return
   }
-  window.rexDesktop?.setDesktopVideo?.({ path: null })
+  // Deferred types (WEB/SCENE/SHADER/AUDIO_VISUALIZER): never clear the
+  // running wallpaper for something we cannot show. Warn and keep it.
+  console.warn(`applyWallpaperToDesktop: ${w.type} wallpapers are not supported yet; keeping current wallpaper.`)
 }
 
 // Live property updates after a wallpaper is already applied. Only the
