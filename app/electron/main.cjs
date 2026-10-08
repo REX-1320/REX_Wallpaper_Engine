@@ -3,6 +3,7 @@ const path = require('node:path')
 const fs = require('node:fs')
 const { WallpaperRuntime } = require('./wallpaperRuntime.cjs')
 const { TrayManager } = require('./tray-manager.cjs')
+const startup = require('./startup.cjs')
 
 // ─── Single-instance protection ─────────────────────────────────────────────
 // REX is a background app: one instance, one tray icon, one runtime. A second
@@ -193,6 +194,40 @@ async function sendIfSupported(cmd, params, applied, skipped) {
   }
 }
 
+// Re-applies a persisted { kind, params } entry (boot re-apply after login).
+// Same LOAD/PLAY sequence as the IPC handlers below; returns true on success.
+async function applyStoredWallpaper(entry) {
+  if (!entry || (entry.kind !== 'image' && entry.kind !== 'video')) return false
+  const { kind, params } = entry
+  try {
+    if (kind === 'image') {
+      await runtime.init()
+      await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
+    } else {
+      await runtime.init(params.fps ?? 60, true)
+      await runtime.send('LOAD', {
+        path: params.path,
+        type: 'video',
+        mode: params.mode ?? 'fill',
+        loop: params.loop ?? true,
+        muted: params.muted ?? true,
+        volume: params.volume ?? 1,
+        speed: params.speed ?? 1,
+      })
+    }
+    capabilities = null // adapter changed — refresh on next query
+    await runtime.send('PLAY', {})
+    lastApplied = entry
+    consecutiveFailedRounds = 0
+    setRuntimeAvailable(true)
+    logLine('startup: re-applied last wallpaper', kind, params.path)
+    return true
+  } catch (err) {
+    logLine('startup: re-apply ERROR', err.message)
+    return false
+  }
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
@@ -311,6 +346,7 @@ app.whenReady().then(() => {
       capabilities = null // adapter changed — refresh on next query
       await runtime.send('PLAY', {})
       lastApplied = { kind: 'image', params: { path: filePath, mode } }
+      startup.saveLastApplied(app.getPath('userData'), lastApplied)
       consecutiveFailedRounds = 0 // a deliberate new wallpaper resets recovery
       setRuntimeAvailable(true)
       return { ok: true, style: mode }
@@ -325,6 +361,7 @@ app.whenReady().then(() => {
 
     if (typeof filePath !== 'string' || !filePath) {
       lastApplied = null
+      startup.clearLastApplied(app.getPath('userData'))
       if (runtime.proc) {
         try {
           await runtime.send('STOP', {})
@@ -352,6 +389,7 @@ app.whenReady().then(() => {
         kind: 'video',
         params: { path: filePath, mode, loop, muted, volume, speed, fps },
       }
+      startup.saveLastApplied(app.getPath('userData'), lastApplied)
       consecutiveFailedRounds = 0 // a deliberate new wallpaper resets recovery
       setRuntimeAvailable(true)
       return { ok: true }
@@ -384,6 +422,25 @@ app.whenReady().then(() => {
   // persistent client (PAUSE/PLAY), never direct engine access.
   ipcMain.handle('wallpaper:pause', () => pauseWallpaper())
   ipcMain.handle('wallpaper:resume', () => resumeWallpaper())
+
+  // Launch-at-login toggle (tray menu + future settings UI).
+  ipcMain.handle('settings:get-login-item', () => {
+    try {
+      return { ok: true, enabled: app.getLoginItemSettings().openAtLogin }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+  ipcMain.handle('settings:set-login-item', (event, { enabled } = {}) => {
+    try {
+      app.setLoginItemSettings(startup.loginItemSettings(enabled))
+      logLine('settings: login item', enabled ? 'enabled' : 'disabled')
+      trayManager?.rebuildMenu?.()
+      return { ok: true, enabled: !!enabled }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
 
   ipcMain.handle('shell:show-in-folder', (event, { path: filePath } = {}) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath)
@@ -444,9 +501,42 @@ app.whenReady().then(() => {
     onQuit: () => quitApp(),
     onPauseWallpaper: () => pauseWallpaper(),
     onResumeWallpaper: () => resumeWallpaper(),
+    isLoginItemEnabled: () => {
+      try {
+        return app.getLoginItemSettings().openAtLogin
+      } catch {
+        return false
+      }
+    },
+    onToggleLoginItem: (enabled) => {
+      try {
+        app.setLoginItemSettings(startup.loginItemSettings(enabled))
+        logLine('settings: login item', enabled ? 'enabled' : 'disabled')
+      } catch (err) {
+        logLine('settings: login item ERROR', err.message)
+      }
+    },
   })
   trayManager.create()
   logLine('tray: created')
+
+  // ─── Launch at login + boot re-apply ──────────────────────────────────────
+  // Register every launch (idempotent): REX is a resident wallpaper app and
+  // must survive reboots. The toggle lives in the tray menu + settings IPC.
+  try {
+    app.setLoginItemSettings(startup.loginItemSettings(true))
+    logLine('startup: registered for login (--background)')
+  } catch (err) {
+    logLine('startup: registration ERROR', err.message)
+  }
+  const bootEntry = startup.loadLastApplied(app.getPath('userData'))
+  if (bootEntry) {
+    applyStoredWallpaper(bootEntry).then((ok) => {
+      if (!ok) logLine('startup: re-apply failed, desktop left as-is')
+    })
+  } else {
+    logLine('startup: no persisted wallpaper, nothing to re-apply')
+  }
 
   // Runtime crash → recovery. The native engine repairs its own layer; this
   // only restarts the process and replays the last wallpaper. Ignored while

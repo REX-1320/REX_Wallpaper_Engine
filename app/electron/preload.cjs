@@ -14,6 +14,10 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   pauseWallpaper: () => ipcRenderer.invoke('wallpaper:pause'),
   resumeWallpaper: () => ipcRenderer.invoke('wallpaper:resume'),
 
+  // Launch-at-login toggle (mirrors the tray checkbox).
+  getLoginItem: () => ipcRenderer.invoke('settings:get-login-item'),
+  setLoginItem: (enabled) => ipcRenderer.invoke('settings:set-login-item', { enabled }),
+
   // Runtime events: { event, data } with events READY/LOADED/PLAYING/
   // PAUSED/STOPPED/UNLOADED/ERROR. Returns an unsubscribe function.
   onWallpaperEvent: (callback) => {

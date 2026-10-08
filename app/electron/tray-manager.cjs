@@ -12,7 +12,7 @@ const fs = require('node:fs')
 const TRAY_ICON_PATH = path.join(__dirname, '..', 'assets', 'rex-tray.ico')
 
 class TrayManager {
-  constructor({ getWindow, onShowWindow, onQuit, onPauseWallpaper, onResumeWallpaper }) {
+  constructor({ getWindow, onShowWindow, onQuit, onPauseWallpaper, onResumeWallpaper, isLoginItemEnabled, onToggleLoginItem }) {
     this.tray = null
     this.menu = null
     this.getWindow = getWindow
@@ -20,6 +20,8 @@ class TrayManager {
     this.onQuit = onQuit
     this.onPauseWallpaper = onPauseWallpaper
     this.onResumeWallpaper = onResumeWallpaper
+    this.isLoginItemEnabled = isLoginItemEnabled
+    this.onToggleLoginItem = onToggleLoginItem
     this.wallpaperPaused = false
     this.runtimeAvailable = true
   }
@@ -75,6 +77,10 @@ class TrayManager {
           },
         ]
       : [{ label: 'Wallpaper unavailable', enabled: false }]
+    let loginChecked = false
+    try {
+      loginChecked = this.isLoginItemEnabled ? !!this.isLoginItemEnabled() : false
+    } catch {}
     const template = [
       { label: 'Open REX', click: () => this.showWindow() },
       { type: 'separator' },
@@ -93,6 +99,15 @@ class TrayManager {
         },
       },
       { type: 'separator' },
+      {
+        label: 'Launch at login',
+        type: 'checkbox',
+        checked: loginChecked,
+        click: (item) => {
+          if (this.onToggleLoginItem) this.onToggleLoginItem(item.checked)
+          this.rebuildMenu()
+        },
+      },
       { label: 'Exit REX', click: () => this.onQuit() },
     ]
     this.menu = Menu.buildFromTemplate(template)
