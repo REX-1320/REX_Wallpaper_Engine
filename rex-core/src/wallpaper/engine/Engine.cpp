@@ -385,6 +385,14 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
         return shared::Result<void>(shared::ErrorCode::InvalidState, "Engine not ready to load scene");
     }
 
+    // Unknown types must fail loudly here — not fall through to an
+    // UnsupportedAdapter dark scene that reports success. This is the single
+    // choke point for CLI LOAD, playlist, and device-loss recovery.
+    if (scene.type != "static" && scene.type != "video" && scene.type != "audio") {
+        return shared::Result<void>(shared::ErrorCode::UnsupportedFormat,
+            "unsupported scene type '" + scene.type + "' (supported: static, video, audio)");
+    }
+
     REX_LOG_INFO("Engine", "Loading scene: {} (type: {}, path: {})",
                  scene.name.c_str(), scene.type.c_str(), scene.sourcePath.c_str());
 

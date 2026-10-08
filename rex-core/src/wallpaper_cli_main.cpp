@@ -873,6 +873,16 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                 continue;
             }
 
+            // Reject unknown types BEFORE unloading the running scene: a
+            // doomed LOAD must never disturb the current wallpaper. The
+            // engine re-validates (defense in depth); this keeps the
+            // protocol response early and the desktop untouched.
+            if (type != "video" && type != "audio") {
+                WriteResponse(id, false,
+                    "unsupported scene type '" + type + "' (supported: static, video, audio)");
+                continue;
+            }
+
             if (!engine) {
                 WriteResponse(id, false, "runtime not initialized â€” send INIT first");
                 continue;

@@ -74,6 +74,29 @@ TEST(EngineTest, LoadAndUnloadScene) {
     engine->Shutdown();
 }
 
+TEST(EngineTest, LoadUnsupportedTypeFailsLoudly) {
+    auto engine = CreateWallpaperEngine();
+
+    WallpaperConfig config;
+    engine->Initialize(config);
+
+    // web/shader/scene/audio-file must never load as a dark silent scene.
+    for (const char* bad : {"web", "shader", "scene", "audio-file", ""}) {
+        SceneInfo scene;
+        scene.id = "bad";
+        scene.name = "Bad";
+        scene.sourcePath = "C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg";
+        scene.type = bad;
+        auto result = engine->LoadScene(scene);
+        EXPECT_TRUE(result.IsError()) << "type=" << bad;
+    }
+
+    // Rejected loads must not become current.
+    EXPECT_TRUE(engine->GetCurrentScene().sourcePath.empty());
+
+    engine->Shutdown();
+}
+
 TEST(EngineTest, LoadInvalidTextureDoesNotCrash) {
     auto engine = CreateWallpaperEngine();
     WallpaperConfig config;
