@@ -1,6 +1,9 @@
 #include "Engine.hpp"
 #include "wallpaper/engine/RecoveryBackoff.hpp"
 #include "wallpaper/engine/DisplayTopology.hpp"
+#include "wallpaper/engine/CadencePolicy.hpp"
+#include "wallpaper/playback/CadenceController.hpp"
+#include "wallpaper/engine/PowerPolicy.hpp"
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "platform/windows/MonitorEdid.hpp"
 #include <shared/PreciseSleep.hpp>
@@ -251,6 +254,9 @@ shared::Result<void> Engine::ReinitializeRenderer() {
         m_videoManager->Shutdown();
         m_videoManager.reset();
     }
+    // Phase 3: drop the cadence re-present cache before tearing down —
+    // slot handles/fence values below belong to the dying backend.
+    m_hasVideoFrame.store(false, std::memory_order_release);
     if (m_renderer) {
         m_renderer->Shutdown();
     }
@@ -499,6 +505,8 @@ shared::Result<void> Engine::UnloadScene() {
         m_videoManager->Close();
         m_videoManager->ClearVideoFrames();
     }
+    // Phase 3: no scene, no cached re-present.
+    m_hasVideoFrame.store(false, std::memory_order_release);
 
     if (m_audioCapture) {
         m_audioCapture->Stop();
@@ -538,6 +546,9 @@ shared::Result<void> Engine::Play() {
 
     // P16: arm the first present after (re)starting playback.
     m_frameDirty.store(true, std::memory_order_release);
+    // User-driven play overrides any auto-pause bookkeeping: a later flag
+    // clear must not "resume" (re-pause state is re-evaluated anyway).
+    m_autoPaused.store(false, std::memory_order_release);
     return shared::Result<void>();
 }
 
@@ -563,6 +574,8 @@ shared::Result<void> Engine::Pause() {
                          m_stopwatch.ElapsedSeconds(),
                          std::memory_order_relaxed);
     m_stopwatch.Reset();
+    // User-driven pause: a later auto-resume must not override it.
+    m_autoPaused.store(false, std::memory_order_release);
 
     return shared::Result<void>();
 }
@@ -579,8 +592,13 @@ shared::Result<void> Engine::Stop() {
     m_playing = false;
     m_currentPosition = 0.0;
     m_positionBase.store(0.0, std::memory_order_relaxed);
+    // Phase 3: stopped video must not keep re-presenting its last frame
+    // at cadence (a stale wallpaper behind the clear color).
+    m_hasVideoFrame.store(false, std::memory_order_release);
     SetState(EngineState::Stopped);
     m_stopwatch.Reset();
+    // User-driven stop: a later auto-resume must not override it.
+    m_autoPaused.store(false, std::memory_order_relaxed);
 
     return shared::Result<void>();
 }
@@ -628,6 +646,8 @@ shared::Result<void> Engine::AssignMonitor(const std::string& monitorId) {
     for (const auto& m : monitors) {
         if (m.id == monitorId || m.name == monitorId) {
             m_currentMonitor = m;
+            m_displayHzCached.store(m.refreshHz > 0 ? m.refreshHz : 60,
+                                    std::memory_order_release);
             REX_LOG_INFO("Engine", "Monitor assigned: {} ({}x{})",
                          m.name.c_str(), m.width, m.height);
             return shared::Result<void>();
@@ -640,6 +660,7 @@ shared::Result<void> Engine::AssignMonitor(const std::string& monitorId) {
     m_currentMonitor.width = GetSystemMetrics(SM_CXSCREEN);
     m_currentMonitor.height = GetSystemMetrics(SM_CYSCREEN);
     m_currentMonitor.isPrimary = true;
+    m_displayHzCached.store(60, std::memory_order_release);
 
     REX_LOG_WARN("Engine", "Monitor '{}' not found, using fallback {}x{}",
                  monitorId.c_str(), m_currentMonitor.width, m_currentMonitor.height);
@@ -651,6 +672,7 @@ shared::Result<void> Engine::ClearMonitor() {
     std::lock_guard<std::mutex> lock(m_mutex);
     REX_LOG_INFO("Engine", "Clearing monitor");
     m_currentMonitor = MonitorInfo{};
+    m_displayHzCached.store(60, std::memory_order_release);
     return shared::Result<void>();
 }
 
@@ -972,6 +994,10 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.convertFps     = vt.convertFps;
         out.schedulerDrops = vt.schedulerDrops;
         out.queueDepth     = vt.queueDepth;
+        out.pacingMs       = vt.pacingMs;
+        out.playbackSpeed  = vt.playbackSpeed;
+        out.repeatedFrames =
+            m_repeatedVideoFrames.load(std::memory_order_relaxed);
         // repeatedFrames stays 0 until Phase 3 starts re-presenting.
         out.ringSlotCount  = vt.ringSlotCount;
         out.ringBytes      = vt.ringBytes;
@@ -1101,6 +1127,27 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
             m_presentRateTime = now;
         }
         out.presentFps = m_presentFps;
+    }
+    // Unique-video-present sampler (Phase 3): same folding over
+    // m_uniqueVideoFrames, so effectiveVideoFps excludes cadence
+    // re-presents. Shares the present-rate window.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(
+            now - m_uniqueRateTime).count();
+        if (dt >= 0.5) {
+            if (m_uniqueRateTime.time_since_epoch().count() != 0) {
+                const uint64_t uniques =
+                    m_uniqueVideoFrames.load(std::memory_order_relaxed);
+                m_effectiveVideoFps =
+                    (static_cast<double>(uniques)
+                     - static_cast<double>(m_uniqueRateBase)) / dt;
+            }
+            m_uniqueRateBase =
+                m_uniqueVideoFrames.load(std::memory_order_relaxed);
+            m_uniqueRateTime = now;
+        }
+        out.effectiveVideoFps = m_effectiveVideoFps;
     }
 
     // Display refresh rate for the current monitor (Phase 1): fresh
@@ -1354,6 +1401,46 @@ void Engine::CheckFullScreenPause() {
     }
 }
 
+// ─── Suspend sources (P3 / G1+G2) ───────────────────────────────────────
+// Session lock, console display off (OS notifications on the render window,
+// see WorkerWManager::WndProc) and battery state (polled — no window
+// needed). Any active source suspends expensive work; resume fires only
+// when ALL are clear. Same lock-free request protocol as fullscreen.
+
+void Engine::CheckSuspendSources() {
+    bool locked = false;
+    bool displayOff = false;
+    if (m_desktopHost) {
+        locked = m_desktopHost->IsSessionLocked();
+        displayOff = m_desktopHost->IsDisplayOff();
+    }
+
+    bool powerSaving = false;
+    SYSTEM_POWER_STATUS ps = {};
+    if (GetSystemPowerStatus(&ps)) {
+        // 255 = unknown: fail open (treat AC as online, percent as unknown).
+        const bool acOnline = ps.ACLineStatus != 0;
+        const int pct = ps.BatteryLifePercent > 100
+                            ? -1
+                            : static_cast<int>(ps.BatteryLifePercent);
+        powerSaving = ShouldPauseForPower(acOnline,
+                                          (ps.SystemStatusFlag & 1) != 0, pct);
+    }
+
+    const bool suspended = locked || displayOff || powerSaving;
+    if (suspended && !m_suspPaused) {
+        m_suspPaused = true;
+        REX_LOG_INFO("Engine", "Suspend source active (session-locked={}, "
+                               "display-off={}, power-saving={}) — requesting pause",
+                     locked, displayOff, powerSaving);
+        m_suspendRequest.store(1, std::memory_order_release);
+    } else if (!suspended && m_suspPaused) {
+        m_suspPaused = false;
+        REX_LOG_INFO("Engine", "Suspend sources clear — requesting resume");
+        m_suspendRequest.store(-1, std::memory_order_release);
+    }
+}
+
 void Engine::RenderLoop() {
     using namespace std::chrono;
 
@@ -1371,15 +1458,23 @@ void Engine::RenderLoop() {
         // ── Auto-pause behind full-screen apps (throttled) ──────────────
         if (m_frameCount % 30 == 0) {
             CheckFullScreenPause();
+            CheckSuspendSources();
         }
 
-        // ── Service fullscreen pause/resume request (lock-free) ─────────
-        // CheckFullScreenPause() posts 1 (pause) or -1 (resume) to avoid
-        // calling the locking Pause()/Play() APIs from the render thread.
-        // We service the request here, at the top of the frame, before any
-        // GPU work begins.
-        if (const int req = m_fullScreenRequest.exchange(0, std::memory_order_acq_rel)) {
-            if (req == 1 && m_state == EngineState::Running) {
+        // ── Service pause/resume requests (lock-free) ──────────────────
+        // Fullscreen and suspend sources post independently; the effective
+        // pause is their OR. Resume fires only for OUR pauses (m_autoPaused)
+        // — never a user-initiated pause. We service the requests here, at
+        // the top of the frame, before any GPU work begins.
+        if (const int fsReq = m_fullScreenRequest.exchange(0, std::memory_order_acq_rel)) {
+            m_fullScreenPaused = (fsReq == 1);
+        }
+        if (const int suspReq = m_suspendRequest.exchange(0, std::memory_order_acq_rel)) {
+            m_suspPaused = (suspReq == 1);
+        }
+        const bool wantPaused = m_fullScreenPaused || m_suspPaused;
+        if (wantPaused && !m_autoPaused.load(std::memory_order_acquire) &&
+            m_state == EngineState::Running) {
                 // Pause: stop video + mark engine paused (no m_mutex needed;
                 // render thread exclusively owns these during normal operation)
                 if (m_videoManager) m_videoManager->Pause();
@@ -1393,16 +1488,19 @@ void Engine::RenderLoop() {
                     std::memory_order_relaxed);
                 m_stopwatch.Reset();
                 SetState(EngineState::Paused);
-                REX_LOG_INFO("Engine", "Full-screen pause applied");
-            } else if (req == -1 && m_state == EngineState::Paused) {
+                m_autoPaused.store(true, std::memory_order_release);
+                REX_LOG_INFO("Engine", "Auto-pause applied (fullscreen={}, suspend={})",
+                             m_fullScreenPaused, m_suspPaused);
+            } else if (!wantPaused && m_autoPaused.load(std::memory_order_acquire) &&
+                       m_state == EngineState::Paused) {
                 // Resume: restart video + mark engine running
                 if (m_videoManager) m_videoManager->Play();
                 m_playing = true;
                 m_stopwatch.Start();
                 SetState(EngineState::Running);
-                REX_LOG_INFO("Engine", "Full-screen resume applied");
+                m_autoPaused.store(false, std::memory_order_release);
+                REX_LOG_INFO("Engine", "Auto-resume applied");
             }
-        }
 
 
         // ── Periodically check for display topology changes ─────────────
@@ -1449,7 +1547,7 @@ void Engine::RenderLoop() {
             // Always pace: this thread must never busy-loop, whatever the
             // recovery outcome was.
             m_frameCount++;
-            PaceLoop(frameStart);
+            PaceLoop(frameStart, false);
             continue;
         }
 
@@ -1512,10 +1610,32 @@ void Engine::RenderLoop() {
                 }
             }
 
-            if (!pending && !m_frameDirty.load(std::memory_order_acquire)) {
-                m_frameCount++;              // keep %30/%120 housekeeping alive
-                PaceLoop(frameStart);
-                continue;
+            // Phase 3: video presents at wall cadence. A new frame draws
+            // immediately; with nothing new due the cached frame
+            // re-presents (repeat) so cadence holds while unique rate
+            // follows decode. Only when nothing ever decoded do we idle.
+            const bool isVideoScene = (m_state == EngineState::Running
+                && m_videoManager && m_videoManager->IsOpen()
+                && renderSceneType == "video");
+            if (isVideoScene) {
+                if (!pending && !m_hasVideoFrame.load(std::memory_order_acquire)
+                    && !m_frameDirty.load(std::memory_order_acquire)) {
+                    m_frameCount++;
+                    PaceLoop(frameStart, true);
+                    continue;
+                }
+            } else if (!pending && !m_frameDirty.load(std::memory_order_acquire)) {
+                // P2-16: spectrum sampling below must keep running for
+                // audio-reactive scenes — with no video frame and a clean
+                // flag the gate would otherwise freeze the visualization.
+                // Non-audio statics still idle (R2).
+                const bool spectrumActive = renderAudioCapture &&
+                                            renderAudioCapture->IsRunning();
+                if (!spectrumActive) {
+                    m_frameCount++;          // keep %30/%120 housekeeping alive
+                    PaceLoop(frameStart, false);
+                    continue;
+                }
             }
 
             // P0-4: a false return means the GPU did not release a frame
@@ -1523,7 +1643,7 @@ void Engine::RenderLoop() {
             // nothing is recorded into a stale list; recovery runs next.
             if (!m_renderer->BeginFrame()) {
                 m_frameCount++;
-                PaceLoop(frameStart);
+                PaceLoop(frameStart, isVideoScene);
                 continue;
             }
 
@@ -1534,9 +1654,24 @@ void Engine::RenderLoop() {
                     // Same decoded frame to every monitor compositor.
                     m_videoManager->PresentToAllMonitors(*pending);
                 }
+                // Phase 3: cache for cadence re-presents; count the unique.
+                m_cachedVideoFrame = *pending;
+                m_hasVideoFrame.store(true, std::memory_order_release);
+                m_uniqueVideoFrames.fetch_add(1, std::memory_order_relaxed);
                 // New pixels fully handled this pass — disarm any setter-
                 // sourced dirty so we don't double-present.
                 m_frameDirty.store(false, std::memory_order_release);
+            } else if (isVideoScene && m_renderer && m_videoManager
+                       && m_hasVideoFrame.load(std::memory_order_acquire)) {
+                // Phase 3: nothing new due — re-draw the cached frame at
+                // wall cadence. The slot fence is monotonic, so waiting on
+                // the stored (older-or-equal) value is already satisfied.
+                m_renderer->DrawVideoFrame(m_cachedVideoFrame,
+                                           m_videoManager->GetSharedFence());
+                if (IsMultiMonitorMode()) {
+                    m_videoManager->PresentToAllMonitors(m_cachedVideoFrame);
+                }
+                m_repeatedVideoFrames.fetch_add(1, std::memory_order_relaxed);
             }
 
             // ── Clear color (static dark until texture is loaded) ──────
@@ -1576,7 +1711,7 @@ void Engine::RenderLoop() {
             Update(deltaMs / 1000.0);
 
             m_presentCount.fetch_add(1, std::memory_order_relaxed);
-            PaceLoop(frameStart);
+            PaceLoop(frameStart, isVideoScene);
         } else {
             // Renderer not ready — wait before retrying
             std::this_thread::sleep_for(milliseconds(16));
@@ -1593,9 +1728,32 @@ void Engine::RenderLoop() {
 // resume/unload/SET_* commands stay responsive.
 
 void Engine::PaceLoop(
-    std::chrono::high_resolution_clock::time_point frameStart) {
-    const double targetIntervalMs =
-        m_config.maxFps > 0 ? std::max(1000.0 / m_config.maxFps, 4.0) : 16.7;
+    std::chrono::high_resolution_clock::time_point frameStart,
+    bool isVideoScene) {
+    // P2-15: refresh the cached decoder cadence at most twice/sec
+    // (telemetry does percentile ring math — not per-wakeup work).
+    const auto now = std::chrono::high_resolution_clock::now();
+    if (now - m_cadenceSampledAt > std::chrono::milliseconds(500) &&
+        m_videoManager && m_videoManager->IsOpen()) {
+        m_cadenceSampledAt = now;
+        m_cachedDecoderFps = m_videoManager->GetTelemetry().decoderFps;
+    }
+    double targetIntervalMs;
+    if (isVideoScene && m_videoManager && m_videoManager->IsOpen()) {
+        // Phase 3: maximum-useful presentation cadence. The decoder still
+        // paces itself to the source rate; this only sets how often we
+        // present (new frame or cached re-present).
+        const int userCap = m_config.maxFps > 0 ? m_config.maxFps : 60;
+        targetIntervalMs =
+            1000.0 / CadenceController::PresentationTarget(
+                         m_videoManager->GetFrameRate(),
+                         m_speed.load(std::memory_order_relaxed),
+                         m_displayHzCached.load(std::memory_order_acquire),
+                         userCap);
+    } else {
+        targetIntervalMs =
+            RenderIntervalMs(m_config.maxFps, m_cachedDecoderFps);
+    }
     const auto deadline = frameStart +
         std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(
             std::chrono::duration<double, std::milli>(targetIntervalMs));

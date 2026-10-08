@@ -1,6 +1,8 @@
 #include "WorkerWManager.hpp"
 #include "LayerRepairPolicy.hpp"
 #include <shared/Logger.hpp>
+#include <wtsapi32.h>
+#include <powrprof.h>
 #include <string>
 #include <vector>
 #include <chrono>
@@ -190,6 +192,8 @@ shared::Result<void> WorkerWManager::Acquire() {
     m_acquired = true;
     m_state.store(DesktopHostState::Normal, std::memory_order_release);
     REX_LOG_INFO("WorkerW", "WorkerW acquired successfully");
+    // P3 / G1+G2: session + display notifications for the suspend check.
+    RegisterPowerNotifications();
     return shared::Result<void>();
 }
 
@@ -213,6 +217,9 @@ void WorkerWManager::Release() {
     }
 
     REX_LOG_INFO("WorkerW", "Releasing WorkerW...");
+
+    // P3 / G1+G2: drop notifications while the window is still alive.
+    UnregisterPowerNotifications();
 
     RunOnWindowThread([this] {
         if (m_renderWindow) {
@@ -596,6 +603,11 @@ bool WorkerWManager::ReacquireWorkerW(bool requestWorkerWSpawn) {
         REX_LOG_INFO("WorkerW", "Repairing wallpaper layer (reacquire)...");
         EnsureWindowThread();
 
+        // P3 / G1+G2: drop notifications for the dying window first (its
+        // HPOWERNOTIFY would otherwise leak; re-registered below on the new
+        // window after verification).
+        UnregisterPowerNotifications();
+
         // Destroy on the owning thread (the monitor thread does not pump).
         RunOnWindowThread([this] {
             if (m_renderWindow) {
@@ -671,6 +683,8 @@ bool WorkerWManager::ReacquireWorkerW(bool requestWorkerWSpawn) {
         m_acquired = true;
         m_state.store(DesktopHostState::Verified, std::memory_order_release);
         REX_LOG_INFO("WorkerW", "Wallpaper layer reacquired and verified");
+        // P3 / G1+G2: the render window is new — re-register notifications.
+        RegisterPowerNotifications();
         callback = m_recoveryCallback;
         repaired = true;
     } // opLock releases here.
@@ -1074,6 +1088,9 @@ HWND WorkerWManager::CreateRenderWindow(HWND parent, int width, int height) {
         return nullptr;
     }
 
+    // P3 / G1+G2: stash the manager for WndProc's session/power handling.
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
     return hwnd;
 }
 
@@ -1152,12 +1169,67 @@ void WorkerWManager::ReparentToWorkerW(HWND renderWindow, HWND workerW) {
 
 LRESULT CALLBACK WorkerWManager::WndProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // Instance recovery: CreateRenderWindow stashes `this` in USERDATA.
+    auto* self = reinterpret_cast<WorkerWManager*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    // P3 / G1+G2: session lock and console-display state drive the
+    // engine's suspend check (any source pauses, resume when all clear).
+    if (self) {
+        if (msg == WM_WTSSESSION_CHANGE) {
+            if (wParam == WTS_SESSION_LOCK) {
+                self->m_sessionLocked.store(true, std::memory_order_release);
+                REX_LOG_INFO("WorkerW", "session locked — suspending wallpaper");
+            } else if (wParam == WTS_SESSION_UNLOCK) {
+                self->m_sessionLocked.store(false, std::memory_order_release);
+                REX_LOG_INFO("WorkerW", "session unlocked — resuming wallpaper");
+            }
+        } else if (msg == WM_POWERBROADCAST && wParam == PBT_POWERSETTINGCHANGE) {
+            const auto* setting =
+                reinterpret_cast<PPOWERBROADCAST_SETTING>(lParam);
+            if (setting && setting->PowerSetting == GUID_CONSOLE_DISPLAY_STATE &&
+                setting->DataLength >= sizeof(DWORD)) {
+                const DWORD state = *reinterpret_cast<const DWORD*>(setting->Data);
+                const bool off = (state == 0);
+                if (self->m_displayOff.exchange(off, std::memory_order_acq_rel) != off) {
+                    REX_LOG_INFO("WorkerW", "console display {} — {} wallpaper",
+                                 off ? "off" : "on",
+                                 off ? "suspending" : "resuming");
+                }
+            }
+        }
+    }
 
     // NOTE: no PostQuitMessage here. This is a child render window, not an
     // application loop owner; posting quit from it can terminate whatever
     // thread pumps messages (observed host-loop exits). Lifetime is owned
     // by DestroyWindow from Acquire/Release/Reacquire paths.
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// ─── Session/display power state (P3 / G1+G2) ────────────────────────────
+
+void WorkerWManager::RegisterPowerNotifications() {
+    if (!m_renderWindow || !IsWindow(m_renderWindow)) return;
+    // Best-effort each: a dead window or denied session fails silently;
+    // polling fallbacks (power status) still work without these.
+    const BOOL wts = WTSRegisterSessionNotification(m_renderWindow,
+                                                    NOTIFY_FOR_THIS_SESSION);
+    m_powerNotify = RegisterPowerSettingNotification(
+        m_renderWindow, &GUID_CONSOLE_DISPLAY_STATE,
+        DEVICE_NOTIFY_WINDOW_HANDLE);
+    REX_LOG_DEBUG("WorkerW", "power notifications registered (wts={}, power={})",
+                  wts ? "ok" : "failed", m_powerNotify ? "ok" : "failed");
+}
+
+void WorkerWManager::UnregisterPowerNotifications() {
+    if (m_powerNotify) {
+        UnregisterPowerSettingNotification(m_powerNotify);
+        m_powerNotify = nullptr;
+    }
+    if (m_renderWindow && IsWindow(m_renderWindow)) {
+        WTSUnRegisterSessionNotification(m_renderWindow);
+    }
 }
 
 } // namespace rex::platform::windows

@@ -81,12 +81,17 @@ private:
     void RenderLoop();
     /// P16: sleep until the next expected frame (decoder cadence clamped
     /// by maxFps, floor ~15Hz so pause/resume/unload stay responsive).
-    void PaceLoop(std::chrono::high_resolution_clock::time_point frameStart);
+    void PaceLoop(std::chrono::high_resolution_clock::time_point frameStart,
+                  bool isVideoScene);
     shared::Result<void> ReinitializeRenderer();
     shared::Result<void> HandleDeviceLoss();
     void CheckDisplayChanges();
     /// Auto-pause/resume while a full-screen app owns the foreground.
     void CheckFullScreenPause();
+    /// Suspend sources (P3 / G1+G2): session lock, console display off,
+    /// battery saver / critical battery. Edge-posts m_suspendRequest;
+    /// the effective pause is fullscreen OR suspend.
+    void CheckSuspendSources();
     /// Push the current rotation/flip to the main renderer and the
     /// per-monitor compositors.
     void ApplyTransform();
@@ -124,10 +129,15 @@ private:
     shared::Stopwatch m_stopwatch;
     double m_currentPosition = 0.0;
 
+    // ─── Render cadence (P2-15): cached decoder fps, render-thread only.
+    // Refreshed at most twice/sec (telemetry does ring math); PaceLoop
+    // paces at min(maxFps, cached) so the loop never outruns the decoder.
+    double m_cachedDecoderFps = 0.0;
+    std::chrono::high_resolution_clock::time_point m_cadenceSampledAt{};
+
     // ─── Telemetry ─────────────────────────────────────────────────────
     double m_frameTime = 0.0;
-    long long m_frameCount = 0;
-    uint32_t m_recoveryCount = 0;
+    long long m_frameCount = 0;    uint32_t m_recoveryCount = 0;
     uint32_t m_deviceResetCount = 0;
     int m_lastMonitorCount = 0;
     int m_lastPrimaryWidth = 0;
@@ -168,6 +178,28 @@ private:
     mutable uint64_t m_presentRateBase{0};
     mutable std::chrono::steady_clock::time_point m_presentRateTime{};
     mutable double m_presentFps{0.0};
+    // Unique-video-present sampler (Phase 3): same folding for
+    // effectiveVideoFps (excludes cadence re-presents).
+    mutable uint64_t m_uniqueRateBase{0};
+    mutable std::chrono::steady_clock::time_point m_uniqueRateTime{};
+    mutable double m_effectiveVideoFps{0.0};
+    // ─── Wall-cadence video presentation (Phase 3) ────────────────────
+    // Render-thread only. Last presented video frame: re-drawn when the
+    // scheduler has nothing new due, so presentation holds display
+    // cadence while unique-frame rate follows decode throughput.
+    VideoFrame m_cachedVideoFrame{};
+    // Atomic: cleared from UnloadScene/Stop/ReinitializeRenderer (any
+    // thread under m_mutex) while the render loop reads it lock-free.
+    // A stale-true costs at most one extra re-present of a still-valid
+    // frame; a stale-false skips one re-present. The struct itself is
+    // render-thread-only.
+    std::atomic<bool> m_hasVideoFrame{false};
+    std::atomic<uint64_t> m_uniqueVideoFrames{0};
+    std::atomic<uint64_t> m_repeatedVideoFrames{0};
+    // Cached display refresh for the cadence controller (Phase 3):
+    // refreshed wherever m_currentMonitor is assigned; Phase 4 owns
+    // topology-change refresh completeness.
+    std::atomic<int> m_displayHzCached{60};
     // Render-thread only: dark clear applied once per texture-less state.
     bool m_darkCleared = false;
     // ─── Static image hot-reload (render-thread internal) ─────────────
@@ -186,11 +218,20 @@ private:
     /// Auto-pause state (render-thread only): true while we paused the
     /// wallpaper behind a full-screen app, so we resume only what we
     /// paused ourselves (never a user-initiated pause).
-    bool m_fullScreenPaused = false;
-    /// First sighting of the current full-screen episode (render-thread
+    bool m_fullScreenPaused = false;    /// First sighting of the current full-screen episode (render-thread
     /// only). A shell overlay that flashes fullscreen for a moment must not
     /// freeze the wallpaper — the pause fires only after it persists.
     std::chrono::steady_clock::time_point m_fullScreenSince{};
+    /// Suspend channel (P3 / G1+G2: session lock, display off, battery).
+    /// Same request protocol as fullscreen (1 = pause, -1 = resume);
+    /// the effective pause is fullscreen OR suspend. Render-thread only.
+    std::atomic<int> m_suspendRequest{0};
+    bool m_suspPaused = false;
+    /// True while WE auto-paused (either channel). Set on auto-pause,
+    /// cleared on auto-resume AND on any user Pause/Play/Stop — resume
+    /// fires only for our own pauses. Touched under m_mutex (user side)
+    /// and lock-free on the render thread: atomic.
+    std::atomic<bool> m_autoPaused{false};
     /// Position clock base (seconds). The Stopwatch restarts from zero on
     /// every Start(), so pause/resume used to rewind the reported position
     /// while the decoder kept its own PTS. The base is folded forward at

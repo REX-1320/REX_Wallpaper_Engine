@@ -114,7 +114,11 @@ bool AudioCapture::GetSpectrum(std::array<float, 32>& out) {
 }
 
 void AudioCapture::CaptureThread() {
-    AvSetMmThreadCharacteristics(L"Audio", nullptr);
+    // P2-16 drive-by: the NULL task index was an AVRT contract violation
+    // (it writes the index through the pointer) — both observed audio-scene
+    // crashes died inside AVRT.dll. Revert on thread exit.
+    DWORD taskIndex = 0;
+    HANDLE mmcss = AvSetMmThreadCharacteristics(L"Audio", &taskIndex);
 
     while (m_running.load(std::memory_order_acquire)) {
         UINT32 packet = 0;
@@ -132,6 +136,10 @@ void AudioCapture::CaptureThread() {
 
         ProcessAudio(data, frames);
         m_captureClient->ReleaseBuffer(frames);
+    }
+
+    if (mmcss) {
+        AvRevertMmThreadCharacteristics(mmcss);
     }
 }
 

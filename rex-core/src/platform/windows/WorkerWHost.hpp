@@ -26,6 +26,14 @@ public:
     void    StartMonitor(std::function<void()> onRecovery) override;
     void    StopMonitor() override;
 
+    // P3 / G1+G2: forwarded from the manager's render-window notifications.
+    bool IsSessionLocked() const override {
+        return m_manager && m_manager->IsSessionLocked();
+    }
+    bool IsDisplayOff() const override {
+        return m_manager && m_manager->IsDisplayOff();
+    }
+
 private:
     std::unique_ptr<WorkerWManager> m_manager;
     int m_width  = 0;

@@ -1207,6 +1207,8 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("repeatedFrames", json::Json(static_cast<double>(t.repeatedFrames)));
             tel.emplace("queueDepth", json::Json(static_cast<double>(t.queueDepth)));
             tel.emplace("pacingMs", json::Json(t.pacingMs));
+            tel.emplace("effectiveVideoFps", json::Json(t.effectiveVideoFps));
+            tel.emplace("playbackSpeed", json::Json(t.playbackSpeed));
             tel.emplace("displayHz", json::Json(t.displayHz));
             tel.emplace("decodeMsP50", json::Json(t.decodeMsP50));
             tel.emplace("decodeMsP95", json::Json(t.decodeMsP95));

@@ -525,6 +525,21 @@ shared::Result<void> VideoManager::OpenVideoForMonitor(const std::string& monito
 
         entry.monitorController->Play();
 
+        // P3-G4: single-audio-owner policy — layered per-monitor WASAPI
+        // streams are cacophony. The first opened monitor video owns the
+        // audio; later ones start muted (logged; the main shared video is
+        // unaffected).
+        for (const auto& other : m_monitorEntries) {
+            if (other.info.id != monitorId && other.monitorController &&
+                other.monitorController->IsOpen()) {
+                entry.monitorController->SetMute(true);
+                REX_LOG_INFO("VideoManager",
+                             "monitor '{}' video muted (audio owned by '{}')",
+                             monitorId.c_str(), other.info.id.c_str());
+                break;
+            }
+        }
+
         REX_LOG_INFO("VideoManager",
                      "Opened per-monitor video '{}' for monitor '{}'",
                      std::string(path), monitorId);

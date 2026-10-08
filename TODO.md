@@ -54,11 +54,11 @@
 - [x] **P1-10 0-frame/EOF handling [R5]** — bounded EOF attempts plus backoff; 0-frame loop must not hang `Open`, failed seek + loop must not spin **[DONE 2026-10-07 — see everything.md]**
 - [x] **P1-11 Audio ring overflow [R6]** — clamp/downmix to the actual ring channel count **[DONE 2026-10-07 — see everything.md]**
 - [x] **P1-12 Swapchain latency flag [R7]** — `Resize` must preserve `FRAME_LATENCY_WAITABLE_OBJECT`; **P1-13 A/V drift [R20]** — `SetSpeed` reaches audio, position follows decoder PTS **[DONE 2026-10-07 — see everything.md]**
-- [ ] **P2-14 Static render-once gating [R2]** — static wallpaper renders once, `frameDirty = false`, no rendering until something changes
-- [ ] **P2-15 Cadence control [R18]** — cadence = min(maxFps, decoder cadence); clamp IPC `maxFps` to sane bounds
-- [ ] **P2-16 Hot-reload/spectrum outside dirty gate [R19]** — reachable even when the render gate is inactive
-- [ ] **P2-17 Protocol hardening [R11 + R12 + R13]** — non-throwing `filesystem::exists(error_code)` + hostile-path validation; zero-length frame = malformed, not EOF
-- [ ] **P3 service behavior [G1-G5]** — power awareness (battery saver/display-off/lid); Win+L suspend; topology incl. secondary/DPI/HDR-toggle; audio endpoint re-enumeration + single-audio-owner policy; native named-mutex + protocol versioning (+ G6 bounds, G7 user error surface, G8 counters/bounded logs)
+- [x] **P2-14 Static render-once gating [R2]** — static wallpaper renders once, `frameDirty = false`, no rendering until something changes **[DONE 2026-10-08 — see everything.md]**
+- [x] **P2-15 Cadence control [R18]** — cadence = min(maxFps, decoder cadence); clamp IPC `maxFps` to sane bounds **[DONE 2026-10-08 — see everything.md]**
+- [x] **P2-16 Hot-reload/spectrum outside dirty gate [R19]** — reachable even when the render gate is inactive **[DONE 2026-10-08 — see everything.md]**
+- [x] **P2-17 Protocol hardening [R11 + R12 + R13]** — non-throwing `filesystem::exists(error_code)` + hostile-path validation; zero-length frame = malformed, not EOF **[DONE 2026-10-08 — see everything.md]**
+- [x] **P3 service behavior [G1-G5]** — power awareness (battery saver/display-off/lid); Win+L suspend; topology incl. secondary/DPI/HDR-toggle; audio endpoint re-enumeration + single-audio-owner policy; native named-mutex + protocol versioning (+ G6 bounds, G7 user error surface, G8 counters/bounded logs) **[DONE 2026-10-08 — see everything.md]**
 - [ ] **P4 benchmarks** — performance tuning + cross-hardware benchmarks only after P0-P3; GPU/mem numbers are meaningless until the correctness bugs are fixed
 
 - [x] **R1 · CRITICAL** — hot-reload `LoadTexture()` deadlocks the render thread inside `Begin/End` — **fixed 2026-10-07**: hot-reload block moved before `BeginFrame()` + the dirty gate in `Engine.cpp` (also fixes R19 starvation for static scenes, arms dirty on success); new `FrameLockPolicy` (`graphics/renderer/FrameLockPolicy.hpp`) tracks the frame window + owner thread — `BeginFrame` arms, `EndFrame` disarms, `LoadTexture` fails loudly (`InvalidState`) on same-thread reentry instead of self-deadlocking while cross-thread callers still block normally. Verified: `FrameLockGuardTest` 3/3 (RED: C1083 on missing header), full wallpaper suite green except 2 pre-existing fixture-gap failures (`VideoScenePlayback` needs `test.mp4`, `RapidSceneSwitching` expects success for `Z:\missing` — same known test-gap family), live CLI static load + file overwrite → `Hot-reloaded static image` in log, process alive (old code would hang the render thread)
@@ -71,15 +71,15 @@
 - [x] **R8 · HIGH** — `Stop()` splits A/V + position: audio rewinds to 0 while video and the clock resume mid-stream (`VideoPlaybackController.cpp:145-152`, `AudioPlayer.cpp:143-147`) **[DONE 2026-10-07 — see everything.md]**
 - [x] **R9 · HIGH** — `LOAD`/recovery drops volume and mute, only loop+speed are re-pushed (`Engine.cpp:427-428`); per-monitor videos have no volume/mute at all **[DONE 2026-10-07 — see everything.md]**
 - [x] **R10 · HIGH** — `Seek` never clears `FrameScheduler`: a stale pre-seek frame is presented (`VideoPlaybackController.cpp:180-194`, `FrameScheduler.cpp:11-18`) **[DONE 2026-10-07 — see everything.md]**
-- [ ] **R11 · MAJOR** — unhandled `std::filesystem::exists` throw on hostile paths crashes the runtime (`wallpaper_cli_main.cpp:815`); harden `Utf8ToWiden` with `MB_ERR_INVALID_CHARS`
-- [ ] **R12 · MAJOR** — zero-length frame conflated with EOF: one bad frame silently kills the session (`wallpaper_cli_main.cpp:508,707`). Answer `malformed frame`, continue
+- [x] **R11 · MAJOR** — unhandled `std::filesystem::exists` throw on hostile paths crashes the runtime (`wallpaper_cli_main.cpp:815`); harden `Utf8ToWiden` with `MB_ERR_INVALID_CHARS` **[DONE 2026-10-08 — see everything.md]**
+- [x] **R12 · MAJOR** — zero-length frame conflated with EOF: one bad frame silently kills the session (`wallpaper_cli_main.cpp:508,707`). Answer `malformed frame`, continue **[DONE 2026-10-08 — see everything.md]**
 - [x] **R13 · MAJOR** — `DuplicateHandle` results ignored; stale client process never revalidated, no detach (`wallpaper_cli_main.cpp:1056-1076`) **[DONE 2026-10-07 — see everything.md]**
 - [x] **R14 · MAJOR** — `Close()` can hang in blocking `av_read_frame`, no interrupt callback (`FfmpegVideoDecoder.cpp:609`) **[DONE 2026-10-07 — see everything.md]**
 - [x] **R15 · MAJOR** — `Seek` vs `Close` race on `m_decoder`; unlocked raw reads in diagnostics **[DONE 2026-10-07 — see everything.md]**
 - [x] **R16 · MAJOR** — HDR output state snapshot-once: stale PSO, late `SetForceSdr`, no mid-session toggle detection (`D3D12Renderer.cpp:374,506,1169`) **[DONE 2026-10-07 — see everything.md]**
 - [x] **R17 · MAJOR** — single command allocator reset per frame with no fence gating (`D3D12Renderer.cpp:1102-1108`) **[DONE 2026-10-07 — see everything.md]**
-- [ ] **R18 · MEDIUM** — `PaceLoop` ignores decoder cadence; idle loop wakes at `maxFps`; IPC `maxFps` unclamped (`Engine.cpp:1504`, `wallpaper_cli_main.cpp:748`)
-- [ ] **R19 · MEDIUM** — hot-reload + spectrum blocks starve behind the P16 gate (`Engine.cpp:1449-1474` vs `:1415-1418`)
+- [x] **R18 · MEDIUM** — `PaceLoop` ignores decoder cadence; idle loop wakes at `maxFps`; IPC `maxFps` unclamped (`Engine.cpp:1504`, `wallpaper_cli_main.cpp:748`) **[DONE 2026-10-08 — see everything.md]**
+- [x] **R19 · MEDIUM** — hot-reload + spectrum blocks starve behind the P16 gate (`Engine.cpp:1449-1474` vs `:1415-1418`) **[DONE 2026-10-08 — see everything.md]**
 - [x] **R20 · MEDIUM** — `SetSpeed` never reaches audio; engine position is wall-clock, never decoder PTS (drifts on speed/loop/recovery) **[DONE 2026-10-07 — see everything.md]**
 - [ ] **G1 · MISSING** — no power awareness (battery/display-off/lid): full-rate decode/upload/present forever
 - [ ] **G2 · MISSING** — no session-lock pause (Win+L keeps presenting behind the lock screen at full rate)

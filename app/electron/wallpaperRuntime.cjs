@@ -62,10 +62,18 @@ class WallpaperRuntime extends EventEmitter {
   }
 
   _teardown(proc, reason) {
-    if (this.proc === proc) {
-      this.proc = null
-      this.inited = false
+    // Only the process we currently own may clear client state. A late
+    // 'error' from an already-replaced process (e.g. kill() on a dead pid)
+    // used to fall through here unconditionally: it rejected the LIVE
+    // client's pending requests and dropped its in-flight INIT guard, so the
+    // next init() re-sent INIT to an already-initialized engine — exactly
+    // what the initPromise guard exists to prevent.
+    if (this.proc !== proc) {
+      this.logLine('wallpaper-runtime: ignoring teardown from stale process')
+      return
     }
+    this.proc = null
+    this.inited = false
     this.initPromise = null
     for (const { reject } of this.pending.values()) reject(new Error(reason))
     this.pending.clear()
@@ -76,8 +84,20 @@ class WallpaperRuntime extends EventEmitter {
     while (this.buffer.length >= 4) {
       const len = this.buffer.readUInt32LE(0)
       if (len > MAX_FRAME_BYTES) {
-        this.logLine('wallpaper-runtime: oversized frame, dropping', len)
+        // A corrupt length prefix means we can no longer tell where frames
+        // begin — and anything already buffered is suspect too. Dropping just
+        // the buffer left every later command timing out for the rest of the
+        // session. Instead, kill the process: the exit handler tears the
+        // client down and the normal crash-recovery replays the wallpaper on
+        // a fresh, re-synchronized stream. (A runtime that immediately
+        // corrupts a fresh stream is bounded by the app's recovery round cap.)
+        this.logLine('wallpaper-runtime: oversized frame, restarting runtime (stream out of sync)', len)
         this.buffer = Buffer.alloc(0)
+        try {
+          if (this.proc) this.proc.kill()
+        } catch {
+          // already gone
+        }
         return
       }
       if (this.buffer.length < 4 + len) return
@@ -153,9 +173,11 @@ class WallpaperRuntime extends EventEmitter {
   init(maxFps = 60, hardwareAcceleration = true) {
     // Concurrency-safe: concurrent callers share one in-flight INIT so a
     // double-click can never send a second INIT to an initialized engine.
+    // protocolVersion: native handshake (P3-G5) — a mismatch fails loudly
+    // instead of running on silent defaults.
     if (this.inited) return Promise.resolve()
     if (!this.initPromise) {
-      this.initPromise = this.send('INIT', { maxFps, hardwareAcceleration })
+      this.initPromise = this.send('INIT', { maxFps, hardwareAcceleration, protocolVersion: 1 })
         .then(() => {
           this.inited = true
         })

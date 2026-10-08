@@ -26,6 +26,13 @@ inline int16_t ClampToS16(float v) {
     if (v >= 1.0f)  return INT16_MAX;
     return static_cast<int16_t>(v * 32767.0f);
 }
+
+/// HRs that mean the render endpoint is gone (unplug/default change),
+/// not a transient glitch: the client must be re-enumerated.
+inline bool IsEndpointLost(HRESULT hr) {
+    return hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+           hr == AUDCLNT_E_SERVICE_NOT_RUNNING;
+}
 } // namespace
 
 void AudioPlayer::ResampleLinear(const int16_t* src, size_t srcFrames,
@@ -205,27 +212,19 @@ void AudioPlayer::SetMute(bool mute) {
 
 // ─── Internal thread ─────────────────────────────────────────────────────
 
-void AudioPlayer::ThreadLoop() {
-    // All WASAPI/COM work happens on this thread: init here, release before
-    // exit so CoUninitialize always pairs with CoInitializeEx on one thread.
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-    bool wasapiOk = false;
-    HRESULT hr = E_FAIL;
-    {
-        Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              IID_PPV_ARGS(&enumerator));
+bool AudioPlayer::OpenEndpoint() {
+    Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                  CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+    if (SUCCEEDED(hr)) {
+        Microsoft::WRL::ComPtr<IMMDevice> device;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
+        if (FAILED(hr)) {
+            hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        }
         if (SUCCEEDED(hr)) {
-            Microsoft::WRL::ComPtr<IMMDevice> device;
-            hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
-            if (FAILED(hr)) {
-                hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-            }
-            if (SUCCEEDED(hr)) {
-                hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                      reinterpret_cast<void**>(m_client.GetAddressOf()));
-            }
+            hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                  reinterpret_cast<void**>(m_client.GetAddressOf()));
         }
     }
 
@@ -260,14 +259,41 @@ void AudioPlayer::ThreadLoop() {
         hr = m_client->GetService(IID_PPV_ARGS(&m_render));
     }
     if (SUCCEEDED(hr)) {
-        wasapiOk = true;
         REX_LOG_INFO(kModule, "WASAPI render endpoint ready ({} frames/buffer)",
                      m_bufferFrames);
-    } else {
-        REX_LOG_WARN(kModule, "WASAPI unavailable (0x{:08X}); audio disabled", hr);
+        return true;
     }
+    REX_LOG_WARN(kModule, "WASAPI unavailable (0x{:08X}); audio disabled", hr);
+    m_client.Reset();
+    m_render.Reset();
+    return false;
+}
+
+void AudioPlayer::ThreadLoop() {
+    // All WASAPI/COM work happens on this thread: init here, release before
+    // exit so CoUninitialize always pairs with CoInitializeEx on one thread.
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    bool wasapiOk = OpenEndpoint();
+    auto lastEndpointRetry = std::chrono::steady_clock::now();
+    constexpr auto kEndpointRetryInterval = std::chrono::seconds(2);
 
     while (m_running.load(std::memory_order_acquire)) {
+        // P3-G4: endpoint loss (unplug/default change) re-enumerates instead
+        // of silencing audio until reload. Immediate attempt on loss, 2 s
+        // backoff while it stays unavailable.
+        if (m_endpointLost.exchange(false, std::memory_order_acq_rel)) {
+            REX_LOG_WARN(kModule, "render endpoint lost; re-enumerating");
+            m_render.Reset();
+            m_client.Reset();
+            wasapiOk = OpenEndpoint();
+            lastEndpointRetry = std::chrono::steady_clock::now();
+        } else if (!wasapiOk &&
+                   std::chrono::steady_clock::now() - lastEndpointRetry >
+                       kEndpointRetryInterval) {
+            wasapiOk = OpenEndpoint();
+            lastEndpointRetry = std::chrono::steady_clock::now();
+        }
         if (m_seekRequested.exchange(false, std::memory_order_acq_rel)) {
             DoSeek(m_seekTime.load(std::memory_order_acquire));
         }
@@ -451,7 +477,15 @@ int AudioPlayer::PushFrameToRing(AVFrame* frame) {
 
 void AudioPlayer::RenderStep() {
     UINT32 padding = 0;
-    if (FAILED(m_client->GetCurrentPadding(&padding))) {
+    // P3-G4: endpoint loss (unplug/default change) flags re-enumeration;
+    // transient failures stay silent as before.
+    HRESULT hr = m_client->GetCurrentPadding(&padding);
+    if (FAILED(hr)) {
+        if (IsEndpointLost(hr)) {
+            REX_LOG_WARN(kModule, "endpoint lost (0x{:08X}); re-enumerating",
+                         static_cast<unsigned>(hr));
+            m_endpointLost.store(true, std::memory_order_release);
+        }
         return;
     }
     if (padding >= m_bufferFrames) {
@@ -462,7 +496,13 @@ void AudioPlayer::RenderStep() {
     const float volume = m_volume.load(std::memory_order_relaxed);
 
     BYTE* data = nullptr;
-    if (FAILED(m_render->GetBuffer(framesAvail, &data)) || !data) {
+    hr = m_render->GetBuffer(framesAvail, &data);
+    if (FAILED(hr) || !data) {
+        if (FAILED(hr) && IsEndpointLost(hr)) {
+            REX_LOG_WARN(kModule, "endpoint lost (0x{:08X}); re-enumerating",
+                         static_cast<unsigned>(hr));
+            m_endpointLost.store(true, std::memory_order_release);
+        }
         return;
     }
 

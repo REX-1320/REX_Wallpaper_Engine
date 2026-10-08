@@ -254,6 +254,8 @@ target_link_libraries(rex-core
         runtimeobject
         dwmapi
         winmm
+        wtsapi32
+        powrprof
         shcore
         mmdevapi
         ole32
@@ -329,6 +331,8 @@ if(BUILD_TESTING)
         runtimeobject
         dwmapi
         winmm
+        wtsapi32
+        powrprof
         GTest::gtest
         GTest::gtest_main
     )
@@ -351,6 +355,8 @@ if(BUILD_TESTING)
         runtimeobject
         dwmapi
         winmm
+        wtsapi32
+        powrprof
         GTest::gtest
         GTest::gtest_main
     )
@@ -375,6 +381,7 @@ if(BUILD_TESTING)
         tests/wallpaper/test_display_topology.cpp
         tests/wallpaper/test_decoder_pool.cpp
         tests/wallpaper/test_frame_context.cpp
+        tests/wallpaper/test_cadence_controller.cpp
         tests/wallpaper/test_decoder_lifetime.cpp
         tests/wallpaper/test_decoder_eof.cpp
         tests/wallpaper/test_audio_resample.cpp
@@ -410,6 +417,8 @@ if(BUILD_TESTING)
         runtimeobject
         dwmapi
         winmm
+        wtsapi32
+        powrprof
         shcore
         ${FFMPEG_LIBRARIES}
         GTest::gtest
@@ -690,6 +699,8 @@ target_link_libraries(rex-wallpaper-runtime PRIVATE
     runtimeobject
     dwmapi
     winmm
+        wtsapi32
+        powrprof
         shcore
     ${FFMPEG_LIBRARIES}
 )

@@ -30,6 +30,13 @@ public:
 
     virtual void StartMonitor(std::function<void()> /*onRecovery*/) {}
     virtual void StopMonitor() {}
+
+    /// Session/display power state (P3 / G1+G2). The WorkerW host registers
+    /// session + console-display notifications on its render window; other
+    /// hosts report false (no suspension). Polled by the engine's suspend
+    /// check — see WorkerWManager::WndProc.
+    virtual bool IsSessionLocked() const { return false; }
+    virtual bool IsDisplayOff() const { return false; }
 };
 
 } // namespace rex::platform::windows
