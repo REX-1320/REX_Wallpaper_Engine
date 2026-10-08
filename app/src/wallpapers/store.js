@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { createWallpaperFromType, detectFileType, PLAYLISTS, PLAYLIST_ICON_DEFAULTS, TYPE_META } from './registry'
+import { createWallpaperFromType, detectFileType, isSupportedWallpaperType, PLAYLISTS, PLAYLIST_ICON_DEFAULTS, TYPE_META } from './registry'
 
 const wallpapers = new Map()
 let playlists = PLAYLISTS.map((name, i) => ({ id: `pl-${i}`, name, icon: PLAYLIST_ICON_DEFAULTS[i] ?? 'music' }))
@@ -140,6 +140,10 @@ export async function loadWallpaperFile(file) {
   seedWallpapers()
   const fileName = typeof file === 'string' ? file : file.name
   const type = detectFileType(fileName) ?? 'IMAGE'
+  if (!isSupportedWallpaperType(type)) {
+    console.warn(`loadWallpaperFile: ${type} wallpapers are not supported yet (${fileName}); skipping.`)
+    return null
+  }
   const wallpaper = createWallpaperFromType(type)
   if (!wallpaper) return null
   wallpaper.id = `file-${(fileCounter += 1)}`
