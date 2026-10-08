@@ -20,6 +20,25 @@ import {
 
 export const WALLPAPER_TYPES = ['IMAGE', 'VIDEO', 'WEB', 'SCENE', 'SHADER', 'AUDIO_VISUALIZER']
 
+// v1 reality: only these two reach the engine. Everything else is UI-only
+// and must be hidden/badged, never applied. See docs/superpowers/plans/2026-10-08-ui-honesty-supported-types.md
+export const SUPPORTED_WALLPAPER_TYPES = ['IMAGE', 'VIDEO']
+export const DEFERRED_TYPES = ['WEB', 'SCENE', 'SHADER', 'AUDIO_VISUALIZER']
+
+export function isSupportedWallpaperType(type) {
+  return SUPPORTED_WALLPAPER_TYPES.includes(type)
+}
+
+export const SUPPORTED_EXTENSIONS = {
+  IMAGE: ['.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'],
+  VIDEO: ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.m4v', '.webm', '.mpg', '.mpeg'],
+}
+
+export function isSupportedWallpaperPath(path) {
+  const ext = path.slice(path.lastIndexOf('.')).toLowerCase()
+  return Object.values(SUPPORTED_EXTENSIONS).flat().includes(ext)
+}
+
 export const TYPE_META = {
   IMAGE: { label: 'Image', icon: ImageIcon, gradient: 'linear-gradient(135deg,#7c5cff,#ff6ad5)' },
   VIDEO: { label: 'Video', icon: VideoIcon, gradient: 'linear-gradient(135deg,#00c2ff,#6ee7b7)' },
