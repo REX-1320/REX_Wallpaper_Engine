@@ -469,7 +469,7 @@ static int SetImageWallpaper(const std::wstring& file, FillMode fillMode) {
 //   [uint32 LE length][UTF-8 JSON payload]
 //
 // Commands:  INIT, LOAD, PLAY, PAUSE, STOP, UNLOAD, SET_FILL_MODE,
-//            SET_VOLUME, SET_SPEED, SET_LOOP, SET_MONITOR, GET_STATUS,
+//            SET_VOLUME, SET_SPEED, SET_LOOP, SET_MUTE, SET_MONITOR, GET_STATUS,
 //            GET_CAPABILITIES, SHUTDOWN
 // Responses: {"type":"response","id":N,"ok":true,"data":{...}}
 // Events:    {"type":"event","event":"READY|LOADED|PLAYING|PAUSED|
@@ -984,7 +984,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
         }
 
         if (cmd == "SET_FILL_MODE" || cmd == "SET_VOLUME" || cmd == "SET_SPEED" ||
-            cmd == "SET_LOOP" || cmd == "SET_BRIGHTNESS" || cmd == "SET_CONTRAST" ||
+            cmd == "SET_LOOP" || cmd == "SET_MUTE" || cmd == "SET_BRIGHTNESS" || cmd == "SET_CONTRAST" ||
             cmd == "SET_SATURATION") {
             if (!engine) {
                 WriteResponse(id, false, "runtime not initialized");
@@ -1003,6 +1003,9 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                 value = std::to_string(params["value"].AsFloat(0.0f));
             } else if (cmd == "SET_LOOP") {
                 property = "loop";
+                value = params["value"].AsBool(false) ? "true" : "false";
+            } else if (cmd == "SET_MUTE") {
+                property = "mute";
                 value = params["value"].AsBool(false) ? "true" : "false";
             } else if (cmd == "SET_BRIGHTNESS") {
                 property = "brightness";
