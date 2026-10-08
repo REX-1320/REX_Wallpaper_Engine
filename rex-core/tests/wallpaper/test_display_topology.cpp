@@ -80,6 +80,39 @@ TEST(TopologyChangedTest, EmptyToEmptyIsUnchanged) {
     EXPECT_FALSE(MonitorTopologyChanged({}, {}));
 }
 
+TEST(TopologyChangedTest, RefreshRateChangeIsDetected) {
+    // 160 Hz -> 60 Hz moves no pixels: without Hz in the predicate the
+    // cadence controller would never recalculate.
+    auto a = SoloPrimary();
+    a[0].refreshHz = 160;
+    auto b = a;
+    b[0].refreshHz = 60;
+    EXPECT_TRUE(MonitorTopologyChanged(a, b));
+}
+
+// ─── Display-Hz selection (Phase 4) ───────────────────────────────────────
+
+TEST(DisplayHzTest, CurrentMonitorHzWins) {
+    auto monitors = SoloPrimary();
+    monitors[0].refreshHz = 160;
+    EXPECT_EQ(SelectDisplayHz(monitors, "DP-1", 60), 160);
+}
+
+TEST(DisplayHzTest, UnknownMonitorFallsBack) {
+    auto monitors = SoloPrimary();
+    monitors[0].refreshHz = 160;
+    EXPECT_EQ(SelectDisplayHz(monitors, "NOPE", 60), 60);
+}
+
+TEST(DisplayHzTest, UnreportedHzFallsBack) {
+    auto monitors = SoloPrimary();  // refreshHz 0 = unknowable
+    EXPECT_EQ(SelectDisplayHz(monitors, "DP-1", 60), 60);
+}
+
+TEST(DisplayHzTest, EmptyListFallsBack) {
+    EXPECT_EQ(SelectDisplayHz({}, "DP-1", 60), 60);
+}
+
 // ─── HDR sync plan ──────────────────────────────────────────────────────────
 
 TEST(HdrSyncPlanTest, SteadySdrNeedsNothing) {

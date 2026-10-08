@@ -271,6 +271,28 @@ TEST(FrameSchedulerTest, FS14_FutureFramesNotDroppedThenDue) {
     EXPECT_EQ(scheduler.GetDroppedCount(), 2ULL);
 }
 
+TEST(FrameSchedulerTest, FS15_FullRingOfFutureFallsBackToNewest) {
+    // Decode lapped a loop behind the wrapped wall: 8 unpublished frames,
+    // all still future. Starving would freeze video into repeat/burst
+    // cycles (proven live at 2x); fall back to the newest published frame
+    // and count the bypassed once. A repeat Tick adds nothing.
+    FrameScheduler scheduler;
+    for (int i = 0; i < 8; ++i) {
+        VideoFrame f{};
+        f.valid = true;
+        f.slot = i;
+        f.frameIndex = i + 1;
+        f.pts = 100.0 + i * 0.016;
+        scheduler.Push(f);
+    }
+    const VideoFrame* result = scheduler.Tick(5.0);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->frameIndex, 8u);
+    EXPECT_EQ(scheduler.GetDroppedCount(), 7ULL);
+    EXPECT_EQ(scheduler.Tick(5.0), nullptr);
+    EXPECT_EQ(scheduler.GetDroppedCount(), 7ULL);
+}
+
 
 TEST(DiscontinuityRuleTest, BackwardJumpIsASeek) {
     // Loop wrap (duration -> ~0) must clear the scheduler.

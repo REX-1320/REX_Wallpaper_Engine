@@ -90,6 +90,9 @@ private:
 
     // ─── WASAPI (internal thread only) ──────────────────────────────────
     void RenderStep();
+    /// (Re)open the default render endpoint. True when rendering is
+    /// possible; false keeps decode running while render retries.
+    bool OpenEndpoint();
 
     // ─── FFmpeg state ───────────────────────────────────────────────────
     AVFormatContext* m_fmtCtx    = nullptr;
@@ -129,6 +132,9 @@ private:
     std::atomic<bool> m_seekRequested{false};
     std::atomic<double> m_seekTime{0.0};
     std::atomic<double> m_position{0.0};
+    // P3-G4: set by RenderStep on endpoint-loss HRs; the thread loop
+    // re-enumerates instead of silencing audio until reload.
+    std::atomic<bool> m_endpointLost{false};
     bool m_hasAudio = false;
 
     std::thread m_thread;

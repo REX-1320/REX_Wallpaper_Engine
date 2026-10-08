@@ -1,4 +1,5 @@
 #include "SettingsModule.hpp"
+#include <shared/Logger.hpp>
 #include "interfaces/ISettingsService.hpp"
 #include "modules/EventBus.hpp"
 #include "modules/ConfigurationStore.hpp"
@@ -22,6 +23,19 @@ bool SettingsModule::initialize(rex::modules::IModuleContext* context) {
     bus_ = context->getService<rex::modules::EventBus>().get();
     configStoreShared_ = context->getService<rex::modules::ConfigurationStore>();
     configStore_ = configStoreShared_.get();
+
+    // Both are dereferenced below (and by every service that takes them by
+    // reference). Bail out instead of dereferencing nullptr: a missing service
+    // is an orchestration bug, but crashing the host with an access violation
+    // hides it completely.
+    if (!bus_ || !configStore_) {
+        REX_LOG_ERROR("Settings",
+                      "Core services missing from the container "
+                      "(EventBus={}, ConfigurationStore={}) — cannot initialize",
+                      bus_ ? "ok" : "null", configStore_ ? "ok" : "null");
+        state_ = rex::modules::ModuleState::Failed;
+        return false;
+    }
 
     registry_ = std::make_unique<SettingsRegistry>();
     validator_ = std::make_unique<ValidationEngine>();

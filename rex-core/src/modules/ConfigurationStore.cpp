@@ -4,6 +4,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <iostream>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <filesystem>
+#endif
 
 namespace rex::modules {
 
@@ -201,6 +206,12 @@ ConfigurationStore::ConfigurationStore(const std::string& filePath)
 
 std::vector<ModuleConfig> ConfigurationStore::loadAll() {
     std::lock_guard<std::mutex> lock(mutex_);
+    return loadAllUnlocked();
+}
+
+// Unlocked reader: only valid with mutex_ held (see saveModule), or from
+// contexts that already serialized access.
+std::vector<ModuleConfig> ConfigurationStore::loadAllUnlocked() {
     std::ifstream file(filePath_);
     if (!file) return {};
     std::stringstream buffer;
@@ -210,13 +221,43 @@ std::vector<ModuleConfig> ConfigurationStore::loadAll() {
 
 void ConfigurationStore::saveAll(const std::vector<ModuleConfig>& configs) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::ofstream file(filePath_);
-    if (!file) throw std::runtime_error("Cannot write config file: " + filePath_);
-    file << serializeConfigs(configs);
+    saveAllUnlocked(configs);
+}
+
+// Atomic write: serialize to a sibling temp file and rename over the target
+// in one step. The old code truncated modules.json in place, so a crash or a
+// power cut mid-write left a half-written file — and loadAll treats a corrupt
+// file exactly like a fresh install (all settings gone).
+void ConfigurationStore::saveAllUnlocked(const std::vector<ModuleConfig>& configs) {
+    const std::string payload = serializeConfigs(configs);
+    const std::string tmpPath = filePath_ + ".tmp";
+    {
+        std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!file) throw std::runtime_error("Cannot write config file: " + tmpPath);
+        file << payload;
+        file.flush();
+        if (!file) throw std::runtime_error("Failed writing config file: " + tmpPath);
+    }
+#ifdef _WIN32
+    // MOVEFILE_REPLACE_EXISTING replaces the target atomically on the same
+    // volume (MOVEFILE_WRITE_THROUGH forces the metadata to disk).
+    if (!MoveFileExA(tmpPath.c_str(), filePath_.c_str(),
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        throw std::runtime_error("Cannot replace config file: " + filePath_);
+    }
+#else
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::rename(tmpPath, filePath_, ec);
+    if (ec) throw std::runtime_error("Cannot replace config file: " + filePath_);
+#endif
 }
 
 ModuleConfig ConfigurationStore::loadModule(const std::string& moduleId) {
-    auto all = loadAll();
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Unlocked variant: loadAll() would re-lock mutex_ on this same thread
+    // (non-recursive) and throw "resource deadlock would occur".
+    const auto all = loadAllUnlocked();
     for (auto& cfg : all) {
         if (cfg.moduleId == moduleId) return cfg;
     }
@@ -224,7 +265,11 @@ ModuleConfig ConfigurationStore::loadModule(const std::string& moduleId) {
 }
 
 void ConfigurationStore::saveModule(const ModuleConfig& config) {
-    auto all = loadAll();
+    // Held across the whole read-modify-write: the old code released the lock
+    // between loadAll and saveAll, so two threads racing enableModule /
+    // persistSetting silently destroyed each other's entries.
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto all = loadAllUnlocked();
     bool found = false;
     for (auto& cfg : all) {
         if (cfg.moduleId == config.moduleId) {
@@ -234,7 +279,7 @@ void ConfigurationStore::saveModule(const ModuleConfig& config) {
         }
     }
     if (!found) all.push_back(config);
-    saveAll(all);
+    saveAllUnlocked(all);
 }
 
 } // namespace rex::modules

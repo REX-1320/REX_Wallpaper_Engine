@@ -36,3 +36,5 @@ dist/
 # OS
 Thumbs.db
 .DS_Store
+
+.opencode/ralph-loop.local.md

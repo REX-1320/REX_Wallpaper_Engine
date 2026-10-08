@@ -1,6 +1,7 @@
 #pragma once
 #include <unordered_map>
 #include <string>
+#include <utility>
 #include <vector>
 #include <mutex>
 #include <functional>
@@ -28,7 +29,11 @@ public:
 
 private:
     void publishEvent(const std::string& eventType, const std::string& commandId);
-    void rebuildReverseMap();
+    /// Rebuilds the reverse map. Returns the shortcut conflicts it found so the
+    /// caller can publish them AFTER releasing the lock — EventBus delivers
+    /// synchronously, so publishing under mutex_ let any subscriber that
+    /// touched the command service deadlock against itself.
+    std::vector<std::pair<std::string, std::string>> rebuildReverseMap();
 
     struct ShortcutHash {
         std::size_t operator()(const Shortcut& s) const {

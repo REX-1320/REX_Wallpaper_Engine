@@ -1,7 +1,10 @@
 #include "ProfileManager.hpp"
 #include <algorithm>
 #include <chrono>
+#include <iostream>
+#include <string>
 #include <thread>
+#include <vector>
 #include <sstream>
 
 namespace rex::profiles {
@@ -179,7 +182,24 @@ bool ProfileManager::applyProfile(const Profile& profile) {
         for (auto& [key, val] : profile.personalizationSettings) {
             if (key == "taskbar.position") {
                 auto ts = m_personalizationService->getTaskbarSettings();
-                ts.position = std::stoi(val);
+                // A non-numeric value (hand-edited or corrupted settings file)
+                // used to throw out of applyProfile; on the auto-switch thread
+                // that is an uncaught exception -> std::terminate, killing the
+                // whole host instead of skipping one setting.
+                try {
+                    size_t consumed = 0;
+                    const int parsed = std::stoi(val, &consumed);
+                    if (consumed == val.size()) {
+                        ts.position = parsed;
+                    } else {
+                        std::cerr << "[ProfileManager] ignoring non-numeric "
+                                     "taskbar.position value: " << val << "\n";
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[ProfileManager] ignoring invalid "
+                                 "taskbar.position '" << val << "': "
+                              << e.what() << "\n";
+                }
                 m_personalizationService->setTaskbarSettings(ts);
             } else if (key == "taskbar.autoHide") {
                 auto ts = m_personalizationService->getTaskbarSettings();
@@ -229,15 +249,36 @@ void ProfileManager::autoSwitchLoop() {
     while (m_autoSwitching) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
         if (!m_autoSwitching) break;
-        std::unique_lock<std::mutex> lock(m_mutex);
-        auto profiles = loadAll();
-        for (auto& p : profiles) {
-            for (auto& t : p.triggers) {
-                if (t.enabled && evaluateTrigger(t)) {
-                    lock.unlock();
-                    applyProfile(p.id);
-                    break;
+
+        // Collect matches under the lock, apply outside it. The old loop
+        // unlocked in place and then kept iterating: the next matching profile
+        // unlocked an already-unlocked unique_lock (UB — mutex unlocked twice)
+        // and applied profiles while holding no snapshot.
+        std::vector<std::string> matches;
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            for (auto& p : loadAll()) {
+                for (auto& t : p.triggers) {
+                    if (t.enabled && evaluateTrigger(t)) {
+                        matches.push_back(p.id);
+                        break;
+                    }
                 }
+            }
+        }
+
+        for (const auto& id : matches) {
+            if (!m_autoSwitching) break;
+            // A failing profile must not kill this thread (an exception here
+            // would escape the thread function and abort the process).
+            try {
+                applyProfile(id);
+            } catch (const std::exception& e) {
+                std::cerr << "[ProfileManager] auto-switch to '" << id
+                          << "' failed: " << e.what() << "\n";
+            } catch (...) {
+                std::cerr << "[ProfileManager] auto-switch to '" << id
+                          << "' failed with an unknown error\n";
             }
         }
     }

@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "ModuleRegistry.hpp"
@@ -64,6 +65,11 @@ private:
     std::unique_ptr<LifecycleCoordinator> coordinator_;
     std::unique_ptr<UpdateManager> updateMgr_;
     std::vector<std::string> startupOrder_;
+    // Serializes reload against everything that snapshots module shared_ptrs
+    // (update(), enable/disable, start/stop, a second reload). FreeLibrary in
+    // the middle of another thread's snapshot keeps an object alive whose
+    // vtable points at unmapped memory.
+    std::mutex reloadMutex_;
     bool initialized_ = false;
 };
 

@@ -2,8 +2,9 @@
 
 > A modern desktop platform for Windows — widgets, wallpaper, window effects, and automation.
 
-**Status:** Pre-development (Phase 0 — Foundation)
+**Status:** Active development — native core engine + Electron shell functional (well past Phase 0)
 **Target hardware:** Windows 10/11
+**See also:** [everything.md](everything.md) (what exists & what's done) · [TODO.md](TODO.md) (what's left) · [#project_status.md](%23project_status.md) (per-feature audit)
 
 ---
 
@@ -18,6 +19,19 @@ REX is the layer between Windows and the user that Windows never built: fast, na
 - **SDK** — build widgets with HTML/CSS/JS
 - **Marketplace** — discover, install, share community content
 
+## What's done already
+
+~121 features shipped (~24 partial, ~164 to go — see [TODO.md](TODO.md)). Highlights:
+
+- **Wallpaper engine:** 6 renderers (image / video via MF+ffmpeg / web / D3D12 shader / scene / audio-reactive), playback controls, telemetry, multi-monitor, recovery
+- **Widgets:** layered-HWND host + Clock, Weather, System Monitor built-ins
+- **Personalization:** taskbar/explorer/start-menu registry adapters + full manager/service stack, profiles with import/export/rollback
+- **Module platform:** loader, lifecycle, health monitor, sandbox, signature verification, dependency resolver, event bus
+- **Theme system:** registry, tokens, style resolver, component registry
+- **UI:** Electron + React app (wallpaper gallery, widgets workspace, installer packaging) + TS Surface System with 6 materials and design tokens (earlier native C++ shell archived in `dump/`)
+- **Docs:** complete RES spec suite (16 docs), ADRs 001–006, developer guide
+- Full inventory: [everything.md](everything.md)
+
 ## Architecture
 
 ```
@@ -30,6 +44,7 @@ Core (C++20) ←── IPC (named pipes + protobuf) ──→ Shell (C# / WinUI 
 ```
 
 *Core language decision: C++20 now, Rust deferrable post-Phase 3 per ADR-006.*
+*Current UI: Electron + React (`app/`) + TS Surface System (`src/ui/surface`); C# shell in `rex-shell/`; retired native C++ UI in `dump/`.*
 
 ## Docs
 

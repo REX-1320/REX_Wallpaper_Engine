@@ -1,10 +1,13 @@
 #pragma once
 
 #include "IDesktopHost.hpp"
+#include "DesktopWindowThread.hpp"
 
 #include <windows.h>
 #include <atomic>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <thread>
 
 namespace rex::platform::windows {
@@ -35,6 +38,15 @@ private:
 
     void MonitorShell();
 
+    // Same window-thread rule as WorkerWManager (BUG-001): this host's
+    // render window must be owned by a thread that dispatches messages, or
+    // Explorer blocks on cross-process sends into it. ProgmanHost is the
+    // fallback host, active only when WorkerW acquisition fails — but when it
+    // is active it owns the desktop and needs the same treatment.
+    bool EnsureWindowThread();
+    bool RunOnWindowThread(std::function<bool()> op, DWORD timeoutMs = 5000);
+    void StopWindowThread();
+
     HWND m_progman      = nullptr;
     HWND m_renderWindow = nullptr;
 
@@ -47,6 +59,10 @@ private:
     std::atomic<bool>              m_monitoring{false};
     std::thread                    m_monitorThread;
     std::function<void()>          m_recoveryCallback;
+
+    // Owned window thread for the render window (created with the first
+    // Acquire, stopped in Release).
+    std::unique_ptr<DesktopWindowThread> m_windowThread;
 };
 
 } // namespace rex::platform::windows

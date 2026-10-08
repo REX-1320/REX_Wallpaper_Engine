@@ -30,11 +30,26 @@ inline bool MonitorTopologyChanged(const std::vector<MonitorInfo>& before,
         const MonitorInfo& b = after[i];
         if (a.id != b.id || a.x != b.x || a.y != b.y || a.width != b.width ||
             a.height != b.height || a.isPrimary != b.isPrimary ||
-            a.dpiScale != b.dpiScale) {
+            a.dpiScale != b.dpiScale || a.refreshHz != b.refreshHz) {
             return true;
         }
     }
     return false;
+}
+
+/// Display refresh rate for the cadence controller (Phase 4): the current
+/// monitor's reported Hz, or the fallback when missing/unreported. Pure so
+/// the topology hook stays testable; the hook refreshes the engine's cached
+/// Hz from each fresh enumeration, so a mid-playback Hz change recalculates
+/// cadence without restarting the wallpaper.
+inline int SelectDisplayHz(const std::vector<MonitorInfo>& monitors,
+                           const std::string& currentId, int fallbackHz) {
+    for (const auto& m : monitors) {
+        if (m.id == currentId && m.refreshHz > 0) {
+            return m.refreshHz;
+        }
+    }
+    return fallbackHz;
 }
 
 }  // namespace rex::wallpaper

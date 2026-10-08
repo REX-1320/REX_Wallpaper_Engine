@@ -34,9 +34,19 @@ const MODE_BY_STYLE = {
   fit: 'fit',
 }
 
+const LOG_PATH_MAX_BYTES = 2 * 1024 * 1024
+
 function logLine(...args) {
   try {
-    fs.appendFileSync(path.join(app.getPath('temp'), 'rex-app.log'), `[${new Date().toISOString()}] ${args.join(' ')}\n`)
+    const logPath = path.join(app.getPath('temp'), 'rex-app.log')
+    try {
+      // A tray app runs for days and this logger is synchronous; never let
+      // the file grow without bound. Previous log moves aside once.
+      if (fs.statSync(logPath).size > LOG_PATH_MAX_BYTES) {
+        fs.renameSync(logPath, logPath + '.1')
+      }
+    } catch {}
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${args.join(' ')}\n`)
   } catch {}
 }
 
@@ -68,6 +78,16 @@ let capabilities = null
 // without user intervention. lastApplied is only set after a successful apply.
 
 let lastApplied = null // { kind: 'image'|'video', params }
+
+// Crash-recovery accounting. recoverRuntime() is triggered by every 'exit'
+// event; without a re-entrancy guard each crash started a fresh 5-attempt
+// loop, and a wallpaper that always crashes on LOAD turned into an infinite
+// spawn/INIT/LOAD/crash cycle. recovering serializes the loops, and after
+// MAX_RECOVERY_ROUNDS consecutive failed rounds recovery parks until the user
+// applies a different wallpaper (which resets the counter).
+let recovering = false
+let consecutiveFailedRounds = 0
+const MAX_RECOVERY_ROUNDS = 3
 
 function setRuntimeAvailable(available) {
   trayManager?.setRuntimeAvailable(available)
@@ -103,24 +123,46 @@ async function reapplyLastWallpaper() {
 
 async function recoverRuntime() {
   if (isQuitting || !lastApplied) return
-  setRuntimeAvailable(false)
-  logLine('runtime:recovery start (last wallpaper queued)')
-  let attempts = 0
-  while (!isQuitting && attempts < 5) {
-    attempts++
-    try {
-      if (await reapplyLastWallpaper()) {
-        setRuntimeAvailable(true)
-        logLine('runtime:recovery ok (attempt', attempts + ')')
-        return
-      }
-    } catch (err) {
-      logLine('runtime:recovery ERROR', err.message)
-    }
-    await new Promise((r) => setTimeout(r, 3000))
+  if (recovering) {
+    logLine('runtime:recovery already in progress — ignoring duplicate trigger')
+    return
   }
-  setRuntimeAvailable(false)
-  logLine('runtime:recovery gave up after', attempts, 'attempts')
+  if (consecutiveFailedRounds >= MAX_RECOVERY_ROUNDS) {
+    logLine('runtime:recovery parked after', consecutiveFailedRounds,
+            'failed rounds — waiting for a new wallpaper')
+    return
+  }
+  recovering = true
+  try {
+    setRuntimeAvailable(false)
+    logLine('runtime:recovery start (last wallpaper queued)')
+    let attempts = 0
+    let ok = false
+    while (!isQuitting && attempts < 5) {
+      attempts++
+      try {
+        if (await reapplyLastWallpaper()) {
+          ok = true
+          break
+        }
+      } catch (err) {
+        logLine('runtime:recovery ERROR', err.message)
+      }
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+    if (ok) {
+      consecutiveFailedRounds = 0
+      setRuntimeAvailable(true)
+      logLine('runtime:recovery ok (attempt', attempts + ')')
+    } else {
+      consecutiveFailedRounds++
+      setRuntimeAvailable(false)
+      logLine('runtime:recovery gave up after', attempts,
+              'attempts (failed round', consecutiveFailedRounds, 'of', MAX_RECOVERY_ROUNDS + ')')
+    }
+  } finally {
+    recovering = false
+  }
 }
 
 async function getCapabilities() {
@@ -269,6 +311,7 @@ app.whenReady().then(() => {
       capabilities = null // adapter changed — refresh on next query
       await runtime.send('PLAY', {})
       lastApplied = { kind: 'image', params: { path: filePath, mode } }
+      consecutiveFailedRounds = 0 // a deliberate new wallpaper resets recovery
       setRuntimeAvailable(true)
       return { ok: true, style: mode }
     } catch (err) {
@@ -309,6 +352,7 @@ app.whenReady().then(() => {
         kind: 'video',
         params: { path: filePath, mode, loop, muted, volume, speed, fps },
       }
+      consecutiveFailedRounds = 0 // a deliberate new wallpaper resets recovery
       setRuntimeAvailable(true)
       return { ok: true }
     } catch (err) {
@@ -322,7 +366,10 @@ app.whenReady().then(() => {
   ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed } = {}) => {
     const applied = []
     const skipped = []
-    await sendIfSupported('SET_FILL_MODE', { value: mode }, applied, skipped)
+    // SET_FILL_MODE is the only update without a null guard — sending it with
+    // an undefined value reset the fill mode every time any other property
+    // was updated.
+    if (mode != null) await sendIfSupported('SET_FILL_MODE', { value: mode }, applied, skipped)
     if (loop != null) await sendIfSupported('SET_LOOP', { value: !!loop }, applied, skipped)
     if (speed != null) await sendIfSupported('SET_SPEED', { value: speed }, applied, skipped)
     if (volume != null) await sendIfSupported('SET_VOLUME', { value: volume }, applied, skipped)

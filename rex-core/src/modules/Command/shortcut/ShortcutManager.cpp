@@ -17,10 +17,14 @@ void ShortcutManager::publishEvent(const std::string& eventType, const std::stri
 }
 
 void ShortcutManager::registerShortcut(const std::string& commandId, const Shortcut& defaultShortcut) {
-    std::lock_guard lock(mutex_);
-    defaultShortcuts_[commandId] = defaultShortcut;
-    rebuildReverseMap();
+    std::vector<std::pair<std::string, std::string>> conflicts;
+    {
+        std::lock_guard lock(mutex_);
+        defaultShortcuts_[commandId] = defaultShortcut;
+        conflicts = rebuildReverseMap();
+    }
     publishEvent(CommandEvents::ShortcutChanged, commandId);
+    for (const auto& [type, id] : conflicts) publishEvent(type, id);
 }
 
 void ShortcutManager::unregisterShortcut(const std::string& commandId) {
@@ -31,10 +35,14 @@ void ShortcutManager::unregisterShortcut(const std::string& commandId) {
 }
 
 void ShortcutManager::setCustomShortcut(const std::string& commandId, const Shortcut& shortcut) {
-    std::lock_guard lock(mutex_);
-    customShortcuts_[commandId] = shortcut;
-    rebuildReverseMap();
+    std::vector<std::pair<std::string, std::string>> conflicts;
+    {
+        std::lock_guard lock(mutex_);
+        customShortcuts_[commandId] = shortcut;
+        conflicts = rebuildReverseMap();
+    }
     publishEvent(CommandEvents::ShortcutChanged, commandId);
+    for (const auto& [type, id] : conflicts) publishEvent(type, id);
 }
 
 Shortcut ShortcutManager::getActiveShortcut(const std::string& commandId) const {
@@ -54,14 +62,23 @@ std::vector<std::string> ShortcutManager::getCommandsForShortcut(const Shortcut&
 }
 
 std::string ShortcutManager::onKeyPressed(const Shortcut& pressedShortcut) {
-    std::lock_guard lock(mutex_);
-    auto it = shortcutToCommands_.find(pressedShortcut);
-    if (it != shortcutToCommands_.end() && !it->second.empty()) {
-        std::string cmdId = it->second.front();
-        if (executionCallback_) executionCallback_(cmdId);
-        return cmdId;
+    // Copy the decision out, then invoke the callback with the lock released:
+    // the callback runs CommandService::execute, which can reach back into
+    // getShortcut / setCustomShortcut — a non-recursive mutex self-deadlocks.
+    std::string cmdId;
+    std::function<void(const std::string&)> callback;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = shortcutToCommands_.find(pressedShortcut);
+        if (it != shortcutToCommands_.end() && !it->second.empty()) {
+            cmdId = it->second.front();
+        }
+        callback = executionCallback_;
     }
-    return "";
+    if (!cmdId.empty() && callback) {
+        callback(cmdId);
+    }
+    return cmdId;
 }
 
 void ShortcutManager::setExecutionCallback(std::function<void(const std::string&)> callback) {
@@ -69,7 +86,7 @@ void ShortcutManager::setExecutionCallback(std::function<void(const std::string&
     executionCallback_ = std::move(callback);
 }
 
-void ShortcutManager::rebuildReverseMap() {
+std::vector<std::pair<std::string, std::string>> ShortcutManager::rebuildReverseMap() {
     shortcutToCommands_.clear();
     for (const auto& [cmdId, defaultShortcut] : defaultShortcuts_) {
         Shortcut active = customShortcuts_.count(cmdId) ? customShortcuts_[cmdId] : defaultShortcut;
@@ -77,11 +94,15 @@ void ShortcutManager::rebuildReverseMap() {
             shortcutToCommands_[active].push_back(cmdId);
         }
     }
+    // Collect conflicts instead of publishing here: callers hold mutex_ and
+    // EventBus::publish is synchronous.
+    std::vector<std::pair<std::string, std::string>> conflicts;
     for (const auto& [shortcut, cmds] : shortcutToCommands_) {
         if (cmds.size() > 1) {
-            publishEvent("shortcut_conflict_detected", cmds.front());
+            conflicts.emplace_back("shortcut_conflict_detected", cmds.front());
         }
     }
+    return conflicts;
 }
 
 }

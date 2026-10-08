@@ -17,7 +17,8 @@
     "productName": "REX",
     "files": [
       "dist/**",
-      "electron/**"
+      "electron/**",
+      "assets/**"
     ],
     "extraResources": [
       {

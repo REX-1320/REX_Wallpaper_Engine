@@ -425,8 +425,12 @@ void VideoPlaybackController::DecoderThread() {
             t0 + std::chrono::duration<double, std::milli>(intervalMs));
         // Queue-depth backstop: after a hitch the decoder bursts; park
         // when the ring is nearly full instead of churning overwrites.
+        // High-res wait: plain sleep_for(2 ms) quantizes to ~15 ms on the
+        // default quantum and throttles steady decode to ~66 fps (proven
+        // live at 2x demand) — the same quantum bug as pacing.
         if (m_scheduler.PendingCount() >= FrameScheduler::kNumSlots - 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            rex::shared::PreciseSleepUntil(
+                Clock::now() + std::chrono::milliseconds(2));
         }
     }
 }

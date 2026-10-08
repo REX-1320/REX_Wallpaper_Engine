@@ -17,6 +17,12 @@ public:
     void saveModule(const ModuleConfig& config);
 
 private:
+    // Unlocked file reader: the caller must hold mutex_ (see saveModule).
+    std::vector<ModuleConfig> loadAllUnlocked();
+    // Writes under the caller's lock (see saveModule). Uses a temp-file +
+    // atomic replace so readers never observe a half-written config.
+    void saveAllUnlocked(const std::vector<ModuleConfig>& configs);
+
     std::string filePath_;
     mutable std::mutex mutex_;
 };

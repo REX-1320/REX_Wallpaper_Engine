@@ -2,6 +2,8 @@
 
 > Last updated: 2026-07-25
 > Auto-generated from codebase audit. Update this file when a feature reaches ✅.
+> See also: [everything.md](everything.md) (done inventory) · [TODO.md](TODO.md) (remaining work).
+> Note: the "Shell UI" section below describes the native C++ shell now archived in `dump/` — the current UI is the Electron app in `app/`.
 
 ---
 

@@ -28,6 +28,40 @@ ProgmanHost::~ProgmanHost() {
     Release();
 }
 
+bool ProgmanHost::EnsureWindowThread() {
+    if (m_windowThread && m_windowThread->IsRunning()) return true;
+    if (!m_windowThread) {
+        m_windowThread = std::make_unique<DesktopWindowThread>();
+    }
+    if (m_windowThread->Start()) {
+        REX_LOG_INFO("ProgmanHost", "Desktop window thread started (TID {})",
+                     m_windowThread->GetThreadId());
+        return true;
+    }
+    REX_LOG_ERROR("ProgmanHost", "Failed to start desktop window thread — "
+                                 "window ops will run on the calling thread");
+    m_windowThread.reset();
+    return false;
+}
+
+bool ProgmanHost::RunOnWindowThread(std::function<bool()> op, DWORD timeoutMs) {
+    if (!m_windowThread || !m_windowThread->IsRunning()) {
+        REX_LOG_WARN("ProgmanHost",
+                     "Window thread unavailable; running window op inline");
+        return op();
+    }
+    if (m_windowThread->Send(std::move(op), timeoutMs)) return true;
+    REX_LOG_ERROR("ProgmanHost", "Window thread task did not complete within {} ms",
+                  timeoutMs);
+    return false;
+}
+
+void ProgmanHost::StopWindowThread() {
+    if (!m_windowThread) return;
+    m_windowThread->Stop();
+    m_windowThread.reset();
+}
+
 shared::Result<void> ProgmanHost::Acquire() {
     if (m_acquired) {
         return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
@@ -85,7 +119,9 @@ shared::Result<void> ProgmanHost::Acquire() {
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = m_hInstance;
     wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
+    // Stock black brush. CreateSolidBrush here used to leak one GDI object
+    // per render-window creation (the handle was never DeleteObject'd).
+    wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
 
     if (!RegisterClassW(&wc)) {
         DWORD err = GetLastError();
@@ -99,37 +135,53 @@ shared::Result<void> ProgmanHost::Acquire() {
     int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int virtualTop  = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
-    m_renderWindow = CreateWindowExW(
-        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
-        CLASS_NAME,
-        L"REX Wallpaper",
-        WS_POPUP | WS_VISIBLE,
-        virtualLeft, virtualTop,
-        m_width, m_height,
-        nullptr,
-        nullptr,
-        m_hInstance,
-        nullptr);
-
-    if (!m_renderWindow) {
-        DWORD err = GetLastError();
+    // Create + position on the window thread so the owning thread dispatches
+    // messages (same rule as WorkerWManager). The outcome lives on the heap:
+    // a task whose Send() timed out may still run later, and a stack-local
+    // result would be a use-after-return in that case.
+    EnsureWindowThread();
+    struct CreateOutcome { HWND created = nullptr; DWORD err = ERROR_SUCCESS; };
+    auto outcome = std::make_shared<CreateOutcome>();
+    const bool sent = RunOnWindowThread([this, virtualLeft, virtualTop, CLASS_NAME, outcome] {
+        outcome->created = CreateWindowExW(
+            WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+            CLASS_NAME,
+            L"REX Wallpaper",
+            WS_POPUP | WS_VISIBLE,
+            virtualLeft, virtualTop,
+            m_width, m_height,
+            nullptr,
+            nullptr,
+            m_hInstance,
+            nullptr);
+        if (!outcome->created) {
+            outcome->err = GetLastError();
+            return false;
+        }
+        int vl = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vt = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        SetWindowPos(outcome->created, m_progman,
+                     vl, vt, m_width, m_height,
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        ShowWindow(outcome->created, SW_SHOW);
+        UpdateWindow(outcome->created);
+        return true;
+    });
+    if (!sent || !outcome->created) {
+        // Tear down whatever exists (a timed-out task may have completed
+        // after we gave up waiting).
+        HWND leaked = outcome->created;
+        if (leaked) {
+            RunOnWindowThread([leaked] {
+                if (IsWindow(leaked)) DestroyWindow(leaked);
+                return true;
+            });
+        }
         return shared::Result<void>(shared::ErrorCode::UnknownError,
-            "CreateWindowExW failed (error: " +
-            std::to_string(err) + ")");
+            sent ? "CreateWindowExW failed (error: " + std::to_string(outcome->err) + ")"
+                 : "Render window creation task did not complete in time");
     }
-
-    REX_LOG_DEBUG("ProgmanHost", "Render window created: {}",
-                  fmt::ptr(m_renderWindow));
-
-    int vl = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int vt = GetSystemMetrics(SM_YVIRTUALSCREEN);
-
-    SetWindowPos(m_renderWindow, m_progman,
-                 vl, vt, m_width, m_height,
-                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
-
-    ShowWindow(m_renderWindow, SW_SHOW);
-    UpdateWindow(m_renderWindow);
+    m_renderWindow = outcome->created;
 
     REX_LOG_DEBUG("ProgmanHost",
         "Render window positioned below Progman");
@@ -237,11 +289,14 @@ shared::Result<void> ProgmanHost::Acquire() {
         }
     }
 
-    SetWindowPos(m_renderWindow, m_progman,
-                 GetSystemMetrics(SM_XVIRTUALSCREEN),
-                 GetSystemMetrics(SM_YVIRTUALSCREEN),
-                 m_width, m_height,
-                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    RunOnWindowThread([this] {
+        SetWindowPos(m_renderWindow, m_progman,
+                     GetSystemMetrics(SM_XVIRTUALSCREEN),
+                     GetSystemMetrics(SM_YVIRTUALSCREEN),
+                     m_width, m_height,
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        return true;
+    });
 
     m_acquired = true;
 
@@ -255,18 +310,37 @@ shared::Result<void> ProgmanHost::Acquire() {
 }
 
 void ProgmanHost::Release() {
-    if (!m_acquired) return;
+    if (!m_acquired) {
+        // Tear down stray windows from a failed Acquire, then park the
+        // window thread (same rule as WorkerWManager::Release).
+        if (m_renderWindow) {
+            RunOnWindowThread([this] {
+                if (m_renderWindow && IsWindow(m_renderWindow)) {
+                    DestroyWindow(m_renderWindow);
+                }
+                m_renderWindow = nullptr;
+                return true;
+            });
+        }
+        StopWindowThread();
+        return;
+    }
 
     REX_LOG_DEBUG("ProgmanHost", "Releasing Progman desktop host...");
 
-    if (m_renderWindow && IsWindow(m_renderWindow)) {
-        DestroyWindow(m_renderWindow);
-    }
-    m_renderWindow = nullptr;
+    RunOnWindowThread([this] {
+        if (m_renderWindow && IsWindow(m_renderWindow)) {
+            DestroyWindow(m_renderWindow);
+        }
+        m_renderWindow = nullptr;
+        return true;
+    });
     m_progman      = nullptr;
     m_acquired     = false;
 
     REX_LOG_INFO("ProgmanHost", "Progman desktop host released");
+
+    StopWindowThread();
 }
 
 HWND ProgmanHost::GetRenderWindow() const { return m_renderWindow; }
@@ -287,10 +361,10 @@ LRESULT CALLBACK ProgmanHost::WndProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
-
+    // NOTE: no PostQuitMessage here. This is a desktop-child render window,
+    // not an application loop owner; posting quit can terminate whichever
+    // thread happens to pump messages next (same rule as
+    // WorkerWManager::WndProc).
     case WM_ERASEBKGND:
         return 1;
 
@@ -365,8 +439,11 @@ void ProgmanHost::MonitorShell() {
         m_progman      = nullptr;
         m_acquired     = false;
 
-        if (oldRender && IsWindow(oldRender)) {
-            DestroyWindow(oldRender);
+        if (oldRender) {
+            RunOnWindowThread([oldRender] {
+                if (IsWindow(oldRender)) DestroyWindow(oldRender);
+                return true;
+            });
         }
 
         std::this_thread::sleep_for(1000ms);

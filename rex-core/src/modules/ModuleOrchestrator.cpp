@@ -23,6 +23,19 @@ bool ModuleOrchestrator::loadDynamicModule(const std::string& dllPath) {
 }
 
 void ModuleOrchestrator::initialize() {
+    // ── Core services first ───────────────────────────────────────────
+    // Modules resolve EventBus / ConfigurationStore through the container
+    // (IModuleContext::getService). Nothing used to publish them, so every
+    // lookup returned an empty shared_ptr and the built-ins that dereference
+    // it (rex.settings binds *bus_ / *configStore_) crashed on startup with
+    // an access violation — which no catch(std::exception&) can intercept.
+    // EventBus and ConfigurationStore stay owned by the orchestrator; the
+    // container only gets non-owning views of them.
+    services_.registerService<EventBus>(
+        std::shared_ptr<EventBus>(std::shared_ptr<void>{}, &bus_));
+    services_.registerService<ConfigurationStore>(
+        std::shared_ptr<ConfigurationStore>(std::shared_ptr<void>{}, &config_));
+
     auto builtins = loader_.loadAllBuiltIns();
     for (auto& mod : builtins)
         registry_.registerModule(std::move(mod));
@@ -72,12 +85,24 @@ void ModuleOrchestrator::shutdown() {
     }
 
     std::vector<ModuleConfig> configs;
+    // Merge with what is already on disk: rebuilding configs from scratch
+    // used to delete every module's persisted settingsJson on each shutdown,
+    // and reset restartCount so the health monitor's accounting never
+    // survived a restart.
+    const auto previous = config_.loadAll();
     for (auto mod : registry_.getAllModules()) {
         const auto& id = mod->getMetadata().id;
         ModuleConfig cfg;
         cfg.moduleId = id;
         cfg.enabled = (registry_.getModuleState(id) != ModuleState::Disabled);
         cfg.autoStart = mod->getMetadata().autoStart;
+        for (const auto& prev : previous) {
+            if (prev.moduleId == id) {
+                cfg.settingsJson = prev.settingsJson;
+                cfg.restartCount = prev.restartCount;
+                break;
+            }
+        }
         configs.push_back(cfg);
     }
     config_.saveAll(configs);
@@ -85,6 +110,10 @@ void ModuleOrchestrator::shutdown() {
 }
 
 void ModuleOrchestrator::update(float dt) {
+    // Held across the snapshot loop (see reloadModule): without it the DLL
+    // could be unmapped mid-iteration while these shared_ptrs keep the dead
+    // module alive.
+    std::lock_guard<std::mutex> reloadLock(reloadMutex_);
     if (coordinator_) coordinator_->update(dt);
 
     for (auto mod : registry_.getAllModules()) {
@@ -95,10 +124,12 @@ void ModuleOrchestrator::update(float dt) {
 }
 
 void ModuleOrchestrator::startModule(const std::string& id) {
+    std::lock_guard<std::mutex> reloadLock(reloadMutex_);
     if (coordinator_) coordinator_->startModule(id);
 }
 
 void ModuleOrchestrator::stopModule(const std::string& id) {
+    std::lock_guard<std::mutex> reloadLock(reloadMutex_);
     if (coordinator_) coordinator_->stopModule(id);
 }
 
@@ -138,6 +169,12 @@ void ModuleOrchestrator::disableModule(const std::string& id) {
 }
 
 void ModuleOrchestrator::reloadModule(const std::string& id) {
+    // Serialize against every path that snapshots module shared_ptrs (the
+    // update() loop, enable/disable, start/stop, a second reload): the DLL
+    // is unmapped below, and any snapshot taken across the unmap keeps an
+    // object alive whose vtable points at unmapped memory (immediate crash).
+    std::lock_guard<std::mutex> reloadLock(reloadMutex_);
+
     auto mod = registry_.getModule(id);
     if (!mod) throw std::runtime_error("Module not found: " + id);
     if (!loader_.isDynamic(id))
@@ -151,7 +188,27 @@ void ModuleOrchestrator::reloadModule(const std::string& id) {
     if (dllPath.empty())
         throw std::runtime_error("No DLL path stored for " + id);
 
-    registry_.unregisterModule(id);
+    // The module is stopped, but stop() is a contract: belt-and-braces call
+    // shutdown() so the plugin releases threads, timers and HWNDs before its
+    // code goes away. Uncaught exceptions here must not take down the host.
+    try {
+        mod->shutdown();
+    } catch (const std::exception& e) {
+        std::cerr << "[Orchestrator] shutdown() threw during reload of " << id
+                  << ": " << e.what() << " (continuing)\n";
+    } catch (...) {
+        std::cerr << "[Orchestrator] shutdown() threw an unknown error during "
+                     "reload of " << id << " (continuing)\n";
+    }
+
+    // Destroy the old instance BEFORE unmapping the DLL: unregisterModule
+    // hands back the registry's shared_ptr; releasing it here runs the
+    // destructor while the code is still mapped. (Before, the pointer was
+    // silently discarded and the ordering was left to chance.)
+    auto oldMod = registry_.unregisterModule(id);
+    oldMod.reset();
+    mod.reset();
+
     loader_.unloadDynamic(id);
 
     auto newMod = loader_.loadDynamic(dllPath, nullptr);
@@ -160,11 +217,18 @@ void ModuleOrchestrator::reloadModule(const std::string& id) {
 
     const auto& newId = newMod->getMetadata().id;
     registry_.registerModule(std::move(newMod));
+    // A module absent from startupOrder_ is invisible to shutdownAll and to
+    // the health monitor's restart accounting — every reload used to drop it.
+    if (std::find(startupOrder_.begin(), startupOrder_.end(), id) == startupOrder_.end()) {
+        startupOrder_.push_back(id);
+    }
 
     ModuleContext ctx(newId, services_, registry_, bus_, "config/" + newId + ".json");
     auto registeredMod = registry_.getModule(newId);
     if (registeredMod && registeredMod->initialize(&ctx)) {
         registry_.setModuleState(newId, ModuleState::Initialized);
+    } else {
+        registry_.setModuleState(newId, ModuleState::Failed);
     }
 }
 

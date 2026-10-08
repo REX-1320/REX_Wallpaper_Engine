@@ -539,3 +539,41 @@ TEST(StaticRenderOnceTest, StaticScenePresentsOnceThenIdles) {
     EXPECT_TRUE(engine->UnloadScene().IsSuccess());
     engine->Shutdown();
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Playback-rate wall clock (Phase 4)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The wall target advances at the playback rate: at 2x, one wall second
+// moves position ~2 s (previously it always advanced 1x while decode ran
+// 2x, so position lied whenever speed != 1).
+
+TEST(SpeedClockTest, PositionAdvancesAtPlaybackRate) {
+    constexpr const char* kImage =
+        "C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg";
+    if (!std::filesystem::exists(kImage)) {
+        GTEST_SKIP() << "stock wallpaper image missing";
+    }
+    auto engine = CreateWallpaperEngine();
+    ASSERT_NE(engine, nullptr);
+    ASSERT_TRUE(engine->Initialize(WallpaperConfig{}).IsSuccess());
+
+    SceneInfo scene;
+    scene.id = "speed_clock";
+    scene.sourcePath = kImage;
+    scene.type = "static";
+    ASSERT_TRUE(engine->LoadScene(scene).IsSuccess());
+    ASSERT_TRUE(engine->SetSpeed(2.0f).IsSuccess());
+    ASSERT_TRUE(engine->Play().IsSuccess());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    const double pos = engine->GetPosition();
+    // 2x rate: ~2.0 after 1 s (wide margins for CI scheduling jitter;
+    // unscaled 1x would read ~1.0).
+    EXPECT_GT(pos, 1.2);
+    EXPECT_LT(pos, 2.8);
+
+    EXPECT_TRUE(engine->Stop().IsSuccess());
+    EXPECT_TRUE(engine->UnloadScene().IsSuccess());
+    engine->Shutdown();
+}

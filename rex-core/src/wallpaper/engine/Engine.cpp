@@ -569,9 +569,11 @@ shared::Result<void> Engine::Pause() {
     SetState(EngineState::Paused);
     // Fold the elapsed time into the base before stopping: Start() re-stamps
     // from zero, so without this every pause/resume rewound the reported
-    // position while the decoder kept playing from its own PTS.
+    // position while the decoder kept playing from its own PTS. Scaled by
+    // the playback rate (Phase 4) so pause at 2x banks 2x time.
     m_positionBase.store(m_positionBase.load(std::memory_order_relaxed) +
-                         m_stopwatch.ElapsedSeconds(),
+                         m_stopwatch.ElapsedSeconds() *
+                             m_speed.load(std::memory_order_relaxed),
                          std::memory_order_relaxed);
     m_stopwatch.Reset();
     // User-driven pause: a later auto-resume must not override it.
@@ -609,7 +611,8 @@ double Engine::GetPosition() const {
         return m_currentPosition;
     }
     double pos = m_positionBase.load(std::memory_order_relaxed) +
-                 m_stopwatch.ElapsedSeconds();
+                 m_stopwatch.ElapsedSeconds() *
+                     m_speed.load(std::memory_order_relaxed);
     // P1-13: the wall clock drifts from decoder PTS (speed changes, loop
     // wraps, recovery seeks). Reconcile against duration: wrap when looping,
     // clamp otherwise. No duration (static/unopened) → wall clock as-is.
@@ -646,8 +649,9 @@ shared::Result<void> Engine::AssignMonitor(const std::string& monitorId) {
     for (const auto& m : monitors) {
         if (m.id == monitorId || m.name == monitorId) {
             m_currentMonitor = m;
-            m_displayHzCached.store(m.refreshHz > 0 ? m.refreshHz : 60,
-                                    std::memory_order_release);
+            m_displayHzCached.store(
+                SelectDisplayHz(monitors, m_currentMonitor.id, 60),
+                std::memory_order_release);
             REX_LOG_INFO("Engine", "Monitor assigned: {} ({}x{})",
                          m.name.c_str(), m.width, m.height);
             return shared::Result<void>();
@@ -1247,6 +1251,16 @@ void Engine::CheckDisplayChanges() {
     m_lastPrimaryHeight = primaryH;
     m_lastMonitors = monitors;
 
+    // Phase 4: a refresh-rate change flips the predicate above — refresh
+    // the cadence cache from the same enumeration so presentation follows
+    // without restarting the wallpaper.
+    if (!m_currentMonitor.id.empty()) {
+        m_displayHzCached.store(
+            SelectDisplayHz(monitors, m_currentMonitor.id,
+                            m_displayHzCached.load(std::memory_order_acquire)),
+            std::memory_order_release);
+    }
+
     // Multi-monitor mode: reconcile compositors with the new topology
     // (add connected, remove disconnected, update moved/resized).
     if (IsMultiMonitorMode() && m_videoManager) {
@@ -1482,9 +1496,11 @@ void Engine::RenderLoop() {
                 // Fold first (same reason as Pause()): the stopwatch restarts
                 // from zero, so the position must be banked or the next
                 // resume rewinds it while the decoder kept its own PTS.
+                // Rate-scaled like Pause() (Phase 4).
                 m_positionBase.store(
                     m_positionBase.load(std::memory_order_relaxed) +
-                        m_stopwatch.ElapsedSeconds(),
+                        m_stopwatch.ElapsedSeconds() *
+                            m_speed.load(std::memory_order_relaxed),
                     std::memory_order_relaxed);
                 m_stopwatch.Reset();
                 SetState(EngineState::Paused);

@@ -52,6 +52,30 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
         selectedPts = f.pts;
     }
     if (selected == 0) {
+        // Catch-up fallback (Phase 4): the ring is full of unpublished
+        // frames yet nothing is due — the decoder lapped a loop behind
+        // the wrapped wall (or surged far ahead), so PTS comparison is
+        // phase-broken. Starving here freezes video into repeat/burst
+        // cycles (proven live at 2x: 3 uniques/s + 1678 repeats in 30 s
+        // while decode ran fine). Show the newest published frame and
+        // count the bypassed as dropped instead.
+        const uint64_t unconsumed =
+            wc > lc ? wc - lc : 0;
+        if (unconsumed >= kNumSlots - 1) {
+            const VideoFrame& newest = m_slots[(wc - 1) % kNumSlots];
+            if (newest.valid) {
+                uint64_t skipped = 0;
+                for (uint64_t w = start; w < wc; ++w) {
+                    const VideoFrame& f = m_slots[(w - 1) % kNumSlots];
+                    if (f.valid && f.pts < newest.pts) {
+                        ++skipped;
+                    }
+                }
+                m_dropped.fetch_add(skipped, std::memory_order_relaxed);
+                m_lastConsumedWrite.store(wc, std::memory_order_release);
+                return &m_slots[(wc - 1) % kNumSlots];
+            }
+        }
         return nullptr;  // everything published is still future
     }
     // Bypassed frames with strictly older PTS count as dropped;
