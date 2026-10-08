@@ -305,7 +305,7 @@ export default function WallpaperGallery() {
           type="file"
           hidden
           multiple
-          accept="image/*,video/*,audio/*,.html,.htm,.css,.js,.mjs,.jsx,.ts,.tsx,.json,.svg,.glsl,.hlsl,.frag,.vert,.comp,.shader,.glb,.gltf,.blend,.fbx,.obj"
+          accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,.mp4,.mkv,.avi,.mov,.wmv,.m4v,.webm,.mpg,.mpeg"
           onChange={handleFiles}
         />
       </div>
