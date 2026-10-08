@@ -1,7 +1,9 @@
 # REX — TODO
 
 > Everything remaining, prioritized. Checked items move to [`everything.md`](everything.md) / `#project_status.md`.
-> Last updated: **2026-10-07** · Source of truth for per-feature status: `#project_status.md` (~164 ⬜, ~24 🟡)
+> Last updated: **2026-10-08** · Source of truth for per-feature status: `#project_status.md` (~164 ⬜, ~24 🟡)
+
+> **CURRENT GOAL (2026-10-08 correction): make only the wallpaper engine perfect — immediate priority.** Image + video (SDR/HDR) playback, layer/host reliability, pacing, pause/power/session, recovery, gallery-apply path. Everything else (widgets, taskbar, themes, WindowFX, marketplace, automation, SDK, editors) is marked DEFERRED below: do not spend time on it until the engine draws increasing users.
 
 ---
 
@@ -11,11 +13,14 @@
 
 ### New discoveries (2026-10-07, from P0-1 verification)
 
+- [ ] **Launch-at-login missing (FOUND 2026-10-08, strategy review):** the app supports --background launch and replays the last wallpaper after crashes, and per-monitor assignments persist EDID-keyed - but nothing registers REX for Windows startup (no setLoginItemSettings, Run key, or Startup shortcut). Tier-1 Startup/resume/persistence is 2/3 done; the wallpaper does not survive a reboot. Fix: login-item registration + re-apply-on-launch.
+- [x] **UI advertises unimplemented wallpaper types (FOUND 2026-10-08, strategy review; FIXED 2026-10-08, T1-T5):** gallery classified/selected WEB/SHADER/SCENE/AUDIO and applying any of them silently STOPPED the current wallpaper (destructive no-op). Plan: `docs/superpowers/plans/2026-10-08-ui-honesty-supported-types.md` — ordered steps: (1) `SUPPORTED_WALLPAPER_TYPES` + `isSupportedWallpaperType()` in `registry.js`; (2) picker accept → image/video only; (3) tiles show Coming later, clicks never apply; (4) `loadWallpaperFile` returns null for unsupported; (5) apply path warns instead of STOP; (6) verify (`pnpm lint`, `vite build`, 5-row manual matrix), record, commit. No engine/protocol/deps changes. Verified 2026-10-08: `pnpm lint` clean, `vite build` 5.71s, headless node matrix (bridge-call counts + loader refusals) all green.
+
 - [ ] **Silent-success LOAD trap (FOUND 2026-10-08, engine+UI survey):** LOAD with type web/shader/scene/audio-file returns ok:true yet presents dark clear color (falls into else -> UnsupportedAdapter; only image/static get branches). The UI lets users select all 6 types but apply silently stops for 4 of them. Fix: reject unknown types with ok:false unsupported-type (and gate the UI apply path). Proven live: LOAD type=web -> True, nothing displayed.
 - [ ] **Engine Tile fill mode rejected while advertised (FOUND 2026-10-08, survey):** ParseFillMode accepts tile and the CLI advertises it, but Engine::SetFillMode rejects Tile-not-implemented and ComputeFillViewport no-ops it. Fix: implement tiling or reject tile at parse/CLI.
 - [ ] **PROPOSAL (user-endorsed 2026-10-08, not scheduled): explicit static-wallpaper backends** — keep both image paths with clearly different roles instead of two vaguely overlapping systems: `WindowsStaticBackend` (gallery default — SPI_SETDESKWALLPAPER, ~zero REX overhead) vs `RexStaticBackend` (WIC → D3D12 → WorkerW, for effects/shaders/per-monitor/hot-reload). Gallery/app picks the backend by required features; never default to REX-rendered just because the renderer exists.
 
-- [ ] **G5-interference · MAJOR** — a second runtime startup/shutdown silently kills the other runtime: Debug runtime died with no log/crash-dump within seconds of the Release runtime starting (14:20:43) and again overlapping its shutdown (14:24:23); alone, the full INIT/LOAD/PLAY/client-surface/DETACH/SHUTDOWN sequence passes repeatedly. Exact kill mechanism unknown (shared WorkerW layer suspected). Fix per baseline P3: native named-mutex ownership + protocol versioning (`docs/bugs/AUDIT-runtime-deep-dive.md` G5)
+- [x] **G5-interference · MAJOR** — a second runtime startup/shutdown silently kills the other runtime: Debug runtime died with no log/crash-dump within seconds of the Release runtime starting (14:20:43) and again overlapping its shutdown (14:24:23); alone, the full INIT/LOAD/PLAY/client-surface/DETACH/SHUTDOWN sequence passes repeatedly. Exact kill mechanism unknown (shared WorkerW layer suspected). Fix per baseline P3: native named-mutex ownership + protocol versioning (`docs/bugs/AUDIT-runtime-deep-dive.md` G5) **[DONE 2026-10-08 P3: named-mutex refusal (exit 3, proven live) + INIT version handshake — second runtimes can no longer start. Exact kill mechanism still unknown but now unreachable. See everything.md]**
 - [ ] **Test-gap · MINOR** — `EngineTest.VideoScenePlayback` fails when CWD has no `test.mp4`: `LoadScene` now (correctly, per prior fail-open hardening) returns an error for missing files, but the test still expects success for a nonexistent path. Passes with a real file present. Fix: stage a fixture or expect failure for missing files
 - [x] **SW playback freeze (RESOLVED environmental 2026-10-07):** 3x freezes at first-EOS frames with idle CPU were a fullscreen Qt5QWindowIcon window tripping the A14 auto-pause (working as designed, confirmed in log) - not a decoder/EOS bug. Lesson: check Full-screen window lines before suspecting decode stalls.
 - [ ] **SW AV1-HDR decode fails at send_packet -40 (pre-existing, blocks SW-HDR e2e)** — 4K AV1 HDR file with hardwareAcceleration:false decodes zero frames; `avcodec_send_packet failed (-40)` spams the log unboundedly (tight loop, no backoff — P1-10 family) while the engine clock advances on silence. Upstream of the pool code (no frame ever reaches EnsurePool). Fixing unlocks end-to-end RGBA16-pool verification
@@ -41,7 +46,7 @@
 - [x] **A11 · MAJOR** — **HDR10 content renders far too dark on an SDR target** — **fixed 2026-10-07**: `D3D12Renderer.cpp:156` now sets `norm = max(adj.w, 1.0)` (paper white, 203 nits) instead of `masterMax` (1000); the pre-ACES clamp at `:226-238` now only clamps SDR input (`hdrInput ? max(rgb,0) : saturate(rgb)`), so highlights ≥203 nits keep gradation (397→245, 594→250, 1004→253). Before: 203 nits → 150/255 (59% of signal) and every value ≥203 nits collapsed to one code. Verified: exact shader port + **on-GPU end-to-end**: rendered HDR band video through the rebuilt runtime and sampled the screen — measured (145, 204, 231, 245, 249, 252, 253) vs predicted (148, 204, 232, 245, 250, 252, 253) across 40–1004 nits; zero shader errors, presents OK; real LG OLED 4K HDR file decodes on `HW_P010`, back buffer confirmed SDR
 - [x] **A12 · MAJOR** — **SDR video is double gamma-encoded (washed out / too bright)** — **fixed 2026-10-07**: `:161-162` (static RGBA) and `:223` (NV12 YUV→RGB) now apply `SrgbToLinear` before the pipeline's `LinearToSrgb`, restoring the shape `4ba29fa` had. Before: source 64→137, **128→188**, 192→225. After: **exact identity** (128→128, all codes) in the shader port
 - [x] **A13 · MAJOR** — **A3's fix has since been reverted** — **fixed 2026-10-07** as part of the same diff: `:245` already read `lin = rgb * adj.w` (a parallel edit restored it); verification plus comment correction at `:260-266` documents that `norm` is now paper white so `rgb * min(norm, peak)` restores absolute nits for HDR input. The broken-ffmpeg-reference comment was also removed/replaced with the real justification (ITU-R BT.2408 203 nits ≈ 90% signal; the old reference omitted the output OETF, YAVG 53.3 vs corrected 100.5)
-- [ ] **Refuted — "static image path is an exact passthrough"** (do not re-derive): the identity measurement (`128→128`, `(255,0,0)→(255,0,0)`) never touched the shader. Static images go through `SetImageWallpaper` (`wallpaper_cli_main.cpp:423-451`) → registry + `SystemParametersInfoW(SPI_SETDESKWALLPAPER)`, i.e. **Windows draws them**. So it validates neither branch of the pixel shader, and the `extra.z` static branch would in fact double-encode (same A12 shape). Screen-scraping is also unreliable here (window occlusion + DPI); use the shader port instead
+- [x] **Refuted — "static image path is an exact passthrough"** (do not re-derive): the identity measurement (`128→128`, `(255,0,0)→(255,0,0)`) never touched the shader. Static images go through `SetImageWallpaper` (`wallpaper_cli_main.cpp:423-451`) → registry + `SystemParametersInfoW(SPI_SETDESKWALLPAPER)`, i.e. **Windows draws them**. So it validates neither branch of the pixel shader, and the `extra.z` static branch would in fact double-encode (same A12 shape). Screen-scraping is also unreliable here (window occlusion + DPI); use the shader port instead **[RECORDED — purpose fulfilled]**
 - [ ] **Verification tooling (not in repo)** — shader math port + band generators live in `%TEMP%\opencode\rex-verify\` (`shader_port.py`, `make_bands.py`, `client.cjs`, `run_test.ps1`, `sample.ps1`, `snap.ps1`) and will be wiped with temp. Copy into `rex-core/tools/` (or `tools/color/`) before the next machine/temp cleanup. Builds from this session are **not** committed — `617D82E2EBD38352` exe still carries `norm = masterMax`
 - [ ] **Build system broken (blocks clean builds)** — no working vcpkg on this machine: `C:\vcpkg\scripts\buildsystems\vcpkg.cmake` is a `FATAL_ERROR` stub, `C:\Users\Moinu\vcpkg` is a broken clone without `vcpkg.exe`. Consequences: any CMake reconfigure dies, and the `vcpkg applocal` post-build step fails (exit 9009), so `ffmpeg/fmt/spdlog` DLLs are not refreshed. **Workaround in use since 2026-10-07:** an offline passthrough toolchain at `%TEMP%\opencode\vcpkg-offline-toolchain.cmake` (outside the repo) pointed at the prebuilt `rex-core/.build/vcpkg_installed`, so `cmake -S rex-core -B rex-core\.build -DCMAKE_TOOLCHAIN_FILE=<that file>` reconfigures normally and source edits no longer need the `generate.stamp` touch. Install real vcpkg to fix properly
 
@@ -96,7 +101,7 @@
 - [ ] **G6 · PARTIAL** — no resource bounds (8K/huge files surface errors late); hung compositor stalls every monitor
 - [ ] **G7 · PARTIAL** — failures only `console.warn`d in the UI: no user-visible error surface for failed wallpapers
 - [x] **G8 · PARTIAL** — observability gaps: no per-stage/per-compositor/audio/present counters; native logs grow forever **[DONE 2026-10-07 by parallel track: per-stage fps/drops/queue/displayHz telemetry fields — see everything.md]**
-### Module platform (`rex-host`, not on the wallpaper path)
+### Module platform (`rex-host`, not on the wallpaper path) (DEFERRED — out of current scope: wallpaper engine only)
 
 - [x] **B1 · CRITICAL** — `rex.settings` dereferenced a null service → startup access violation — **fixed 2026-10-07**: `ModuleOrchestrator::initialize` now publishes `EventBus` + `ConfigurationStore` into the `ServiceContainer` (as non-owning views; ownership stays with the orchestrator), and `SettingsModule::initialize` fails loudly instead of dereferencing null. Verified: `rex-core` builds, module/core suites green
 - [x] **B3 · CRITICAL** — `std::stoi` on the profile auto-switch thread → `std::terminate`; plus a double `unlock()` UB — **fixed 2026-10-07**: numeric parse is validated and wrapped (a bad value is logged and skipped), matches are collected under the lock and applied outside it, and every apply is exception-guarded so a failing profile can never abort the host (`ProfileManager.cpp`)
@@ -115,18 +120,18 @@
 - [x] **ProgmanHost hardened** — **fixed 2026-10-07**: own DesktopWindowThread with all create/destroy/reposition marshalled (`ProgmanHost.cpp/hpp`); GDI brush leak per Acquire fixed (stock brush); PostQuitMessage removed from the child WndProc. MultiMonitorDesktopHost still open (only if it becomes the active path — it wraps WorkerWManager, whose windows are already covered). Verified: runtime builds, desktop-host suite green
   - [ ] **`MonitorCompositor` windows** — still open: created on the render/main thread and destroyed on whichever thread tears the engine down (audit finding A-set #6); needs the same window-thread ownership
   - [ ] Manual soak verification: apply a wallpaper, click/hover the desktop repeatedly, confirm no z-order flap, no input freeze, telemetry `presents` never resets
-- [ ] **HDR present bug** — present-to-screen failure under HDR; 14 diagnostic logs (`hdr_*.log`), harness (`hdrprobe.obj`, `present_repro.obj`), notes in `fix.md`. Check against A3 first — may be the same root cause
+- [ ] **HDR present bug** — present-to-screen failure under HDR; 14 diagnostic logs (`hdr_*.log`), harness (`hdrprobe.obj`, `present_repro.obj`), notes in `fix.md`. Check against A3 first — may be the same root cause [STATUS 2026-10-08: symptom does not reproduce — Present OK in ~20 probes incl. 4K HDR; A3 fixed; kept open for the owning track eyeball check.]
 - [ ] **Widget WebView2 JS bridge dead** — `HandleWebMessage` stubbed; MSWRL::Callback init failure in `rex-core/src/modules/Widgets/services/WidgetHost.cpp`
 - [x] **Uncommitted engine WIP (SUPERSEDED):** checkpoint commits 17464ba, df15740, 8c7b08d absorbed the referenced WIP; remaining uncommitted work is tracked per session, not per recovery point.
 - [ ] **FPS counter hardcoded** — inspector always shows "60" (see `#project_status.md` → Performance)
-- [ ] **`runtime.log` 0 bytes** — spdlog file sink never flushes (`%TEMP%\REX\runtime.log`), blocks all engine post-mortem debugging; seen while diagnosing BUG-001 (report §P1-E)
+- [x] **`runtime.log` 0 bytes** — spdlog file sink never flushes (`%TEMP%\REX\runtime.log`), blocks all engine post-mortem debugging; seen while diagnosing BUG-001 (report §P1-E) **[DONE: sink flushes — runtime.log carries KBs of logs in every session, read routinely for diagnosis. 15,070 bytes at audit time.]**
 
 ## 🔥 Now — active WIP (finish these first)
 
 - [ ] **Color accuracy (HDR wrong / SDR washed out) — fixed + verified 2026-10-07**: A11 (paper-white norm, pre-ACES clamp lifted), A12 (SrgbToLinear restored), A13 (comment corrected). Built clean (MSBuild, no warnings), shader port exact, end-to-end GPU band test green. Remaining: repack `app/dist-exe` + reinstall, then one eyeball A/B vs Media Player on the same HDR frame
-- [ ] Stabilize ffmpeg video pipeline (GPU-native plan from `461b79c`) — decode → upload → present path
-- [ ] Re-audit `#project_status.md` against post-July code (shell UI moved to `dump/`, Electron app is now the UI)
-- [x] Reconcile docs drift — **done 2026-10-06**: README status fixed, `everything.md` + `TODO.md` + `AGENTS.md` created
+- [x] **FFmpeg pipeline stabilization** — Stabilize ffmpeg video pipeline (GPU-native plan from `461b79c`) — decode → upload → present path **[DONE 2026-10-08: HW+SW decode→upload→present path live-proven across dozens of probes (SDR/HDR/loop/recovery); suites green. The SW-AV1-codec failure stays open as its own item.]**
+- [ ] **Project status re-audit** — Re-audit `#project_status.md` against post-July code (shell UI moved to `dump/`, Electron app is now the UI)
+- [x] **Docs drift reconciliation** — Reconcile docs drift — **done 2026-10-06**: README status fixed, `everything.md` + `TODO.md` + `AGENTS.md` created
 
 ---
 
@@ -149,102 +154,102 @@
 - [ ] **Phase 8 — Effects:** blur, acrylic, mica, particles, shader effects
 - [ ] **Phase 9 — Plugin system:** stable SDK, sandboxed plugins, version compatibility
 - [ ] **Phase 10 — Production:** leak detection, explorer recovery, crash recovery, CI/CD, installer, docs
-- [ ] GIF/APNG renderer · SVG wallpapers
-- [ ] Playback: pause on idle/RDP, span/mirror wallpapers, background throttling (fullscreen DONE A14, battery DONE P3-G1, session-lock DONE P3-G2, FPS limit DONE P2-15, auto-resume DONE P3 suspend channel)
-- [ ] Preview: live/fullscreen preview, thumbnail generation, metadata
-- [ ] Library management: collections, favorites, tags, search, sort, filter, smart collections, recent, trash, duplicate detection
-- [ ] Slideshow
+- [ ] **GIF/APNG/SVG support** — GIF/APNG renderer · SVG wallpapers
+- [ ] **Playback** —  pause on idle/RDP, span/mirror wallpapers, background throttling (fullscreen DONE A14, battery DONE P3-G1, session-lock DONE P3-G2, FPS limit DONE P2-15, auto-resume DONE P3 suspend channel)
+- [ ] **Preview** —  live/fullscreen preview, thumbnail generation, metadata
+- [ ] **Library management** —  collections, favorites, tags, search, sort, filter, smart collections, recent, trash, duplicate detection
+- [ ] **Slideshow** — Slideshow
 
-## Widgets
+## Widgets (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Widget SDK / API / sandbox
-- [ ] Widget store + installer
-- [ ] Desktop interactions: drag, snap, align, lock, group, layers, per-monitor
-- [ ] Built-in widgets: Calendar, Notes, Music, RSS, Battery, Agenda, World Clock, Process Monitor, GPU Temp
+- [ ] **Widget SDK** — Widget SDK / API / sandbox
+- [ ] **Widget store** — Widget store + installer
+- [ ] **Desktop interactions** —  drag, snap, align, lock, group, layers, per-monitor
+- [ ] **Built-in widgets** —  Calendar, Notes, Music, RSS, Battery, Agenda, World Clock, Process Monitor, GPU Temp
 
-## Personalization (StartAllBack/Seelen-class)
+## Personalization (StartAllBack/Seelen-class) (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Taskbar: transparency backend, blur, grouping, animation
-- [ ] Start menu: replace backend, size, transparency, search, power menu
-- [ ] Explorer: ribbon, navigation pane, compact-mode backend
-- [ ] System tray: layout, overflow, icon spacing
-- [ ] Window: rounded corners, shadow, animation, snap, transparency
-- [ ] Win32PlatformAdapter — real hooking (🟡)
-- [ ] Profiles: predefined (gaming/battery/work/movie/night) + auto-switching
+- [ ] **Taskbar** —  transparency backend, blur, grouping, animation
+- [ ] **Start menu** —  replace backend, size, transparency, search, power menu
+- [ ] **Explorer** —  ribbon, navigation pane, compact-mode backend
+- [ ] **System tray** —  layout, overflow, icon spacing
+- [ ] **Window** —  rounded corners, shadow, animation, snap, transparency
+- [ ] **Win32PlatformAdapter hooking** — Win32PlatformAdapter — real hooking (🟡)
+- [ ] **Profiles** —  predefined (gaming/battery/work/movie/night) + auto-switching
 
-## Windhawk-like mod system
+## Windhawk-like mod system (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Mod install/enable/disable/configure/update
-- [ ] Explorer / Taskbar / Start Menu / DWM / Shell hooks
-- [ ] Mod repository: browse, search, ratings, versioning
+- [ ] **Mod lifecycle** — Mod install/enable/disable/configure/update
+- [ ] **Shell hooks** — Explorer / Taskbar / Start Menu / DWM / Shell hooks
+- [ ] **Mod repository** —  browse, search, ratings, versioning
 
-## Marketplace
+## Marketplace (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Assets: wallpapers, widgets, themes, icons, fonts, cursors, plugins, shaders, scenes
-- [ ] Ratings/reviews, screenshots, changelog, author pages, version history
-- [ ] Download queue (progress/resume/cancel), auto-update
-- [ ] Finish `CurlMarketplaceClient` (🟡) → auth, catalog, install flow
+- [ ] **Marketplace assets** —  wallpapers, widgets, themes, icons, fonts, cursors, plugins, shaders, scenes
+- [ ] **Marketplace reviews** — Ratings/reviews, screenshots, changelog, author pages, version history
+- [ ] **Download queue** — Download queue (progress/resume/cancel), auto-update
+- [ ] **CurlMarketplaceClient** — Finish `CurlMarketplaceClient` (🟡) → auth, catalog, install flow
 
-## Theme system
+## Theme system (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Theme editor, preview, export/import, inheritance, sharing, variables, presets
+- [ ] **Theme editor** — Theme editor, preview, export/import, inheritance, sharing, variables, presets
 
-## Asset manager
+## Asset manager (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Fonts, icons, cursor packs, sounds, wallpapers, theme packages
+- [ ] **Theme packages** — Fonts, icons, cursor packs, sounds, wallpapers, theme packages
 
-## Backup & cloud
+## Backup & cloud (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Full backup / full restore
-- [ ] Cloud sync (spec exists: `docs/REX-Cloud-Sync-Spec.md`)
+- [ ] **Backup/restore** — Full backup / full restore
+- [ ] **Cloud sync** — Cloud sync (spec exists: `docs/REX-Cloud-Sync-Spec.md`)
 
-## Automation engine
+## Automation engine (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Schedule wallpaper/themes, trigger profiles, battery rules, time rules, game detection
+- [ ] **Scheduler** — Schedule wallpaper/themes, trigger profiles, battery rules, time rules, game detection
 - (Full spec: `docs/res/RES-Automation-Engine.md`)
 
-## Dashboard
+## Dashboard (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Recent activity, quick actions, favorites, resource usage, running modules, news, updates, shortcuts
+- [ ] **Activity hub** — Recent activity, quick actions, favorites, resource usage, running modules, news, updates, shortcuts
 
-## Performance monitoring
+## Performance monitoring (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] CPU/GPU/RAM/VRAM/temperature/real FPS counter/frame time/module usage/process monitor
-- [ ] Replace hardcoded "60" FPS in inspector
+- [ ] **Resource monitors** — CPU/GPU/RAM/VRAM/temperature/real FPS counter/frame time/module usage/process monitor
+- [ ] **Real FPS in inspector** — Replace hardcoded "60" FPS in inspector
 
-## Plugin SDK & package manager
+## Plugin SDK & package manager (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] SDK packaging + publishing (APIs/lifecycle/events ✅)
-- [ ] Package install/remove/versioning/rollback (dependency resolution ✅)
-- [ ] Permission manager, download manager, thumbnail service, package installer
+- [ ] **SDK packaging** — SDK packaging + publishing (APIs/lifecycle/events ✅)
+- [ ] **Package management** — Package install/remove/versioning/rollback (dependency resolution ✅)
+- [ ] **Package infrastructure** — Permission manager, download manager, thumbnail service, package installer
 
-## Cross-cutting systems
+## Cross-cutting systems (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Analytics/telemetry, crash reporting, recovery mode, safe mode
-- [ ] Undo/redo, clipboard, history managers
-- [ ] Background task scheduler
-- [ ] UpdateManager (🟡 stub → real)
+- [ ] **Diagnostics and recovery** — Analytics/telemetry, crash reporting, recovery mode, safe mode
+- [ ] **History managers** — Undo/redo, clipboard, history managers
+- [ ] **Task scheduler** — Background task scheduler
+- [ ] **UpdateManager** — UpdateManager (🟡 stub → real)
 
-## Developer tools
+## Developer tools (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Module inspector, event viewer, FPS overlay, GPU/memory profiler
-- [ ] Theme/search/renderer inspectors
-- [ ] Logger hardening (spdlog linked, basic only)
+- [ ] **Developer inspectors** — Module inspector, event viewer, FPS overlay, GPU/memory profiler
+- [ ] **More inspectors** — Theme/search/renderer inspectors
+- [ ] **Logger hardening** — Logger hardening (spdlog linked, basic only)
 
-## UI track
+## UI track (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Decide/confirm UI direction: Electron app (current) vs C# shell vs native — then archive losers cleanly
-- [ ] Port remaining Surface System materials/tokens into the Electron app
-- [ ] Settings / Developer / Marketplace pages (currently placeholders)
-- [ ] Widget drag/snap/lock UX in the Electron workspace
-- [ ] E2E visual regression from `e2e_a/b.png` baselines
+- [ ] **UI direction** —  Electron app (current) vs C# shell vs native — then archive losers cleanly
+- [ ] **Surface tokens port** — Port remaining Surface System materials/tokens into the Electron app
+- [ ] **Placeholder pages** — Settings / Developer / Marketplace pages (currently placeholders)
+- [ ] **Widget workspace UX** — Widget drag/snap/lock UX in the Electron workspace
+- [ ] **E2E visual regression** — E2E visual regression from `e2e_a/b.png` baselines
 
-## Priority 3 (future)
+## Priority 3 (future) (DEFERRED — out of current scope: wallpaper engine only)
 
-- [ ] Wallpaper Editor (timeline/layers/audio/effects/export)
-- [ ] Theme Editor (visual, live preview, publish)
-- [ ] Widget Designer (visual editor, packaging)
-- [ ] AI: wallpaper generation, theme creation, automation, recommendations
+- [ ] **Wallpaper Editor** — Wallpaper Editor (timeline/layers/audio/effects/export)
+- [ ] **Theme Designer** — Theme Editor (visual, live preview, publish)
+- [ ] **Widget Designer** — Widget Designer (visual editor, packaging)
+- [ ] **AI features** —  wallpaper generation, theme creation, automation, recommendations
 
 ---
 
