@@ -9,7 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { detectFileType, PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS, TYPE_META } from './registry'
+import { detectFileType, isSupportedWallpaperType, PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS, TYPE_META } from './registry'
 import {
   deletePlaylist,
   deleteWallpaper,
@@ -42,6 +42,7 @@ export default function WallpaperGallery() {
   const [editName, setEditName] = useState('')
   const [editingFile, setEditingFile] = useState(null)
   const [menu, setMenu] = useState(null)
+  const [previewId, setPreviewId] = useState(null)
   const [settingsTarget, setSettingsTarget] = useState(null)
   const thumbsRef = useRef(new Map())
   const [, forceThumbs] = useState(0)
@@ -474,7 +475,8 @@ export default function WallpaperGallery() {
             const type = detectFileType(name) ?? 'IMAGE'
             const meta = TYPE_META[type]
             const Icon = meta.icon
-            const selected = wallpapers.some((w) => w.info.source === name && w.id === selectedId)
+            const supported = isSupportedWallpaperType(type)
+            const selected = wallpapers.some((w) => w.info.source === name && w.id === selectedId) || previewId === record.id
             return (
               <motion.button
                 type="button"
@@ -485,9 +487,12 @@ export default function WallpaperGallery() {
                 exit={{ opacity: 0, scale: 0.92 }}
                 transition={{ type: 'spring', stiffness: 320, damping: 28 }}
                 className={`gallery-tile${selected ? ' selected' : ''}`}
-                title={`${name} — click to load`}
+                title={supported ? `${name} — click to load` : `${name} — ${meta.label} wallpapers are coming soon`}
                 style={{ '--file-gradient': meta.gradient }}
-                onClick={() => handleOpen(record)}
+                onClick={() => {
+                  if (supported) handleOpen(record)
+                  else setPreviewId(record.id)
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault()
                   setMenu({
@@ -507,6 +512,23 @@ export default function WallpaperGallery() {
                     <Icon size={30} />
                   </span>
                 )}
+                {!supported ? (
+                  <span
+                    className="gallery-tile-badge"
+                    style={{
+                      position: 'absolute',
+                      top: 6,
+                      right: 6,
+                      fontSize: 10,
+                      padding: '2px 6px',
+                      borderRadius: 999,
+                      background: 'rgba(0,0,0,0.65)',
+                      color: '#ffd479',
+                    }}
+                  >
+                    Coming soon
+                  </span>
+                ) : null}
                 {editingFile === record.id ? (
                   <span className="gallery-tile-rename-wrap">
                     <input
