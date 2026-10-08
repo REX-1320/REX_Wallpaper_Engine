@@ -41,3 +41,11 @@
 - Ruling: effectiveVideoFps/playbackSpeed added in T5 although v2 plan only expected them in T4 acceptance — closes the plan gap; playbackSpeed = decoderFps/sourceFps (wrap-immune, no anchors needed).
 - Ruling: 30fps-on-160Hz renders at 30 (formula-literal) rather than repeating at display cadence (table prose) — minor imperfection, user can revisit.
 - TDD note: CadenceControllerTest values came from the plan table (spec-first) and passed on first run post-header; behavioral RED for T5 was the live 219-presents starvation from T4 (fixed by re-present design, proven by the 0.25x/120fps runs).
+
+## Task 6 (Phase 4 dynamics + speed) — complete
+- Dynamic Hz: refreshHz joins the topology predicate + SelectDisplayHz helper; AssignMonitor + CheckDisplayChanges refresh m_displayHzCached → cadence recalculates without restart. Tests: RefreshRateChangeIsDetected + DisplayHzTest x4 (RED: C3861).
+- Speed: wall target advances at rate (GetPosition + Pause fold + auto-pause fold all scale elapsed by m_speed; Seek/base stay content-time). Audio tempo untouched (P1-13 follow-up, documented). Test: SpeedClockTest (2x → ~2.0 in 1s).
+- Live 2x proof + two NEW bugs found and fixed: (1) park sleep_for(2ms) quantizes to ~15ms → decode capped 66 (second quantum bug; now PreciseSleepUntil); (2) decode-behind-wall phase pathology → freeze/burst (3 uniques/s + 1678 repeats/30s) → scheduler catch-up fallback (full ring of future → newest published) + FS15. After: decode ~111, presents 59/s, best-effort under VCN cap. User confirms smooth.
+- Shared timeline (inspection, single monitor to test with): mirror path uses one m_controller (shared origin ✓, per-compositor vsync already independent via own swapchains); independent per-monitor videos have own controllers by design (spec: different wallpapers = independent pipelines).
+- TDD notes: DisplayHz/Hz-predicate RED witnessed (C3861 + would-be-false); SpeedClockTest GREEN-on-write (3-line arithmetic; live 2x pos-advance is the behavioral proof — see case2x numbers). FS15 RED? (written with impl — characterization pin for the fallback + high-water interplay; FS13/FS14 covered the counting RED earlier.)
+- Ruling: playbackSpeed stays decoderFps/sourceFps (not wall/PTS anchors) — wrap-immune, no new members; at 2x it reads demand satisfaction (1.84), at 1x realtime (0.98-1.0).
