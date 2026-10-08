@@ -180,7 +180,7 @@ async function getCapabilities() {
 
 async function sendIfSupported(cmd, params, applied, skipped) {
   const caps = await getCapabilities()
-  const property = { SET_FILL_MODE: 'fillMode', SET_VOLUME: 'volume', SET_SPEED: 'speed', SET_LOOP: 'loop' }[cmd]
+  const property = { SET_FILL_MODE: 'fillMode', SET_VOLUME: 'volume', SET_SPEED: 'speed', SET_LOOP: 'loop', SET_MUTE: 'mute' }[cmd]
   if (!property || !caps.properties.includes(property)) {
     skipped.push(cmd)
     return
@@ -401,7 +401,7 @@ app.whenReady().then(() => {
 
   // Live property updates — only the properties the active renderer
   // actually supports are sent; the rest are reported as skipped.
-  ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed } = {}) => {
+  ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed, muted } = {}) => {
     const applied = []
     const skipped = []
     // SET_FILL_MODE is the only update without a null guard — sending it with
@@ -411,6 +411,7 @@ app.whenReady().then(() => {
     if (loop != null) await sendIfSupported('SET_LOOP', { value: !!loop }, applied, skipped)
     if (speed != null) await sendIfSupported('SET_SPEED', { value: speed }, applied, skipped)
     if (volume != null) await sendIfSupported('SET_VOLUME', { value: volume }, applied, skipped)
+    if (muted != null) await sendIfSupported('SET_MUTE', { value: !!muted }, applied, skipped)
     return { ok: true, applied, skipped }
   })
 

@@ -27,7 +27,7 @@ export const ENGINE_MODE_BY_MODE = {
 // unavailable, e.g. browser-only dev).
 export const DESKTOP_CAPABILITIES = {
   IMAGE: ['fillMode'],
-  VIDEO: ['fillMode', 'speed', 'loop', 'volume'],
+  VIDEO: ['fillMode', 'speed', 'loop', 'volume', 'mute'],
   WEB: [],
   SCENE: [],
   SHADER: [],
@@ -85,6 +85,7 @@ export async function updateDesktopSettings(w) {
     if (caps.includes('loop')) opts.loop = w.playback.loop
     if (caps.includes('speed')) opts.speed = w.playback.speed
     if (caps.includes('volume')) opts.volume = w.playback.volume / 100
+    if (caps.includes('mute')) opts.muted = w.playback.mute
   } else {
     return
   }
