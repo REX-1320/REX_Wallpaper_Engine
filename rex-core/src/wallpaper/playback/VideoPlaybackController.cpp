@@ -174,13 +174,17 @@ void VideoPlaybackController::Pause() {
 }
 
 void VideoPlaybackController::Stop() {
-    m_paused.store(false, std::memory_order_release);
+    m_paused.store(false, std::memory_order_relaxed);
     m_playing.store(false, std::memory_order_release);
-    m_position.store(0.0, std::memory_order_release);
     // P1-6: Stop resets the whole A/V timeline. The decoder seek was
     // missing, so Stop -> Play resumed video mid-stream while audio
     // restarted at 0. Seek 0 + scheduler clear (P1-5: no stale frame);
     // the clear runs even when the seek fails.
+    // Stop/Seek race: the position reset MUST sit inside the lock after
+    // Seek+Clear (it used to run outside: a frame published between the
+    // reset and the seek resurrected stale PTS — StopTimelineTest proved
+    // position 2.03 after Stop under load). The generation bump drops any
+    // frame already decoded from the pre-stop stream.
     // P1-8: snapshot under the lock — a concurrent Close() resets the
     // members, and the pre-fix check-outside/use-inside was a UAF.
     std::shared_ptr<AudioPlayer> audio;
@@ -190,9 +194,16 @@ void VideoPlaybackController::Stop() {
             m_decoder->Seek(0.0);
             m_scheduler.Clear();
             m_lastPublishedPts = 0.0;
+            ++m_decodeGeneration;
+            m_position.store(0.0, std::memory_order_release);
         }
         audio = m_audio;
     }
+    // Preserve the old unconditional-zero observable: with no decoder
+    // present nothing can publish concurrently, so this is race-free
+    // (with a decoder, the decode thread is parked on m_playing=false
+    // and re-checks it under the lock before publishing).
+    m_position.store(0.0, std::memory_order_release);
     if (audio) {
         audio->Stop();
     }
@@ -245,6 +256,7 @@ shared::Result<void> VideoPlaybackController::Seek(double seconds) {
         return shared::Result<void>(shared::ErrorCode::InvalidState, "seek failed");
     }
     m_position.store(seconds, std::memory_order_release);
+    ++m_decodeGeneration;  // drop any frame decoded from the pre-seek stream
     if (audio) {
         audio->Seek(seconds);
     }
@@ -361,20 +373,53 @@ void VideoPlaybackController::DecoderThread() {
         const auto t0 = Clock::now();
         {
             std::lock_guard lock(m_decodeMutex);
+            // Re-check under the lock: Stop()/Pause() may have landed
+            // after the loop-top check — publishing then would resurrect
+            // stale PTS past the reset (StopTimelineTest proved it live:
+            // position 2.03 after Stop under load).
+            if (!m_playing.load(std::memory_order_acquire) ||
+                m_paused.load(std::memory_order_acquire)) {
+                continue;
+            }
             auto decoder = m_decoder;
+            const uint64_t gen = m_decodeGeneration;
             ok = decoder && decoder->DecodeFrame(frame);
             // P1-8: read the flag from the snapshot, not the member —
             // Close() may reset it the moment the lock releases.
             looping = decoder && decoder->GetLoop();
             if (ok) {
-                // P1-5: a backward PTS jump means the decoder seeked
-                // internally (loop wrap) — drop the pre-seek frame.
-                // Clear is idempotent, so an explicit-Seek double-clear
-                // (keyframe lands before the target) is harmless.
-                if (IsBackwardJump(m_lastPublishedPts, frame.pts)) {
-                    m_scheduler.Clear();
+                // Drop frames decoded from a pre-Seek/Stop stream: the
+                // generation moved while DecodeFrame was inside.
+                if (gen != m_decodeGeneration) {
+                    ok = false;
+                    looping = true;
+                } else {
+                    // P1-5: a backward PTS jump means the decoder seeked
+                    // internally (loop wrap) — drop the pre-seek frame.
+                    // Clear is idempotent, so an explicit-Seek double-clear
+                    // (keyframe lands before the target) is harmless.
+                    if (IsBackwardJump(m_lastPublishedPts, frame.pts)) {
+                        m_scheduler.Clear();
+                    }
+                    m_lastPublishedPts = frame.pts;
+                    // Publish under the same lock: Stop()/Seek() reset
+                    // position under this lock, so push + PTS store are
+                    // atomic against their reset (previously the store ran
+                    // outside and won the race).
+                    m_scheduler.Push(frame);
+                    m_decoderFrameCount++;
+                    m_convertFrameCount++;
+                    m_framesDecoded.fetch_add(1, std::memory_order_relaxed);
+                    m_position.store(frame.pts, std::memory_order_release);
+                    {
+                        std::lock_guard lastLock(m_lastFrameMutex);
+                        m_lastFrame.slot = frame.slot;
+                        m_lastFrame.fenceValue = frame.fenceValue;
+                        m_lastFrame.width = frame.width;
+                        m_lastFrame.height = frame.height;
+                        m_lastFrame.frameIndex = frame.frameIndex;
+                    }
                 }
-                m_lastPublishedPts = frame.pts;
             }
         }
         if (!ok) {
@@ -390,20 +435,8 @@ void VideoPlaybackController::DecoderThread() {
             continue;
         }
 
-        m_scheduler.Push(frame);
-        m_decoderFrameCount++;
-        m_convertFrameCount++;
-        m_framesDecoded.fetch_add(1, std::memory_order_relaxed);
-        m_position.store(frame.pts, std::memory_order_release);
-
-        {
-            std::lock_guard lastLock(m_lastFrameMutex);
-            m_lastFrame.slot = frame.slot;
-            m_lastFrame.fenceValue = frame.fenceValue;
-            m_lastFrame.width = frame.width;
-            m_lastFrame.height = frame.height;
-            m_lastFrame.frameIndex = frame.frameIndex;
-        }
+        // (Publish moved inside the decode lock above: push + PTS store
+        // must be atomic against Stop()/Seek() resets under the same lock.)
 
         // Decode pacing (Phase 2 revised): throttle to the source frame
         // rate (speed-scaled) so the 8-slot ring always holds frames near

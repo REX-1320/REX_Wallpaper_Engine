@@ -30,18 +30,27 @@ TEST(StressTest, RapidSceneSwitching) {
     ASSERT_NE(engine, nullptr);
     ASSERT_TRUE(engine->Initialize(WallpaperConfig{}).IsSuccess());
 
-    // Alternate static/video scenes. Video opens against a nonexistent
-    // path on purpose — the error path is part of the stress (the engine
-    // must recover and accept the next LoadScene).
+    // Alternate static scenes (real file) with video opens against a
+    // nonexistent path. Missing files must FAIL LOUDLY under fail-open
+    // hardening (not succeed): assert the error, then prove the engine
+    // recovers and accepts the next LoadScene. That error path is the
+    // stress — rapid switching must never wedge the state machine.
     for (int i = 0; i < 50; ++i) {
         SceneInfo scene;
         scene.id = "stress_" + std::to_string(i);
-        scene.type = (i % 2 == 0) ? "static" : "video";
-        scene.sourcePath = (i % 2 == 0) ? kSampleImage : "Z:\\missing\\clip.mp4";
-
-        auto loadResult = engine->LoadScene(scene);
-        EXPECT_TRUE(loadResult.IsSuccess()) << "LoadScene(" << i << ") failed: "
-                                            << loadResult.Error().message;
+        if (i % 2 == 0) {
+            scene.type = "static";
+            scene.sourcePath = kSampleImage;
+            auto loadResult = engine->LoadScene(scene);
+            EXPECT_TRUE(loadResult.IsSuccess()) << "LoadScene(" << i << ") failed: "
+                                                << loadResult.Error().message;
+        } else {
+            scene.type = "video";
+            scene.sourcePath = "Z:\\missing\\clip.mp4";
+            auto loadResult = engine->LoadScene(scene);
+            EXPECT_TRUE(loadResult.IsError()) << "missing file loaded silently ("
+                                              << i << ")";
+        }
         auto unloadResult = engine->UnloadScene();
         EXPECT_TRUE(unloadResult.IsSuccess()) << "UnloadScene(" << i << ") failed: "
                                               << unloadResult.Error().message;

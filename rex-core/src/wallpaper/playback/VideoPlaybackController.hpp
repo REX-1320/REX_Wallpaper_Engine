@@ -211,6 +211,12 @@ private:
     // accessed under m_decodeMutex (Seek, prewarm, decode thread).
     double m_lastPublishedPts = -1.0;
 
+    // Decode generation (Stop/Seek race): bumped under m_decodeMutex by
+    // Seek/Stop. The decode thread snapshots it before DecodeFrame and
+    // publishes only when unchanged — a frame decoded from the pre-seek
+    // stream must never overwrite the post-seek position.
+    uint64_t m_decodeGeneration{0};
+
     // ─── Telemetry ──────────────────────────────────────────────────────
     std::atomic<uint64_t> m_framesDecoded{0};
     std::atomic<uint64_t> m_framesConsumed{0};
