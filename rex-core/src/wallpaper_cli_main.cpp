@@ -652,7 +652,8 @@ static void TelemetryThread(std::mutex& engineGuard,
                      "%04u-%02u-%02u %02u:%02u:%02u | private=%.1fMB | "
                      "decRendSame=%d rendDispSame=%d | decLUID=%016llx rendLUID=%016llx | "
                      "gpuDed=%llu gpuShared=%llu gpuBudget=%llu | "
-                     "decFps=%.1f rendFps=%.1f | slots=%llu ringBytes=%llu | presents=%llu\n",
+                      "decFps=%.1f rendFps=%.1f | slots=%llu ringBytes=%llu | presents=%llu | "
+                      "srcFps=%.1f convFps=%.1f schedDrops=%llu repeat=%llu queue=%llu effFps=%.1f dispHz=%d\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -662,10 +663,15 @@ static void TelemetryThread(std::mutex& engineGuard,
                      static_cast<unsigned long long>(t.gpuDedicatedBytes),
                      static_cast<unsigned long long>(t.gpuSharedBytes),
                      static_cast<unsigned long long>(t.gpuBudgetBytes),
-                     t.decoderFps, t.renderFps,
-                     static_cast<unsigned long long>(t.ringSlotCount),
-                     static_cast<unsigned long long>(t.ringBytes),
-                     static_cast<unsigned long long>(t.presentCount));
+                      t.decoderFps, t.renderFps,
+                      static_cast<unsigned long long>(t.ringSlotCount),
+                      static_cast<unsigned long long>(t.ringBytes),
+                      static_cast<unsigned long long>(t.presentCount),
+                      t.sourceFps, t.convertFps,
+                      static_cast<unsigned long long>(t.schedulerDrops),
+                      static_cast<unsigned long long>(t.repeatedFrames),
+                      static_cast<unsigned long long>(t.queueDepth),
+                      t.effectiveVideoFps, t.displayHz);
         std::fclose(f);
     }
 }
