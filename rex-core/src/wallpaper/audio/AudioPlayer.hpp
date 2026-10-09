@@ -63,6 +63,8 @@ public:
     void Seek(double seconds);
     void SetVolume(float volume);  // 0..1, applied on render
     void SetMute(bool mute);
+    /// Mute state (single-audio-owner policy proof + UI surfacing).
+    bool IsMuted() const { return m_muted.load(std::memory_order_acquire); }
     /// Playback tempo (P1-13 / R20): the render step consumes speed x device
     /// frames of content per callback (linear resample), so audio stays in
     /// sync with video-paced playback. Rate resample, not pitch-corrected:

@@ -622,6 +622,15 @@ double VideoManager::GetMonitorPosition(const std::string& monitorId) const {
     return 0.0;
 }
 
+bool VideoManager::IsMonitorVideoMuted(const std::string& monitorId) const {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.info.id != monitorId) continue;
+        return entry.monitorController ? entry.monitorController->IsMuted() : false;
+    }
+    return false;
+}
+
 double VideoManager::GetMonitorDuration(const std::string& monitorId) const {
     std::lock_guard<std::mutex> lock(m_monitorMutex);
     for (auto& entry : m_monitorEntries) {

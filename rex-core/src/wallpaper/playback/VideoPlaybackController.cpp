@@ -242,6 +242,11 @@ void VideoPlaybackController::SetMute(bool mute) {
     }
 }
 
+bool VideoPlaybackController::IsMuted() const {
+    std::lock_guard lock(m_decodeMutex);
+    return m_audio ? m_audio->IsMuted() : false;
+}
+
 shared::Result<void> VideoPlaybackController::Seek(double seconds) {
     // P1-8: check AND use under one lock — the pre-fix null check outside
     // the lock raced Close()'s reset (UAF on the use inside).

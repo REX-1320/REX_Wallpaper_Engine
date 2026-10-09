@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 #include <rex/wallpaper/IWallpaperEngine.hpp>
 
+#include <cstdlib>
 #include <filesystem>
 #include <string>
+
+#include "wallpaper/video/VideoManager.hpp"
+#include "graphics/renderer/Device.hpp"
 
 using namespace rex::wallpaper;
 
@@ -88,4 +92,54 @@ TEST(MonitorTest, PerMonitorWallpaperAssignment) {
     }
 
     engine->Shutdown();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Single-audio-owner policy (P3-G4 proof, headless: fake monitors)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Layered per-monitor videos would mix WASAPI streams into cacophony.
+// The first opened monitor video owns the audio; later ones start muted.
+// Fake MonitorInfos exercise this with no second display present.
+
+TEST(MonitorAudioTest, SecondMonitorVideoStartsMuted) {
+    const char* env = std::getenv("REX_TEST_VIDEO_AUDIO");
+    std::string video = (env && *env && std::filesystem::exists(env))
+        ? env : "D:/live wallpaper/lakeside-morning-minecraft-moewalls-com.mp4";
+    if (!std::filesystem::exists(video)) {
+        GTEST_SKIP() << "no audio-bearing test video (set REX_TEST_VIDEO_AUDIO)";
+    }
+
+    rex::graphics::Device d3d12;
+    if (d3d12.Initialize().IsError()) {
+        GTEST_SKIP() << "D3D12 device unavailable";
+    }
+    WallpaperConfig config;
+    config.enableHardwareAcceleration = true;
+    VideoManager vm;
+    if (vm.Initialize(config, d3d12.Get()).IsError()) {
+        GTEST_SKIP() << "VideoManager init unavailable";
+    }
+
+    MonitorInfo m1;
+    m1.id = "FAKE-1";
+    m1.name = "FAKE-1";
+    m1.width = 1920;
+    m1.height = 1080;
+    m1.isPrimary = true;
+    MonitorInfo m2 = m1;
+    m2.id = "FAKE-2";
+    m2.name = "FAKE-2";
+    m2.isPrimary = false;
+    if (vm.AddMonitor(m1).IsError() || vm.AddMonitor(m2).IsError()) {
+        GTEST_SKIP() << "fake monitor compositors unavailable headless";
+    }
+
+    ASSERT_TRUE(vm.OpenVideoForMonitor("FAKE-1", video).IsSuccess());
+    ASSERT_TRUE(vm.OpenVideoForMonitor("FAKE-2", video).IsSuccess());
+    EXPECT_FALSE(vm.IsMonitorVideoMuted("FAKE-1")) << "first owner must play sound";
+    EXPECT_TRUE(vm.IsMonitorVideoMuted("FAKE-2")) << "second video must start muted";
+    EXPECT_FALSE(vm.IsMonitorVideoMuted("NOPE"));
+
+    vm.Shutdown();
 }

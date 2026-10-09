@@ -89,6 +89,9 @@ public:
     void SetSpeed(float speed);
     void SetVolume(float volume);
     void SetMute(bool mute);
+    /// Mute state snapshot (P1-8: under m_decodeMutex like all member
+    /// access). Proves the single-audio-owner policy per monitor video.
+    bool IsMuted() const;
     shared::Result<void> Seek(double seconds);
 
     /// Re-selects the decoder's video stream to best match the target

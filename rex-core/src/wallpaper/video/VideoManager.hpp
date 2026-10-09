@@ -192,6 +192,9 @@ public:
     void SetMonitorMute(const std::string& monitorId, bool mute);
     /// Get position/duration of a per-monitor video.
     double GetMonitorPosition(const std::string& monitorId) const;
+    /// Mute state of a per-monitor video (proves the single-audio-owner
+    /// policy: first opened plays sound, later ones start muted).
+    bool IsMonitorVideoMuted(const std::string& monitorId) const;
     double GetMonitorDuration(const std::string& monitorId) const;
 
     /// Shutdown all monitor compositors (call on shutdown/device loss).
