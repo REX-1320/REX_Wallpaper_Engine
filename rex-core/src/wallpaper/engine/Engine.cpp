@@ -393,6 +393,17 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
             "unsupported scene type '" + scene.type + "' (supported: static, video, audio)");
     }
 
+    // Tile has no D3D12 tiling implementation (ComputeFillViewport no-ops
+    // it into a silent Stretch): refuse loudly instead of misrendering.
+    // All fillMode entries funnel through LoadScene or SetFillMode (which
+    // already rejects Tile), so this closes the last silent path. OS
+    // wallpapers (Path A) still tile natively via WallpaperStyle.
+    if (scene.fillMode == FillMode::Tile) {
+        return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+            "Tile fill mode is not implemented for engine scenes "
+            "(use OS wallpaper Path A for tiling)");
+    }
+
     REX_LOG_INFO("Engine", "Loading scene: {} (type: {}, path: {})",
                  scene.name.c_str(), scene.type.c_str(), scene.sourcePath.c_str());
 

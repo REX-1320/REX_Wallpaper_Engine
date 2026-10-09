@@ -9,6 +9,25 @@
 
 using namespace rex::wallpaper;
 
+namespace {
+
+// Test-gap fixture (was: hardcoded "test.mp4" in CWD, failing by design
+// under fail-open hardening). Resolution order: REX_TEST_VIDEO env,
+// in-repo bench-media fixture, legacy CWD name; SKIP when absent so the
+// suite stays honest instead of red-on-missing-file.
+std::string FindEngineTestVideo() {
+    if (const char* env = std::getenv("REX_TEST_VIDEO")) {
+        if (*env && std::filesystem::exists(env)) return env;
+    }
+    const std::string repoFixture =
+        "D:/REX_doc/bench-media/mpeg4_320x240.mp4";
+    if (std::filesystem::exists(repoFixture)) return repoFixture;
+    if (std::filesystem::exists("test.mp4")) return "test.mp4";
+    return std::string();
+}
+
+}  // namespace
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Lifecycle Tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -92,6 +111,28 @@ TEST(EngineTest, LoadUnsupportedTypeFailsLoudly) {
     }
 
     // Rejected loads must not become current.
+    EXPECT_TRUE(engine->GetCurrentScene().sourcePath.empty());
+
+    engine->Shutdown();
+}
+
+TEST(EngineTest, LoadTileFillModeFailsLoudly) {
+    // Tile has no D3D12 tiling implementation (ComputeFillViewport no-ops
+    // it into a silent Stretch): LoadScene must refuse instead of
+    // misrendering. OS wallpapers (Path A) still tile natively.
+    auto engine = CreateWallpaperEngine();
+
+    WallpaperConfig config;
+    engine->Initialize(config);
+
+    SceneInfo scene;
+    scene.id = "tile";
+    scene.name = "Tile";
+    scene.sourcePath = "C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg";
+    scene.type = "static";
+    scene.fillMode = FillMode::Tile;
+    auto result = engine->LoadScene(scene);
+    EXPECT_TRUE(result.IsError()) << "tile fillMode loaded silently";
     EXPECT_TRUE(engine->GetCurrentScene().sourcePath.empty());
 
     engine->Shutdown();
@@ -424,19 +465,22 @@ TEST(EngineTest, DumpStatsDoesNotCrash) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 TEST(EngineTest, VideoScenePlayback) {
+    const std::string video = FindEngineTestVideo();
+    if (video.empty()) {
+        GTEST_SKIP() << "no test video (set REX_TEST_VIDEO)";
+    }
     auto engine = CreateWallpaperEngine();
     engine->Initialize(WallpaperConfig{});
 
     SceneInfo scene;
     scene.id = "video_test";
-    scene.sourcePath = "test.mp4";
+    scene.sourcePath = video;
     scene.type = "video";
 
     EXPECT_TRUE(engine->LoadScene(scene).IsSuccess());
     EXPECT_EQ(engine->GetCurrentScene().type, "video");
-    EXPECT_TRUE(engine->GetCurrentScene().sourcePath == "test.mp4");
+    EXPECT_TRUE(engine->GetCurrentScene().sourcePath == video);
 
-    // Video loads but can't play without a real file — this is expected
     engine->Play();
     engine->Pause();
     engine->Stop();
