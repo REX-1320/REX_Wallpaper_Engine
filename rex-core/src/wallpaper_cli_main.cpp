@@ -856,16 +856,18 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
 
             // Images go through the OS wallpaper API â€” no engine needed.
             if (type == "image" || type == "static") {
-                // Unload any active engine scene first so a playing video
-                // stops decoding and releases its buffers behind the image.
+                // ALWAYS unload any engine scene first, regardless of
+                // engine state. UnloadScene is idempotent, but skipping
+                // it unless Running/Paused left the video backend alive
+                // after a stall (Error) or STOP (Stopped) — and the next
+                // recovery cycle reloaded the saved video scene right
+                // over the new image (proven live 2026-10-09: image shows
+                // ~1s, then the last video covers it).
                 if (engine) {
-                    EngineState st = engine->GetState();
-                    if (st == EngineState::Running || st == EngineState::Paused) {
-                        auto unloadResult = engine->UnloadScene();
-                        if (unloadResult.IsError()) {
-                            REX_LOG_WARN("Runtime", "Unload before image load failed: {}",
-                                         unloadResult.Error().message.c_str());
-                        }
+                    auto unloadResult = engine->UnloadScene();
+                    if (unloadResult.IsError()) {
+                        REX_LOG_WARN("Runtime", "Unload before image load failed: {}",
+                                     unloadResult.Error().message.c_str());
                     }
                 }
                 if (SetImageWallpaper(Utf8ToWiden(path), mode) != 0) {

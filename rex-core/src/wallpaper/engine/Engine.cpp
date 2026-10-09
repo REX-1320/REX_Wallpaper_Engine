@@ -541,6 +541,11 @@ shared::Result<void> Engine::UnloadScene() {
     m_currentScene = SceneInfo{};
     m_currentPosition = 0.0;
     m_positionBase.store(0.0, std::memory_order_relaxed);
+    // A pending recovery request refers to the previous scene: a device
+    // re-init racing this unload would otherwise reload the just-
+    // discarded video over whatever comes next (image-cover bug).
+    m_recoveryNeeded.store(false, std::memory_order_release);
+    m_recoveryDelayMs = 0;
 
     SetState(EngineState::Initialized);
     return shared::Result<void>();
@@ -1777,8 +1782,11 @@ void Engine::PaceLoop(
     if (isVideoScene && m_videoManager && m_videoManager->IsOpen()) {
         // Phase 3: maximum-useful presentation cadence. The decoder still
         // paces itself to the source rate; this only sets how often we
-        // present (new frame or cached re-present).
-        const int userCap = m_config.maxFps > 0 ? m_config.maxFps : 60;
+        // present (new frame or cached re-present). maxFps <= 0 is
+        // uncapped: min(sourceFps x rate, displayHz). A hardcoded 60 here
+        // starves high-fps content on high-Hz displays (120fps on 160Hz
+        // presented 60, drops exploding — proven live 2026-10-09).
+        const int userCap = m_config.maxFps;
         targetIntervalMs =
             1000.0 / CadenceController::PresentationTarget(
                          m_videoManager->GetFrameRate(),

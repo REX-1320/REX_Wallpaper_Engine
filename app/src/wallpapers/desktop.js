@@ -54,7 +54,7 @@ export function applyWallpaperToDesktop(w) {
     window.rexDesktop?.setDesktopVideo?.({
       path: w.filePath,
       mode,
-      fps: 60,
+      fps: 0,
       loop: w.playback.loop,
       muted: w.playback.mute,
       volume: w.playback.volume / 100,

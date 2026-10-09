@@ -214,7 +214,7 @@ async function applyStoredWallpaper(entry) {
       await runtime.init()
       await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
     } else {
-      await runtime.init(params.fps ?? 60, true)
+    await runtime.init(params.fps ?? 0, true)
       await runtime.send('LOAD', {
         path: params.path,
         type: 'video',
@@ -383,7 +383,7 @@ app.whenReady().then(() => {
     }
 
     try {
-      await runtime.init(fps ?? 60, true)
+      await runtime.init(fps ?? 0, true)
       await runtime.send('LOAD', {
         path: filePath,
         type: 'video',

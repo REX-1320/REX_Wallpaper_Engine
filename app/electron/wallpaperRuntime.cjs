@@ -170,7 +170,7 @@ class WallpaperRuntime extends EventEmitter {
     })
   }
 
-  init(maxFps = 60, hardwareAcceleration = true) {
+  init(maxFps = 0, hardwareAcceleration = true) {
     // Concurrency-safe: concurrent callers share one in-flight INIT so a
     // double-click can never send a second INIT to an initialized engine.
     // protocolVersion: native handshake (P3-G5) — a mismatch fails loudly
