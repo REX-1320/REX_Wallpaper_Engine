@@ -47,7 +47,13 @@ function clearLastApplied(userDataDir) {
 
 // Descriptor for Electron's app.setLoginItemSettings. Kept here (not in
 // main.cjs) so the contract is visible and the shape is unit-testable.
-function loginItemSettings(enabled) {
+// In a packaged app the executable IS the app, so args suffice. In dev the
+// executable is bare Electron and the app folder must be argv[1] — without
+// it Windows launches a default Electron window instead of REX.
+function loginItemSettings(enabled, appPath) {
+  if (appPath) {
+    return { openAtLogin: !!enabled, path: process.execPath, args: [appPath, '--background'] }
+  }
   return { openAtLogin: !!enabled, args: ['--background'] }
 }
 

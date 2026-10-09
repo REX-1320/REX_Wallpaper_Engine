@@ -9,7 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { detectFileType, isSupportedWallpaperType, PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS, TYPE_META } from './registry'
+import { detectFileType, isSupportedWallpaperType, splitNewFiles, PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS, TYPE_META } from './registry'
 import {
   deletePlaylist,
   deleteWallpaper,
@@ -179,8 +179,18 @@ export default function WallpaperGallery() {
   const handleFiles = async (e) => {
     const raw = [...e.target.files]
     if (raw.length === 0) return
+    // Duplicate guard: re-adding the same file selects the existing
+    // wallpaper instead of creating a second tile + store entry.
+    const { fresh, dupes } = splitNewFiles(files, raw)
+    if (fresh.length === 0) {
+      const first = dupes[0]
+      const existing = first && wallpapers.find((w) => w.info.source === first.name)
+      if (existing) selectWallpaper(existing.id)
+      e.target.value = ''
+      return
+    }
     const records = await Promise.all(
-      raw.map(async (f) => {
+      fresh.map(async (f) => {
         const thumb = await createThumbnail(f)
         const id = crypto.randomUUID()
         const thumbDataUrl = thumb?.dataUrl ?? null

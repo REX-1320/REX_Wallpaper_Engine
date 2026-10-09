@@ -39,6 +39,31 @@ export function isSupportedWallpaperPath(path) {
   return Object.values(SUPPORTED_EXTENSIONS).flat().includes(ext)
 }
 
+// Duplicate-import guard: identity is name+size+mtime, so re-adding the
+// same file is a no-op but adding an edited file (new mtime/size) still
+// imports. Pure so the gallery handler stays thin and this is unit-provable.
+export function fileIdentity(name, size, lastModified) {
+  return `${name}|${size}|${lastModified}`
+}
+
+export function splitNewFiles(existingRecords, incomingFiles) {
+  const seen = new Set(
+    existingRecords.map((r) => fileIdentity(r.name, r.size, r.date)),
+  )
+  const fresh = []
+  const dupes = []
+  for (const f of incomingFiles) {
+    const key = fileIdentity(f.name, f.size, f.lastModified)
+    if (seen.has(key)) {
+      dupes.push(f)
+    } else {
+      seen.add(key)
+      fresh.push(f)
+    }
+  }
+  return { fresh, dupes }
+}
+
 export const TYPE_META = {
   IMAGE: { label: 'Image', icon: ImageIcon, gradient: 'linear-gradient(135deg,#7c5cff,#ff6ad5)' },
   VIDEO: { label: 'Video', icon: VideoIcon, gradient: 'linear-gradient(135deg,#00c2ff,#6ee7b7)' },

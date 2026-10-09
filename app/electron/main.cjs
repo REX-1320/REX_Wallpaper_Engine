@@ -16,6 +16,16 @@ let isQuitting = false
 let trayManager = null
 const startInBackground = process.argv.includes('--background')
 
+// Dev-aware login-item registration: packaged apps register the exe
+// directly, but dev Electron needs the app folder as argv[1] or Windows
+// boots a default Electron window instead of REX.
+function applyLoginItem(enabled) {
+  const settings = app.isPackaged
+    ? startup.loginItemSettings(enabled)
+    : startup.loginItemSettings(enabled, app.getAppPath())
+  app.setLoginItemSettings(settings)
+}
+
 app.on('second-instance', () => {
   if (!gotLock) return
   if (!mainWindow) return
@@ -434,7 +444,7 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('settings:set-login-item', (event, { enabled } = {}) => {
     try {
-      app.setLoginItemSettings(startup.loginItemSettings(enabled))
+      applyLoginItem(enabled)
       logLine('settings: login item', enabled ? 'enabled' : 'disabled')
       trayManager?.rebuildMenu?.()
       return { ok: true, enabled: !!enabled }
@@ -511,7 +521,7 @@ app.whenReady().then(() => {
     },
     onToggleLoginItem: (enabled) => {
       try {
-        app.setLoginItemSettings(startup.loginItemSettings(enabled))
+        applyLoginItem(enabled)
         logLine('settings: login item', enabled ? 'enabled' : 'disabled')
       } catch (err) {
         logLine('settings: login item ERROR', err.message)
@@ -525,7 +535,7 @@ app.whenReady().then(() => {
   // Register every launch (idempotent): REX is a resident wallpaper app and
   // must survive reboots. The toggle lives in the tray menu + settings IPC.
   try {
-    app.setLoginItemSettings(startup.loginItemSettings(true))
+    applyLoginItem(true)
     logLine('startup: registered for login (--background)')
   } catch (err) {
     logLine('startup: registration ERROR', err.message)
