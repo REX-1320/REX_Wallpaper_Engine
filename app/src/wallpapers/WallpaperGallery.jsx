@@ -103,7 +103,7 @@ export default function WallpaperGallery() {
     setMenu(null)
     let w = wallpapers.find((x) => x.info.source === record.name)
     let id = w?.id
-    if (!id) id = await loadWallpaperFile(record.file)
+    if (!id) id = await loadWallpaperFile(record.file, record.path ?? null)
     if (id) updateWallpaperProperty(id, ['playlist', 'currentPlaylist'], playlistName)
   }
 
@@ -162,11 +162,11 @@ export default function WallpaperGallery() {
       if (cancelled || !items || items.length === 0) return
       const restored = []
       for (const item of items.slice(0, 100)) {
-        const { file, missing } = await galleryRestoreFile(item)
+        const { file, path: itemPath, missing } = await galleryRestoreFile(item)
         if (cancelled) return
         if (missing || !file) continue
         try {
-          restored.push(await buildFileRecord(file))
+          restored.push(await buildFileRecord(file, itemPath ?? item?.path ?? null))
         } catch {
           // unloadable file: skip tile, keep library entry
         }
@@ -270,7 +270,7 @@ export default function WallpaperGallery() {
       }
       freshList = [first]
     }
-    const records = await Promise.all(freshList.map((f) => buildFileRecord(f)))
+    const records = await Promise.all(freshList.map((f) => buildFileRecord(f, realPaths.get(f) ?? null)))
     for (const r of records) {
       if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
     }
@@ -283,14 +283,14 @@ export default function WallpaperGallery() {
       const p = realPaths.get(f)
       if (p) galleryAdd(p, f.type.startsWith('video/') ? 'video' : 'auto').catch(() => {})
     }
-    await loadWallpaperFile(records[0].file)
+    await loadWallpaperFile(records[0].file, records[0].path ?? null)
     e.target.value = ''
   }
 
   const handleOpen = async (record) => {
     const existing = wallpapers.find((w) => w.info.source === record.name)
     if (existing) selectWallpaper(existing.id)
-    else await loadWallpaperFile(record.file)
+    else await loadWallpaperFile(record.file, record.path ?? null)
   }
 
   const handleSort = (by) => {

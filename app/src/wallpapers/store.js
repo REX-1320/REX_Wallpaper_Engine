@@ -136,7 +136,7 @@ export function restorePlaylists(list) {
   bump()
 }
 
-export async function loadWallpaperFile(file) {
+export async function loadWallpaperFile(file, pathHint = null) {
   seedWallpapers()
   const fileName = typeof file === 'string' ? file : file.name
   const type = detectFileType(fileName) ?? 'IMAGE'
@@ -151,15 +151,25 @@ export async function loadWallpaperFile(file) {
   wallpaper.info.source = fileName
   wallpaper.info.filePath = fileName
   wallpaper.info.description = `Imported ${TYPE_META[type].label.toLowerCase()} wallpaper.`
-  if (typeof file !== 'string') {
+  // pathHint wins: restored Files are rebuilt from bytes and carry no
+  // .path, so without it the entry keeps a bare filename the runtime
+  // cannot resolve (tile selects, wall never changes — silent no-op).
+  if (typeof pathHint === 'string' && pathHint) {
+    wallpaper.filePath = pathHint
+    wallpaper.info.filePath = pathHint
+  } else if (typeof file === 'string') {
+    wallpaper.filePath = file
+    wallpaper.info.filePath = file
+  } else {
     wallpaper.filePath = file.path ?? null
-    if (window.rexDesktop?.getPathForFile) {
+    if (!wallpaper.filePath && window.rexDesktop?.getPathForFile) {
       try {
         wallpaper.filePath = (await window.rexDesktop.getPathForFile(file)) ?? wallpaper.filePath
       } catch {
         // keep fallback
       }
     }
+    if (wallpaper.filePath) wallpaper.info.filePath = wallpaper.filePath
     wallpaper.info.fileSize = `${(file.size / (1024 * 1024)).toFixed(1)} MB`
     wallpaper.info.dateAdded = new Date().toISOString().slice(0, 10)
   }
