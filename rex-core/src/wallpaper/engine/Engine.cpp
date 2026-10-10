@@ -1021,12 +1021,14 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.sourceFps      = vt.sourceFps;
         out.convertFps     = vt.convertFps;
         out.schedulerDrops = vt.schedulerDrops;
+        out.loopWraps = vt.loopWraps;
         out.queueDepth     = vt.queueDepth;
         out.pacingMs       = vt.pacingMs;
         out.playbackSpeed  = vt.playbackSpeed;
         out.repeatedFrames =
             m_repeatedVideoFrames.load(std::memory_order_relaxed);
-        // repeatedFrames stays 0 until Phase 3 starts re-presenting.
+        // Cadence re-presents of the cached frame (Phase 3); increments
+        // only when the scheduler had nothing new due.
         out.ringSlotCount  = vt.ringSlotCount;
         out.ringBytes      = vt.ringBytes;
         out.decodeMsP50    = vt.decodeMsP50;

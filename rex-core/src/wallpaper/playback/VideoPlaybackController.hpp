@@ -39,6 +39,10 @@ struct VideoPlaybackTelemetry {
     uint64_t schedulerDrops = 0;    // frames skipped between decode & consume
                                     // (Phase 1 semantics: decoded-minus-
                                     // consumed; PTS-honest counting in Phase 2)
+    uint64_t loopWraps       = 0;    // PTS wrap/seek events seen by the decode
+                                    // thread (loop restart or explicit seek:
+                                    // backward PTS jump -> scheduler Clear).
+                                    // Separates wrap churn from steady state.
     uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
     double   pacingMs       = 0.0;  // live decode-pacing interval (Phase 2
                                     // debug: m_frameIntervalMs / m_speed)
@@ -224,6 +228,7 @@ private:
     std::atomic<uint64_t> m_framesDecoded{0};
     std::atomic<uint64_t> m_framesConsumed{0};
     std::atomic<uint64_t> m_framesDropped{0};
+    std::atomic<uint64_t> m_loopWraps{0};  // backward-PTS-jump events (loop/seek)
     using Clock = std::chrono::steady_clock;
     Clock::time_point m_fpsStartTime;
     uint64_t m_decoderFrameCount  = 0;

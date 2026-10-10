@@ -14,6 +14,9 @@ extern "C" {
 #include <string>
 #include <thread>
 
+#include <avrt.h>
+#pragma comment(lib, "avrt.lib")
+
 namespace rex::wallpaper {
 
 namespace {
@@ -274,9 +277,24 @@ void AudioPlayer::ThreadLoop() {
     // exit so CoUninitialize always pairs with CoInitializeEx on one thread.
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+    // Real-time scheduling for glitch-free rendering: without MMCSS this
+    // normal-priority thread is preempted by video decode and misses the
+    // ~20 ms buffer deadlines — constant crackle on heavy content.
+    // Same pattern as AudioCapture (valid task-index variable; revert
+    // on exit — NULL index crashes inside AVRT.dll).
+    DWORD mmcssTaskIndex = 0;
+    HANDLE mmcss = AvSetMmThreadCharacteristics(L"Audio", &mmcssTaskIndex);
+
     bool wasapiOk = OpenEndpoint();
     auto lastEndpointRetry = std::chrono::steady_clock::now();
     constexpr auto kEndpointRetryInterval = std::chrono::seconds(2);
+    // The WASAPI stream must be Start()ed or the engine never pulls
+    // buffers — everything looks healthy (endpoint ready, unmuted,
+    // thread rendering) but nothing reaches the speakers. Owned here
+    // (never from Play()/Pause()) so the client has a single owner and
+    // re-enumeration can't race a cross-thread Start (cf. AudioCapture,
+    // which owns its own client the same way).
+    bool streamStarted = false;
 
     while (m_running.load(std::memory_order_acquire)) {
         // P3-G4: endpoint loss (unplug/default change) re-enumerates instead
@@ -284,6 +302,10 @@ void AudioPlayer::ThreadLoop() {
         // backoff while it stays unavailable.
         if (m_endpointLost.exchange(false, std::memory_order_acq_rel)) {
             REX_LOG_WARN(kModule, "render endpoint lost; re-enumerating");
+            if (streamStarted && m_client) {
+                m_client->Stop();
+            }
+            streamStarted = false;
             m_render.Reset();
             m_client.Reset();
             wasapiOk = OpenEndpoint();
@@ -298,10 +320,26 @@ void AudioPlayer::ThreadLoop() {
             DoSeek(m_seekTime.load(std::memory_order_acquire));
         }
         if (!m_playing.load(std::memory_order_acquire)) {
+            if (streamStarted && m_client) {
+                m_client->Stop();
+                streamStarted = false;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
-        if (wasapiOk) {
+        if (wasapiOk && m_client) {
+            if (!streamStarted) {
+                const HRESULT startHr = m_client->Start();
+                if (SUCCEEDED(startHr)) {
+                    streamStarted = true;
+                    REX_LOG_INFO(kModule, "WASAPI stream started");
+                } else {
+                    REX_LOG_WARN(kModule, "IAudioClient::Start failed (0x{:08X}); re-enumerating",
+                                 static_cast<unsigned>(startHr));
+                    m_endpointLost.store(true, std::memory_order_release);
+                    continue;
+                }
+            }
             RenderStep();
         }
         size_t freeFrames;
@@ -324,6 +362,13 @@ void AudioPlayer::ThreadLoop() {
         }
     }
 
+    if (streamStarted && m_client) {
+        m_client->Stop();
+        streamStarted = false;
+    }
+    if (mmcss) {
+        AvRevertMmThreadCharacteristics(mmcss);
+    }
     m_render.Reset();
     m_client.Reset();
     CoUninitialize();

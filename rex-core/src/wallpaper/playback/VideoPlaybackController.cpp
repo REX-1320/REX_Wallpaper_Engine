@@ -333,6 +333,7 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     t.sourceFps = m_frameRate;
     t.convertFps = secs > 0.0 ? static_cast<double>(m_convertFrameCount) / secs : 0.0;
     t.schedulerDrops = m_framesDropped.load(std::memory_order_relaxed);
+    t.loopWraps = m_loopWraps.load(std::memory_order_relaxed);
     t.queueDepth = m_scheduler.PendingCount();
     t.pacingMs = m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
     // Content rate (Phase 3): decode throughput over source rate.
@@ -405,6 +406,7 @@ void VideoPlaybackController::DecoderThread() {
                     // (keyframe lands before the target) is harmless.
                     if (IsBackwardJump(m_lastPublishedPts, frame.pts)) {
                         m_scheduler.Clear();
+                        m_loopWraps.fetch_add(1, std::memory_order_relaxed);
                     }
                     m_lastPublishedPts = frame.pts;
                     // Publish under the same lock: Stop()/Seek() reset
