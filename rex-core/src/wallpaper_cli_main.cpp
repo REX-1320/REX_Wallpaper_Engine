@@ -196,6 +196,24 @@ static void EnsureSymInit() {
     }
 }
 
+// Resolves `addr` to "module+0xoffset" for frames dbghelp cannot symbolize
+// (release DLLs without PDBs, driver code). Without this a crash inside
+// FFmpeg/the GPU driver dumps as a column of bare addresses, which hides
+// WHICH component faulted — the one fact that identifies the subsystem.
+// Caller MUST hold g_symMutex.
+static void ModuleTag(DWORD64 addr, char* out, size_t outLen) {
+    out[0] = '\0';
+    if (!g_symReady) return;
+    IMAGEHLP_MODULE64 mi = {};
+    mi.SizeOfStruct = sizeof(mi);
+    if (!SymGetModuleInfo64(g_symProc, addr, &mi)) return;
+    const DWORD64 offset = addr - mi.BaseOfImage;
+    const char* base = std::strrchr(mi.ModuleName, '\\');
+    base = base ? base + 1 : mi.ModuleName;
+    std::snprintf(out, outLen, " [%s+0x%llx]", base,
+                  static_cast<unsigned long long>(offset));
+}
+
 // Walk the stack of `thread` using the captured `ctx`.
 // `thread` must already be suspended (or be GetCurrentThread()).
 // Caller MUST hold g_symMutex.
@@ -223,16 +241,22 @@ static void DumpStack(FILE* f, HANDLE thread, CONTEXT ctx) {
 
         char name[512] = "<unknown>";
         DWORD64 disp = 0;
-        if (SymFromAddr(g_symProc, sf.AddrPC.Offset, &disp, sym)) {
+        bool symbolized = SymFromAddr(g_symProc, sf.AddrPC.Offset, &disp, sym) != FALSE;
+        if (symbolized) {
             std::snprintf(name, sizeof(name), "%s+0x%llx", sym->Name,
                           static_cast<unsigned long long>(disp));
         }
+        // Always tag the module: a symbolized *export* name (e.g. an AMD
+        // driver entry) is misleading without knowing which DLL owns it.
+        char mod[300] = {};
+        ModuleTag(sf.AddrPC.Offset, mod, sizeof(mod));
         IMAGEHLP_LINE64 line = {};  line.SizeOfStruct = sizeof(line);
         DWORD lineDisp = 0;
         if (SymGetLineFromAddr64(g_symProc, sf.AddrPC.Offset, &lineDisp, &line)) {
-            fprintf(f, "    %s [%s:%lu]\n", name, line.FileName, line.LineNumber);
+            fprintf(f, "    %s%s [%s:%lu]\n", name, mod, line.FileName, line.LineNumber);
         } else {
-            fprintf(f, "    %s (0x%p)\n", name, reinterpret_cast<void*>(sf.AddrPC.Offset));
+            fprintf(f, "    %s%s (0x%p)\n", name, mod,
+                    reinterpret_cast<void*>(sf.AddrPC.Offset));
         }
         fflush(f);
     }
@@ -742,6 +766,14 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
 
         REX_LOG_DEBUG("Runtime", "Command: {} (id={})", cmd.c_str(), id);
 
+        if (cmd == "PING") {
+            // Supervisor heartbeat (P0.2): liveness only, zero side effects.
+            // Must never block on engine state — a hung engine answers late
+            // (timeout) rather than hanging the watchdog with it.
+            WriteResponse(id, true);
+            continue;
+        }
+
         if (cmd == "SHUTDOWN") {
             // Stop the watchdog first (it holds no engine references, just
             // suspends threads and writes to crash.log).
@@ -1225,6 +1257,13 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("convertFps", json::Json(t.convertFps));
             tel.emplace("schedulerDrops", json::Json(static_cast<double>(t.schedulerDrops)));
             tel.emplace("loopWraps", json::Json(static_cast<double>(t.loopWraps)));
+            json::Json::Array mons;
+            for (const auto& mc : t.monitorPresents) {
+                mons.push_back(json::Json(Obj({ { "id", json::Json(mc.monitorId) },
+                                                { "presents", json::Json(static_cast<double>(mc.presents)) } })));
+            }
+            tel.emplace("monitorPresents", json::Json(std::move(mons)));
+            tel.emplace("occlusionParked", json::Json(t.occlusionParked));
             tel.emplace("presentFps", json::Json(t.presentFps));
             tel.emplace("repeatedFrames", json::Json(static_cast<double>(t.repeatedFrames)));
             tel.emplace("queueDepth", json::Json(static_cast<double>(t.queueDepth)));
