@@ -457,16 +457,41 @@ int AudioPlayer::PushFrameToRing(AVFrame* frame) {
         if (m_bufferedFrames + static_cast<size_t>(frames) > m_ringFrames) {
             return 0;  // ring full: drop-new (decode is gated, rare)
         }
-        int16_t* dst = m_ring.data() + m_writePos * static_cast<size_t>(channels);
+        int16_t* const ringBase = m_ring.data();
+        const size_t ringCh = static_cast<size_t>(channels);
         const bool planar = av_sample_fmt_is_planar(
             static_cast<AVSampleFormat>(frame->format));
 
         if (frame->format == AV_SAMPLE_FMT_S16 &&
             srcChannels == channels && !planar) {
             const int16_t* src = reinterpret_cast<const int16_t*>(frame->data[0]);
-            std::memcpy(dst, src, static_cast<size_t>(frames) * channels * 2);
+            // The ring is CIRCULAR (m_writePos advances modulo m_ringFrames),
+            // so the copy must split at the wrap boundary. Indexing it
+            // linearly wrote past the end of the vector whenever
+            // m_writePos + frames > m_ringFrames — which is exactly what
+            // happens once the consumer has advanced m_readPos past 0, i.e.
+            // once audio has actually played. That heap overflow is what
+            // corrupted the process heap (0xC0000374) and killed the runtime
+            // on every switch away from a playing video.
+            const size_t total = static_cast<size_t>(frames) * ringCh;
+            size_t done = 0;
+            size_t wp = m_writePos;
+            while (done < total) {
+                if (wp >= m_ringFrames) wp = 0;
+                const size_t avail = (m_ringFrames - wp) * ringCh;
+                const size_t n = std::min(total - done, avail);
+                // Ring offset is wp*ringCh ONLY — `done` indexes the source,
+                // never the destination (adding it re-ran past the ring end).
+                std::memcpy(ringBase + wp * ringCh, src + done,
+                            n * sizeof(int16_t));
+                done += n;
+                wp += n / ringCh;
+            }
         } else {
             for (int f = 0; f < frames; ++f) {
+                // Wrap per row for the same reason as the S16 fast path.
+                const size_t wp = (m_writePos + static_cast<size_t>(f)) % m_ringFrames;
+                int16_t* const row = ringBase + wp * ringCh;
                 for (int c = 0; c < channels; ++c) {
                     const int srcC = c < srcChannels ? c : 0;
                     float v = 0.0f;
@@ -508,7 +533,7 @@ int AudioPlayer::PushFrameToRing(AVFrame* frame) {
                         default:
                             return 0;
                     }
-                    dst[f * static_cast<size_t>(channels) + c] = ClampToS16(v);
+                    row[c] = ClampToS16(v);
                 }
             }
         }
@@ -586,9 +611,25 @@ void AudioPlayer::RenderStep() {
                 m_bufferedFrames -= contentFrames;
             }
         } else if (have > 0) {
-            const size_t samples = have * static_cast<size_t>(m_channels);
-            std::memcpy(dst, m_ring.data() + m_readPos * static_cast<size_t>(m_channels),
-                        samples * 2);
+            // Split at the ring wrap (see PushFrameToRing): reading
+            // m_readPos + have linearly ran off the end of m_ring once the
+            // read position wrapped.
+            const size_t ringCh = static_cast<size_t>(m_channels);
+            const size_t total = have * ringCh;
+            size_t done = 0;
+            size_t rp = m_readPos;
+            while (done < total) {
+                const size_t avail = (m_ringFrames - rp) * ringCh;
+                const size_t n = std::min(total - done, avail);
+                // `done` indexes the (linear) WASAPI destination; the ring
+                // source offset is rp*ringCh only.
+                std::memcpy(reinterpret_cast<int16_t*>(dst) + done,
+                            m_ring.data() + rp * ringCh,
+                            n * sizeof(int16_t));
+                done += n;
+                rp += n / ringCh;
+                if (rp >= m_ringFrames) rp = 0;
+            }
             m_readPos = (m_readPos + have) % m_ringFrames;
             m_bufferedFrames -= have;
         }
