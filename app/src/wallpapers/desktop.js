@@ -37,7 +37,10 @@ export const DESKTOP_CAPABILITIES = {
 export function applyWallpaperToDesktop(w) {
   if (!w) return
   if (!w.filePath) {
-    window.rexDesktop?.setDesktopVideo?.({ path: null })
+    // File-less entries (e.g. the seeded gallery placeholder) are not
+    // real wallpapers: sending STOP for them wiped the persisted
+    // last-wallpaper on every cold boot (the gallery mounts with the
+    // seed selected before any file exists). Do nothing instead.
     return
   }
   if (w.filePath.toLowerCase().startsWith('c:\\rex\\')) return

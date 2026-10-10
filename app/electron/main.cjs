@@ -228,6 +228,7 @@ async function applyStoredWallpaper(entry) {
     capabilities = null // adapter changed — refresh on next query
     await runtime.send('PLAY', {})
     lastApplied = entry
+    startup.saveLastApplied(app.getPath('userData'), lastApplied)
     consecutiveFailedRounds = 0
     setRuntimeAvailable(true)
     logLine('startup: re-applied last wallpaper', kind, params.path)
