@@ -1,3 +1,5 @@
+import { notifyError } from './notify'
+
 export const DESKTOP_STYLE_BY_MODE = {
   Cover: 'cover',
   Fill: 'fill',
@@ -48,7 +50,7 @@ export function applyWallpaperToDesktop(w) {
     const style = DESKTOP_STYLE_BY_MODE[w.display.mode] ?? 'cover'
     window.rexDesktop?.setDesktopVideo?.({ path: null })
     window.rexDesktop?.setDesktopWallpaper?.(w.filePath, style)?.then((res) => {
-      if (res && !res.ok) console.warn('setDesktopWallpaper failed:', res.error)
+      if (res && !res.ok) notifyError('Could not apply image wallpaper', res.error)
     })
     return
   }
@@ -63,7 +65,7 @@ export function applyWallpaperToDesktop(w) {
       volume: w.playback.volume / 100,
       speed: w.playback.speed,
     })?.then((res) => {
-      if (res && !res.ok) console.warn('setDesktopVideo failed:', res.error)
+      if (res && !res.ok) notifyError('Could not apply video wallpaper', res.error)
     })
     return
   }
@@ -95,9 +97,9 @@ export async function updateDesktopSettings(w) {
 
   try {
     const res = await window.rexDesktop.updateWallpaper(opts)
-    if (res && !res.ok) console.warn('updateWallpaper failed:', res.error)
+    if (res && !res.ok) notifyError('Could not update wallpaper', res.error)
     else if (res?.skipped?.length) console.info('updateWallpaper skipped (unsupported):', res.skipped)
   } catch (err) {
-    console.warn('updateWallpaper failed:', err.message)
+    notifyError('Could not update wallpaper', err.message)
   }
 }

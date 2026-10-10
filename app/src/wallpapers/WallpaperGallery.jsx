@@ -23,7 +23,8 @@ import {
 import DisplaySection from './inspector/sections/DisplaySection'
 import PlaylistEngineDialog from './playlist/PlaylistEngineDialog'
 import { playlistEngine } from './playlist/engine'
-import { createThumbnail, deleteThumbnail, saveThumbnail } from './thumbnail'
+import { deleteThumbnail } from './thumbnail'
+import { buildFileRecord, galleryAdd, galleryGet, galleryList, galleryRemove, galleryRestoreFile } from './gallery'
 
 const SORT_OPTIONS = [
   { key: 'name', label: 'Name' },
@@ -106,7 +107,7 @@ export default function WallpaperGallery() {
     if (id) updateWallpaperProperty(id, ['playlist', 'currentPlaylist'], playlistName)
   }
 
-  const removeFile = (record) => {
+  const removeFile = async (record) => {
     const w = wallpapers.find((x) => x.info.source === record.name)
     if (w) {
       if (w.id === selectedId) selectWallpaper(null)
@@ -115,6 +116,16 @@ export default function WallpaperGallery() {
     // Drop the persisted cached poster (best-effort; bridge may be absent).
     if (record.thumbPath) {
       deleteThumbnail(record.thumbPath)?.catch?.(() => {})
+    }
+    // Drop the persisted library entry (best-effort). Importing the same
+    // path again later re-creates both the entry and the tile.
+    try {
+      const rp =
+        (window.rexDesktop?.getPathForFile ? await window.rexDesktop.getPathForFile(record.file) : null) ??
+        null
+      if (rp) galleryRemove(rp)?.catch?.(() => {})
+    } catch {
+      // memory-only file: nothing persisted
     }
     thumbsRef.current.delete(record.id)
     setFiles((prev) => prev.filter((f) => f !== record))
@@ -137,6 +148,39 @@ export default function WallpaperGallery() {
   useEffect(() => {
     playlistEngine.start()
     return () => playlistEngine.stop()
+  }, [])
+
+  // Restore persisted gallery tiles after a restart (P0.3). Rebuilds File
+  // objects via the gallery.read-file bridge and the same record builder as
+  // fresh imports. Missing/unreadable files are skipped (kept in the library,
+  // never silently pruned — the drive may be temporarily unavailable). Tiles
+  // are restored only; applying stays with boot re-apply (startup.cjs).
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const items = await galleryList({ sortBy: 'lastUsed' })
+      if (cancelled || !items || items.length === 0) return
+      const restored = []
+      for (const item of items.slice(0, 100)) {
+        const { file, missing } = await galleryRestoreFile(item)
+        if (cancelled) return
+        if (missing || !file) continue
+        try {
+          restored.push(await buildFileRecord(file))
+        } catch {
+          // unloadable file: skip tile, keep library entry
+        }
+      }
+      if (cancelled || restored.length === 0) return
+      for (const r of restored) {
+        if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
+      }
+      forceThumbs((n) => n + 1)
+      setFiles((prev) => [...prev, ...restored])
+    })().catch(() => {})
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
@@ -179,49 +223,66 @@ export default function WallpaperGallery() {
   const handleFiles = async (e) => {
     const raw = [...e.target.files]
     if (raw.length === 0) return
-    // Duplicate guard: re-adding the same file selects the existing
-    // wallpaper instead of creating a second tile + store entry.
-    const { fresh, dupes } = splitNewFiles(files, raw)
-    if (fresh.length === 0) {
-      const first = dupes[0]
-      const existing = first && wallpapers.find((w) => w.info.source === first.name)
-      if (existing) selectWallpaper(existing.id)
-      e.target.value = ''
-      return
-    }
-    const records = await Promise.all(
-      fresh.map(async (f) => {
-        const thumb = await createThumbnail(f)
-        const id = crypto.randomUUID()
-        const thumbDataUrl = thumb?.dataUrl ?? null
-        // Persist the poster to the REX thumbnail cache so tiles survive
-        // past the in-memory blob URL lifetime. Best-effort: the bridge
-        // is absent outside the desktop app.
-        let thumbPath = null
-        if (thumbDataUrl) {
-          try {
-            thumbPath = await saveThumbnail(id, thumbDataUrl)
-          } catch {
-            thumbPath = null
-          }
-        }
-        return {
-          id,
-          name: f.name,
-          size: f.size,
-          date: f.lastModified,
-          file: f,
-          thumbDataUrl,
-          thumbPath,
-          isVideo: f.type.startsWith('video/'),
+    // Real paths for persisted-library dedup (P0.3). The library is
+    // authoritative for path identity across restarts; splitNewFiles below
+    // stays as the same-session exact-bytes (name+size+mtime) preflight.
+    const realPaths = new Map()
+    await Promise.all(
+      raw.map(async (f) => {
+        try {
+          const p =
+            (window.rexDesktop?.getPathForFile ? await window.rexDesktop.getPathForFile(f) : null) ??
+            f.path ??
+            null
+          if (p) realPaths.set(f, p)
+        } catch {
+          // memory-only file: in-memory dedup only
         }
       }),
     )
+    const persistedDupes = []
+    const candidates = []
+    for (const f of raw) {
+      const p = realPaths.get(f)
+      const hit = p ? await galleryGet(p) : null
+      if (hit) persistedDupes.push(f)
+      else candidates.push(f)
+    }
+    // Duplicate guard: re-adding the same file selects the existing
+    // wallpaper instead of creating a second tile + store entry.
+    const { fresh: freshSplit, dupes } = splitNewFiles(files, candidates)
+    const allDupes = [...persistedDupes, ...dupes]
+    // All dupes: select the live tile when there is one. A persisted dupe
+    // with no live tile (e.g. restore skipped it) is imported fresh so the
+    // user still gets a tile; the library bumps lastUsed, no duplicate entry.
+    let freshList = freshSplit
+    if (freshList.length === 0) {
+      const first = allDupes[0]
+      const existing = first && wallpapers.find((w) => w.info.source === first.name)
+      if (existing) {
+        selectWallpaper(existing.id)
+        e.target.value = ''
+        return
+      }
+      if (!first) {
+        e.target.value = ''
+        return
+      }
+      freshList = [first]
+    }
+    const records = await Promise.all(freshList.map((f) => buildFileRecord(f)))
     for (const r of records) {
       if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
     }
     forceThumbs((n) => n + 1)
     setFiles((prev) => [...prev, ...records])
+    // Persist fresh imports to the library (best-effort; bridge absent
+    // outside the desktop app). gallery.add dedups by normalized path, so a
+    // re-imported edited file bumps lastUsed instead of duplicating.
+    for (const f of freshList) {
+      const p = realPaths.get(f)
+      if (p) galleryAdd(p, f.type.startsWith('video/') ? 'video' : 'auto').catch(() => {})
+    }
     await loadWallpaperFile(records[0].file)
     e.target.value = ''
   }

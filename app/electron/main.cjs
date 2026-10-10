@@ -3,6 +3,9 @@ const path = require('node:path')
 const fs = require('node:fs')
 const { WallpaperRuntime } = require('./wallpaperRuntime.cjs')
 const { TrayManager } = require('./tray-manager.cjs')
+const { Supervisor } = require('./supervisor/supervisor.cjs')
+const { AppStateManager } = require('./app-state-manager.cjs')
+const { WallpaperLibrary } = require('./wallpaper-library.cjs')
 const startup = require('./startup.cjs')
 
 // ─── Single-instance protection ─────────────────────────────────────────────
@@ -79,26 +82,27 @@ function getWallpaperCliPath() {
 
 const runtime = new WallpaperRuntime(getWallpaperCliPath(), logLine)
 
+// Supervisor owns runtime health (P0.2): exit-driven recovery (replacing the
+// old inline recoverRuntime), hang/renderer watchdogs, crash
+// reports and recovery events. Assigned in app.whenReady (needs app paths).
+let supervisor = null
+
+// Persisted UI state + gallery library (P0.3). Assigned in app.whenReady:
+// both constructors resolve userData paths, which need the app module ready.
+// _galleryLib is reference-held only: the library self-registers its
+// gallery.* IPC on construct (no further calls needed from here).
+let appState = null
+let _galleryLib = null
+
 let capabilities = null
 
 // ─── Runtime crash recovery ──────────────────────────────────────────────────
-// The native engine is the only thing that can repair its own desktop layer,
-// so this never re-applies from Electron while the runtime is alive. If the
-// runtime process itself dies (crash / killed), the app restarts it, waits for
-// READY, and replays the last applied wallpaper so the desktop is restored
-// without user intervention. lastApplied is only set after a successful apply.
+// Owned by the Supervisor (see whenReady): exit → bounded reapply rounds →
+// park. lastApplied is only set after a successful apply; reapplyLastWallpaper
+// is the supervisor's reapply callback. The native engine repairs its own
+// desktop layer; Electron only restarts the process and replays wallpaper.
 
 let lastApplied = null // { kind: 'image'|'video', params }
-
-// Crash-recovery accounting. recoverRuntime() is triggered by every 'exit'
-// event; without a re-entrancy guard each crash started a fresh 5-attempt
-// loop, and a wallpaper that always crashes on LOAD turned into an infinite
-// spawn/INIT/LOAD/crash cycle. recovering serializes the loops, and after
-// MAX_RECOVERY_ROUNDS consecutive failed rounds recovery parks until the user
-// applies a different wallpaper (which resets the counter).
-let recovering = false
-let consecutiveFailedRounds = 0
-const MAX_RECOVERY_ROUNDS = 3
 
 function setRuntimeAvailable(available) {
   trayManager?.setRuntimeAvailable(available)
@@ -129,50 +133,6 @@ async function reapplyLastWallpaper() {
   } catch (err) {
     logLine('runtime:recovery reapply ERROR', err.message)
     return false
-  }
-}
-
-async function recoverRuntime() {
-  if (isQuitting || !lastApplied) return
-  if (recovering) {
-    logLine('runtime:recovery already in progress — ignoring duplicate trigger')
-    return
-  }
-  if (consecutiveFailedRounds >= MAX_RECOVERY_ROUNDS) {
-    logLine('runtime:recovery parked after', consecutiveFailedRounds,
-            'failed rounds — waiting for a new wallpaper')
-    return
-  }
-  recovering = true
-  try {
-    setRuntimeAvailable(false)
-    logLine('runtime:recovery start (last wallpaper queued)')
-    let attempts = 0
-    let ok = false
-    while (!isQuitting && attempts < 5) {
-      attempts++
-      try {
-        if (await reapplyLastWallpaper()) {
-          ok = true
-          break
-        }
-      } catch (err) {
-        logLine('runtime:recovery ERROR', err.message)
-      }
-      await new Promise((r) => setTimeout(r, 3000))
-    }
-    if (ok) {
-      consecutiveFailedRounds = 0
-      setRuntimeAvailable(true)
-      logLine('runtime:recovery ok (attempt', attempts + ')')
-    } else {
-      consecutiveFailedRounds++
-      setRuntimeAvailable(false)
-      logLine('runtime:recovery gave up after', attempts,
-              'attempts (failed round', consecutiveFailedRounds, 'of', MAX_RECOVERY_ROUNDS + ')')
-    }
-  } finally {
-    recovering = false
   }
 }
 
@@ -229,7 +189,7 @@ async function applyStoredWallpaper(entry) {
     await runtime.send('PLAY', {})
     lastApplied = entry
     startup.saveLastApplied(app.getPath('userData'), lastApplied)
-    consecutiveFailedRounds = 0
+    if (supervisor) supervisor.resetRecovery()
     setRuntimeAvailable(true)
     logLine('startup: re-applied last wallpaper', kind, params.path)
     return true
@@ -355,10 +315,17 @@ app.whenReady().then(() => {
       await runtime.init()
       await runtime.send('LOAD', { path: filePath, type: 'image', mode })
       capabilities = null // adapter changed — refresh on next query
-      await runtime.send('PLAY', {})
+      // No scene exists after an image LOAD (OS-drawn wallpaper), so PLAY
+      // is expected to fail with "No scene loaded" — the image is applied
+      // regardless. Never fail the apply (or skip persistence) for that.
+      try {
+        await runtime.send('PLAY', {})
+      } catch (playErr) {
+        logLine('wallpaper:set PLAY-after-image (expected)', playErr.message)
+      }
       lastApplied = { kind: 'image', params: { path: filePath, mode } }
       startup.saveLastApplied(app.getPath('userData'), lastApplied)
-      consecutiveFailedRounds = 0 // a deliberate new wallpaper resets recovery
+      if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
       setRuntimeAvailable(true)
       return { ok: true, style: mode }
     } catch (err) {
@@ -401,7 +368,7 @@ app.whenReady().then(() => {
         params: { path: filePath, mode, loop, muted, volume, speed, fps },
       }
       startup.saveLastApplied(app.getPath('userData'), lastApplied)
-      consecutiveFailedRounds = 0 // a deliberate new wallpaper resets recovery
+      if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
       setRuntimeAvailable(true)
       return { ok: true }
     } catch (err) {
@@ -489,6 +456,52 @@ app.whenReady().then(() => {
     return { ok: true }
   })
 
+  // ─── Persisted UI state (P0.3) ────────────────────────────────────────────
+  // Backs the renderer's useAppState hook. Dot-path get/set straight through
+  // to AppStateManager (versioned file + backups + corruption recovery).
+  ipcMain.handle('app-state:get', (event, keyPath) => {
+    try {
+      if (typeof keyPath !== 'string' || !appState) return null
+      return appState.get(keyPath) ?? null
+    } catch (err) {
+      logLine('app-state:get ERROR', err.message)
+      return null
+    }
+  })
+  ipcMain.handle('app-state:set', (event, keyPath, value) => {
+    try {
+      if (typeof keyPath !== 'string' || !appState) return null
+      return appState.set(keyPath, value) ?? null
+    } catch (err) {
+      logLine('app-state:set ERROR', err.message)
+      return null
+    }
+  })
+
+  // ─── Gallery file restore (P0.3) ──────────────────────────────────────────
+  // Reads a persisted library path back into a data URL so the gallery can
+  // rebuild File objects after a restart. Missing/unreadable files report
+  // ok:false ('not-found') and the gallery skips them (kept in the library,
+  // never silently pruned — the drive may be temporarily unavailable).
+  ipcMain.handle('gallery.read-file', (event, { path: filePath } = {}) => {
+    try {
+      if (typeof filePath !== 'string' || !filePath) return { ok: false, error: 'bad-path' }
+      const stat = fs.statSync(filePath)
+      if (!stat.isFile()) return { ok: false, error: 'not-found' }
+      if (stat.size > 150 * 1024 * 1024) return { ok: false, error: 'too-large' }
+      const ext = path.extname(filePath).toLowerCase()
+      const mime = {
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
+        '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+      }[ext] ?? 'application/octet-stream'
+      const dataUrl = `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`
+      return { ok: true, dataUrl, name: path.basename(filePath), size: stat.size, lastModified: stat.mtimeMs }
+    } catch (err) {
+      return { ok: false, error: err.code === 'ENOENT' ? 'not-found' : err.message }
+    }
+  })
+
   // ─── Custom title bar (traffic lights) ────────────────────────────────────
   ipcMain.on('window:minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
@@ -550,13 +563,46 @@ app.whenReady().then(() => {
     logLine('startup: no persisted wallpaper, nothing to re-apply')
   }
 
-  // Runtime crash → recovery. The native engine repairs its own layer; this
-  // only restarts the process and replays the last wallpaper. Ignored while
-  // quitting (will-quit calls runtime.stop() → exit fires harmlessly).
-  runtime.on('exit', (code) => {
-    logLine('runtime:exit', code, '(recovering)')
-    recoverRuntime()
+  // Persisted UI state + gallery library (P0.3). The library self-registers
+  // its gallery.* IPC on construct; app-state needs the two handlers below.
+  appState = new AppStateManager()
+  _galleryLib = new WallpaperLibrary()
+  logLine('persistence: app-state + gallery library ready')
+
+  // Runtime health → Supervisor (P0.2). It owns exit-driven recovery
+  // (bounded reapply rounds, then park), hang/renderer watchdogs, crash
+  // reports and recovery events. Replaces the old inline recoverRuntime so
+  // exactly one driver replays the wallpaper (no double-reapply races).
+  // Heartbeat is parked (miss limit Infinity) until the native PING command
+  // lands in a linked binary — without it every healthy runtime would read
+  // as hung. Renderer watchdog stays silent until the first renderer ping
+  // arrives (guard inside the supervisor).
+  supervisor = new Supervisor({
+    runtime,
+    logLine,
+    getWindow: () => mainWindow,
+    getLastApplied: () => lastApplied,
+    reapply: async () => {
+      if (!lastApplied || isQuitting) return true // nothing to do: not a failure
+      return reapplyLastWallpaper()
+    },
+    setRuntimeAvailable,
+    onEvent: (msg) => {
+      logLine('supervisor:event', msg.event)
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send('wallpaper:event', msg)
+      }
+    },
+    stateFilePath: path.join(app.getPath('userData'), 'supervisor-state.json'),
+    logs: {
+      runtimeLog: path.join(tempDir, 'REX', 'runtime.log'),
+      crashLog: path.join(tempDir, 'REX', 'crash.log'),
+      workerwDiagLog: path.join(tempDir, 'REX', 'workerw_diag.log'),
+      appLog: path.join(tempDir, 'REX', 'rex-app.log'),
+    },
+    options: { heartbeatMissLimit: Number.POSITIVE_INFINITY },
   })
+  supervisor.start()
 
   // Normal launch shows the UI; --background (e.g. Windows startup) keeps the
   // window hidden — tray + native services only.
@@ -578,5 +624,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {})
 
 app.on('will-quit', () => {
+  if (supervisor) supervisor.stop() // quitting: exits must not trigger recovery
   runtime.stop()
 })

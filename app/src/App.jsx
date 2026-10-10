@@ -6,6 +6,7 @@ import SpecularButton from './components/SpecularButton'
 import WidgetsWorkspace from './widgets/Workspace'
 import WallpaperGallery from './wallpapers/WallpaperGallery'
 import WallpaperInspector from './wallpapers/inspector/Inspector'
+import { Toaster } from './components/ui/sonner'
 
 function greeting() {
   const h = new Date().getHours()
@@ -63,6 +64,9 @@ function App() {
           </div>
         ) : null}
       </motion.section>
+      {/* User-facing error toasts (P1): mounted at the root so every tab
+          can report wallpaper failures, not just the demo tab. */}
+      <Toaster position="top-right" richColors />
     </SidebarLayout>
   )
 }

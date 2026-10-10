@@ -32,6 +32,24 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   saveThumbnail: (id, dataUrl) => ipcRenderer.invoke('wallpaper:save-thumbnail', { id, dataUrl }),
   deleteThumbnail: (path) => ipcRenderer.invoke('wallpaper:delete-thumbnail', { path }),
 
+  // Persisted UI state (AppStateManager in main).
+  appState: {
+    get: (keyPath) => ipcRenderer.invoke('app-state:get', keyPath),
+    set: (keyPath, value) => ipcRenderer.invoke('app-state:set', keyPath, value),
+  },
+
+  // Persisted gallery library (WallpaperLibrary in main). add() is the
+  // authoritative persisted-path dedup: same normalized path returns the
+  // existing entry (lastUsed bumped) instead of a duplicate.
+  gallery: {
+    add: (filePath, type, extra) => ipcRenderer.invoke('gallery.add', filePath, type, extra),
+    get: (filePath) => ipcRenderer.invoke('gallery.get', filePath),
+    list: (filter) => ipcRenderer.invoke('gallery.list', filter),
+    remove: (filePath) => ipcRenderer.invoke('gallery.remove', filePath),
+    update: (filePath, updates) => ipcRenderer.invoke('gallery.update', filePath, updates),
+    readFile: (filePath) => ipcRenderer.invoke('gallery.read-file', { path: filePath }),
+  },
+
   // Custom title bar (traffic lights).
   minimize: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.send('window:toggle-maximize'),

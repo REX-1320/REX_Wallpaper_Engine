@@ -47,8 +47,17 @@ class Supervisor {
     this.healthy = true
     this.recovering = false
     this.recoveryAttempts = 0
+    // Poison-file breaker: a file that crashes the runtime AFTER a
+    // successful re-apply resets recoveryAttempts below, so the attempt
+    // cap never trips and the same killer file loops forever. Track
+    // consecutive crash-after-success per path and park instead.
+    this.poisonStreak = 0
+    this.lastRecoveredPath = null
     this.heartbeatMisses = 0
-    this.lastRendererPing = Date.now()
+    // No renderer ping bridge exists yet (nothing calls recordRendererPing),
+    // so the watchdog must stay silent until the first ping arrives —
+    // otherwise every visible window would reload in a loop after 15 s.
+    this.lastRendererPing = null
 
     this._timers = []
     this._onExit = (code) => this._handleRuntimeExit(code)
@@ -70,6 +79,16 @@ class Supervisor {
     this.quitting = true
     for (const t of this._timers) clearInterval(t)
     this._timers = []
+  }
+
+  // A deliberate new wallpaper apply clears parked recovery state (P0.2):
+  // the user has moved on, so a later crash must recover again instead of
+  // staying parked on the old wallpaper's failure count.
+  resetRecovery() {
+    this.recoveryAttempts = 0
+    this.poisonStreak = 0
+    this.lastRecoveredPath = null
+    this.healthy = true
   }
 
   recordRendererPing() {
@@ -139,6 +158,9 @@ class Supervisor {
     if (!win || win.isDestroyed()) return
     // Hidden windows get throttled timers — don't flag a hidden renderer.
     if (!win.isVisible()) return
+    // No ping bridge wired yet: without any ping ever recorded there is no
+    // baseline, so there is nothing to call stale (see constructor).
+    if (this.lastRendererPing === null) return
     const stale = Date.now() - this.lastRendererPing
     if (stale <= this.opts.rendererStaleMs) return
     if (win.webContents.isCrashed()) {
@@ -181,6 +203,26 @@ class Supervisor {
       return
     }
 
+    // Poison-file circuit breaker (see constructor): reapply success
+    // below resets recoveryAttempts, so a file that kills the runtime
+    // seconds after every successful re-apply would loop forever.
+    const cur = this.deps.getLastApplied?.() ?? this.stateStore.get()
+    const curPath = cur?.params?.path ?? null
+    const abnormal = code !== 0 && code !== null && code !== undefined
+    if (abnormal && curPath && curPath === this.lastRecoveredPath) {
+      this.poisonStreak++
+    } else {
+      this.poisonStreak = 0
+    }
+    if (this.poisonStreak >= 2 && curPath) {
+      this.deps.logLine('runtime:recovery PARKED poison file (crashed', this.poisonStreak + 1, 'times):', curPath)
+      this.healthy = false
+      this.recovering = false
+      this.deps.setRuntimeAvailable?.(false)
+      this._notify({ event: 'recovery-parked-poison', data: { path: curPath, streak: this.poisonStreak } })
+      return
+    }
+
     this.deps.logLine('runtime:recovery start (last wallpaper queued)', 'attempt', attempt)
     this._notify({ event: 'recovery-start', data: { attempt } })
 
@@ -188,6 +230,7 @@ class Supervisor {
       const ok = await this.deps.reapply?.()
       if (ok) {
         this.recoveryAttempts = 0
+        this.lastRecoveredPath = curPath
         this.healthy = true
         this.deps.setRuntimeAvailable?.(true)
         this.deps.logLine('runtime:recovery ok (attempt', attempt + ')')
