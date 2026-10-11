@@ -1290,6 +1290,19 @@ void D3D12Renderer::EndFrame() {
 
     HRESULT hr = m_swapChain.Present(1, 0);
 
+    // Display cadence, straight from DXGI: how many refreshes the frame just
+    // presented occupied, and when it synced. This is the only signal in REX
+    // that describes what the panel showed rather than what this thread
+    // submitted — see wall_research.md P10 for why the submit-side gap metric
+    // alone is not a smoothness verdict.
+    {
+        DisplayCadenceStats::Sample s{};
+        if (m_swapChain.SampleDisplayCadence(s)) {
+            m_lastDwell.store(static_cast<double>(s.presentRefreshCount),
+                              std::memory_order_relaxed);
+        }
+    }
+
     // Feed the per-swapchain occlusion tracker BEFORE branching: S_OK
     // clears the run, OCCLUDED extends it, real failures end it (the
     // device path — not parking — owns failures).

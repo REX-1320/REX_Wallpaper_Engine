@@ -166,6 +166,65 @@ HRESULT SwapChain::Present(UINT syncInterval, UINT flags) {
     return m_swapChain->Present(syncInterval, flags);
 }
 
+bool SwapChain::SampleDisplayCadence(DisplayCadenceStats::Sample& out) {
+    if (!m_swapChain) return false;
+    // No frame spans 64+ refreshes; anything larger is a non-converged stat
+    // block, not a measurement (wall_research.md P11).
+    constexpr UINT kMaxPlausibleRefreshes = 64;
+
+    // Route 1: IDXGISwapChainMedia. Purpose-built for media apps, and it also
+    // exposes CompositionMode (COMPOSED vs OVERLAY) and ApprovedPresentDuration,
+    // which the base structure does not.
+    Microsoft::WRL::ComPtr<IDXGISwapChainMedia> media;
+    if (SUCCEEDED(m_swapChain.As(&media))) {
+        DXGI_FRAME_STATISTICS_MEDIA mst{};
+        const HRESULT hr = media->GetFrameStatisticsMedia(&mst);
+        static int s_mediaLog = 0;
+        if (s_mediaLog < 3 && hr != DXGI_ERROR_NOT_CURRENTLY_AVAILABLE) {
+            ++s_mediaLog;
+            REX_LOG_INFO("SwapChain",
+                         "raw GetFrameStatisticsMedia hr=0x{:08x} PresentCount={} "
+                         "PresentRefreshCount={} SyncRefreshCount={} Mode={} "
+                         "ApprovedPresentDuration={}",
+                         static_cast<unsigned long>(hr), mst.PresentCount,
+                         mst.PresentRefreshCount, mst.SyncRefreshCount,
+                         static_cast<int>(mst.CompositionMode),
+                         mst.ApprovedPresentDuration);
+        }
+        if (SUCCEEDED(hr) && mst.PresentCount > 0 &&
+            mst.PresentCount == mst.SyncRefreshCount &&
+            mst.PresentRefreshCount > 0 &&
+            mst.PresentRefreshCount <= kMaxPlausibleRefreshes) {
+            m_lastCompositionMode.store(
+                static_cast<int>(mst.CompositionMode), std::memory_order_relaxed);
+            out.presentRefreshCount = mst.PresentRefreshCount;
+            out.syncQpc = mst.SyncQPCTime.QuadPart;
+            out.valid = true;
+            m_cadence.Add(out);
+            return true;
+        }
+    }
+
+    // Route 2: base IDXGISwapChain::GetFrameStatistics. Kept behind the same
+    // validity gate — measured on this swap chain it reports
+    // PresentRefreshCount = 2087421 with PresentCount = 2, i.e. the queue has
+    // not drained and the refresh counts are meaningless (wall_research.md
+    // P11). A nonsense metric is worse than an absent one, so reject it.
+    DXGI_FRAME_STATISTICS st{};
+    if (FAILED(m_swapChain->GetFrameStatistics(&st))) return false;
+    if (st.PresentCount == 0) return false;
+    if (st.PresentCount != st.SyncRefreshCount) return false;
+    if (st.PresentRefreshCount == 0 ||
+        st.PresentRefreshCount > kMaxPlausibleRefreshes) {
+        return false;
+    }
+    out.presentRefreshCount = st.PresentRefreshCount;
+    out.syncQpc = st.SyncQPCTime.QuadPart;
+    out.valid = true;
+m_cadence.Add(out);
+    return true;
+}
+
 shared::Result<void> SwapChain::RefreshHdrSelection(ID3D12Device* device) {
     if (!m_swapChain) {
         return shared::Result<void>(shared::ErrorCode::NotInitialized,

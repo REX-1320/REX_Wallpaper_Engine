@@ -1,4 +1,5 @@
-#pragma once
+#pragma once
+#include "graphics/renderer/DisplayCadenceStats.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -61,6 +62,21 @@ public:
     /// WaitForFrame().
     double MeasureWaitForFrameMs() const;
 
+    /// Display-cadence samples from DXGI itself: how many refreshes the last
+    /// presented frame occupied, and when it synced. This is the only clock in
+    /// REX that reflects what the panel actually showed rather than what the
+    /// render thread submitted. Returns false when the swap chain cannot supply
+    /// statistics (older runtime, or a present that has not synced yet).
+    bool SampleDisplayCadence(DisplayCadenceStats::Sample& out);
+
+    const DisplayCadenceStats& CadenceStats() const { return m_cadence; }
+    /// DXGI composition mode for the last sampled present: -1 unknown,
+    /// 0 DXGI_FRAME_PRESENTATION_MODE_COMPOSED, 1 ..._OVERLAY. Answers from
+    /// the API whether this wallpaper surface gets its own plane.
+    int CompositionMode() const {
+        return m_lastCompositionMode.load(std::memory_order_relaxed);
+    }
+
     /// Get current back buffer index (queried live from the swap chain).
     UINT GetCurrentIndex() const {
         return m_swapChain ? m_swapChain->GetCurrentBackBufferIndex() : 0;
@@ -114,6 +130,8 @@ private:
     UINT    m_bufferCount = 3;
     DXGI_FORMAT m_format = DXGI_FORMAT_R8G8B8A8_UNORM;
     bool    m_isHdr = false;
+    DisplayCadenceStats m_cadence{};
+    std::atomic<int> m_lastCompositionMode{-1};  // -1 unknown, 0 COMPOSED, 1 OVERLAY
     float   m_displayMaxNits = 0.0f;
     float   m_displayMinNits = 0.0f;
     bool    m_hdrActive = false;

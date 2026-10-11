@@ -153,8 +153,13 @@ public:
     double LastFrameLatencyWaitMs() const {
         return m_lastFrameLatencyWaitMs.load(std::memory_order_relaxed);
     }
+    /// Display-cadence statistics sampled from DXGI after each present.
+    const graphics::DisplayCadenceStats& DisplayCadence() const {
+        return m_swapChain.CadenceStats();
+    }
 
     std::atomic<double> m_lastFrameLatencyWaitMs{0.0};
+    std::atomic<double> m_lastDwell{0.0};
 
     // ─── Telemetry counters (for the memory-retention diagnostics) ─────
     uint64_t GetTextureBytes()        const { return m_textureBytes; }

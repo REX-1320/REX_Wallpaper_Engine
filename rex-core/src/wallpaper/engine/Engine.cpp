@@ -1298,6 +1298,17 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
     out.phaseWorkLastMs  = m_phaseWorkMs.load(std::memory_order_relaxed);
     out.phaseWaitLastMs  = m_phaseWaitMs.load(std::memory_order_relaxed);
     out.phaseFrameIndex  = m_phaseFrameIndex.load(std::memory_order_relaxed);
+    if (m_renderer) {
+        const auto& cd = m_renderer->DisplayCadence();
+        // Only publish a dwell figure when DXGI actually converged; otherwise
+        // the field reads 0 and cadenceValid is false, which is the honest
+        // "unavailable" state (wall_research.md P11).
+        out.dwellVblanks = cd.PercentileDwell(1.0);
+        out.dwellP50     = cd.PercentileDwell(0.50);
+        out.dwellP95     = cd.PercentileDwell(0.95);
+        out.dwellP99     = cd.PercentileDwell(0.99);
+        out.cadenceValid = cd.HasCadence();
+    }
     // Unique-video-present sampler (Phase 3): same folding over
     // m_uniqueVideoFrames, so effectiveVideoFps excludes cadence
     // re-presents. Shares the present-rate window.

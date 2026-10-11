@@ -633,7 +633,62 @@ through `VideoProcessorBlt` + `CopyResource`.
 
 ---
 
-## 9. Verified research status (loop iteration 1)
+### P11 — DXGI frame statistics are NOT usable on this swap chain (measured)
+
+`IDXGISwapChain::GetFrameStatistics` was the obvious in-process replacement for
+the broken PresentMon `DisplayedTime`. It is also unusable here. Raw struct,
+Aari 4K24, captured live:
+
+```
+hr=0x887a000b  PresentCount=0 PresentRefreshCount=0 SyncRefreshCount=0
+hr=0x00000000  PresentCount=0 PresentRefreshCount=0 SyncRefreshCount=0
+hr=0x00000000  PresentCount=2 PresentRefreshCount=2087421 SyncRefreshCount=2087421
+```
+
+`DXGI_FRAME_STATISTICS` only describes real refresh counts once the present queue
+has drained (`PresentCount == SyncRefreshCount`). On this composed flip swap chain
+it never converges, and `PresentRefreshCount` reports in the millions.
+
+**Shipped with a validity gate** (`SwapChain.cpp::SampleDisplayCadence`): samples
+are rejected unless `PresentCount == SyncRefreshCount` and `PresentRefreshCount`
+is in `[1, 64]`; telemetry then reports `cadenceValid=false` and a zero dwell
+rather than a nonsense number. The `DisplayCadenceStats` accumulator and its 8
+unit tests are kept — they are correct and become useful the moment a valid source
+exists; they are simply not fed garbage.
+
+**Consequence, stated plainly:** on this machine there is currently **no**
+trustworthy per-frame displayed-timing source. Three routes were attempted and
+all three failed, for different and documented reasons:
+
+| Route | Result |
+|---|---|
+| Bundled PresentMon `DisplayedTime` | Non-monotonic (196/474 negative deltas, with and without `--qpc_time`) |
+| `IDXGISwapChain::GetFrameStatistics` | Succeeds but never converges: `PresentCount=2`, `PresentRefreshCount=2087421` |
+| `IDXGISwapChainMedia::GetFrameStatisticsMedia` | Returns `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` on every call |
+| ETW `DxgKrnl` + `tracerpt` | **96,096 events captured successfully** (10 MB ETL), but `tracerpt` cannot decode the payload without the provider manifest — the fields are opaque |
+
+The ETW route is the most promising and is only one step short: the events *are*
+being captured (session started with `logman start REXDxg -p
+{802EC45A-1E99-4B83-9920-87C98277BA9D} -ets`, stopped after the run, parsed to
+96k rows). What is missing is manifest-aware decoding. Two viable completions:
+supply the `Microsoft-Windows-DxgKrnl` manifest to `tracerpt -manifest`, or use a
+decoder that resolves manifests natively (upstream PresentMon 2.x does).
+
+**This is the single highest-value unblocker for the roadmap.** Phases 1 and 2
+cannot be honestly signed off without it: Phase 1's acceptance demands every frame
+loss be attributable to a stage, and Phase 2's pacing decisions need the *displayed*
+result, which is precisely the number we cannot currently measure.
+
+What *is* established, and stands independent of this gap:
+* decode is healthy (`decFps` tracks source, `schedDrops` 0);
+* submit cadence is healthy (REX `gapP50 41.87 / P50 42.38`, and PresentMon
+  `FrameTime` agrees);
+* the surface is `Hardware Composed: Independent Flip` (so §5.3 was wrong);
+* `AllowsTearing=0` is a missing swap-chain flag, not a driver limitation.
+
+---
+
+## 9. Verified research status
 
 Every item below is **measured or read from source**, not assumed.
 

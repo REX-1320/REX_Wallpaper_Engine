@@ -170,6 +170,18 @@ struct EngineTelemetry {
     // whole retry budget. Zero is healthy; non-zero means the decoder refused
     // input and a frame may have been lost (send/receive contract).
     uint64_t sendEagainStalls = 0;
+    // ─── Display cadence, sampled from DXGI (not from our own submits) ───
+    // dwellVblanks = refreshes the last presented frame occupied;
+    // dwellP50/P95/P99 are over the ring. For a source rate that is not an
+    // integer multiple of the refresh rate (24 fps on 160 Hz => 6.667 vblanks)
+    // these MUST split between 6 and 7 — that split IS the judder, measured at
+    // the panel rather than inferred from submit timing.
+    double   dwellVblanks = 0.0;
+    double   dwellP50     = 0.0;
+    double   dwellP95     = 0.0;
+    double   dwellP99     = 0.0;
+    // True once a full ring of samples exists.
+    bool     cadenceValid = false;
     // ─── Wall-cadence presentation (Phase 3) ──────────────────────────
     double   effectiveVideoFps = 0.0;  // unique video frames presented/s
                                        // (excludes cadence re-presents)
