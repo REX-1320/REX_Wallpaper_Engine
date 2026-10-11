@@ -1,6 +1,7 @@
 #include "SwapChain.hpp"
 #include <shared/Logger.hpp>
 #include <exception>
+#include <chrono>
 
 namespace rex::graphics {
 
@@ -185,6 +186,17 @@ void SwapChain::WaitForFrame() const {
     if (m_frameLatencyWaitable) {
         WaitForSingleObjectEx(m_frameLatencyWaitable, 1000, FALSE);
     }
+}
+
+// Phase timing for the waitable wait (see wall_research.md 4.2 erratum: the wait
+// IS performed correctly in BeginFrame; this exists to measure how long it
+// actually blocks, which is the part that was unverified).
+double SwapChain::MeasureWaitForFrameMs() const {
+    if (!m_frameLatencyWaitable) return 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    WaitForSingleObjectEx(m_frameLatencyWaitable, 1000, FALSE);
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
 }
 
 // ─── Private ───────────────────────────────────────────────────────────────

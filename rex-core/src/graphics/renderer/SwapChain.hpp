@@ -56,6 +56,11 @@ public:
     /// Returns immediately if the waitable object was not created.
     void WaitForFrame() const;
 
+    /// Same wait, but returns how long it blocked (ms). Used by the phase
+    /// telemetry to attribute stalls; behaviourally identical to
+    /// WaitForFrame().
+    double MeasureWaitForFrameMs() const;
+
     /// Get current back buffer index (queried live from the swap chain).
     UINT GetCurrentIndex() const {
         return m_swapChain ? m_swapChain->GetCurrentBackBufferIndex() : 0;

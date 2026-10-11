@@ -187,6 +187,13 @@ private:
     std::array<std::atomic<float>, kPresentIntervalRingSize> m_presentIntervalRing{};
     size_t m_presentIntervalIndex{0};
     std::chrono::steady_clock::time_point m_lastPresentAt{};
+    // Per-phase work timings for the last frame plus rolling means, so a
+    // present-path stall can be attributed rather than guessed at.
+    std::atomic<double> m_phaseBeginMs{0.0};   // wake -> BeginFrame returned
+    std::atomic<double> m_phaseDrawMs{0.0};    // draw + RenderFrame + Present
+    std::atomic<double> m_phaseWorkMs{0.0};    // whole frame work
+    std::atomic<double> m_phaseWaitMs{0.0};    // frame-latency waitable block
+    std::atomic<uint64_t> m_phaseFrameIndex{0};
     // Unique-video-present sampler (Phase 3): same folding for
     // effectiveVideoFps (excludes cadence re-presents).
     mutable uint64_t m_uniqueRateBase{0};

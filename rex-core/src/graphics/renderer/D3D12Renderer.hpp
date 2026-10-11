@@ -147,6 +147,14 @@ public:
     uint32_t ConsecutiveOccludedPresents() const {
         return m_occlusion.ConsecutiveOccluded();
     }
+    /// How long the frame-latency waitable blocked on the last BeginFrame (ms).
+    /// The wait itself is correct (see wall_research.md 4.2 erratum); this is
+    /// the measurement that says how much it actually costs.
+    double LastFrameLatencyWaitMs() const {
+        return m_lastFrameLatencyWaitMs.load(std::memory_order_relaxed);
+    }
+
+    std::atomic<double> m_lastFrameLatencyWaitMs{0.0};
 
     // ─── Telemetry counters (for the memory-retention diagnostics) ─────
     uint64_t GetTextureBytes()        const { return m_textureBytes; }

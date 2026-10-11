@@ -679,7 +679,9 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             // The retry is bounded because D3D11VA can return EAGAIN from send
             // while receive also returns EAGAIN (saturated surface pool), and
             // an unbounded retry spins forever holding the decode mutex.
-            if (++m_sendEagainRetries < kMaxSendEagainRetries) {
+            if (rex::wallpaper::ShouldRetrySendPacket(m_sendEagainRetries,
+                                                      kMaxSendEagainRetries)) {
+                ++m_sendEagainRetries;
                 continue;
             }
             REX_LOG_WARN(kModule, "avcodec_send_packet stuck at EAGAIN ({} "
@@ -734,6 +736,7 @@ DecoderDiagnostics FfmpegVideoDecoder::GetDiagnostics() const {
     d.averageDecodeMs = n > 0 ? sum / static_cast<double>(n) : 0.0;
     d.hardwareAccelerated = m_hardware;
     d.eof = m_eof;
+    d.sendEagainStalls = m_sendEagainStalls.load(std::memory_order_relaxed);
     d.decodeMsP50 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.50);
     d.decodeMsP95 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.95);
     d.decodeMsP99 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.99);

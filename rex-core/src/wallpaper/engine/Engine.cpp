@@ -1136,6 +1136,7 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.vpMsP50        = vt.vpMsP50;
         out.vpMsP95        = vt.vpMsP95;
         out.vpMsP99        = vt.vpMsP99;
+        out.sendEagainStalls = vt.sendEagainStalls;
     }    if (m_renderer) {
         out.textureBytes    = m_renderer->GetTextureBytes();
         out.uploadBytes     = m_renderer->GetUploadBytes();
@@ -1292,6 +1293,11 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
             out.presentGapMaxMs = sorted[n - 1];
         }
     }
+    out.phaseBeginMeanMs = m_phaseBeginMs.load(std::memory_order_relaxed);
+    out.phaseDrawMeanMs  = m_phaseDrawMs.load(std::memory_order_relaxed);
+    out.phaseWorkLastMs  = m_phaseWorkMs.load(std::memory_order_relaxed);
+    out.phaseWaitLastMs  = m_phaseWaitMs.load(std::memory_order_relaxed);
+    out.phaseFrameIndex  = m_phaseFrameIndex.load(std::memory_order_relaxed);
     // Unique-video-present sampler (Phase 3): same folding over
     // m_uniqueVideoFrames, so effectiveVideoFps excludes cadence
     // re-presents. Shares the present-rate window.
@@ -1529,6 +1535,17 @@ void Engine::CheckFullScreenPause() {
                     // inside the edges; a taskbar/appbar strip is tens of
                     // pixels and always fails this test.
                     fullScreen = (mw - iw <= 2 && mh - ih <= 2);
+                    if (fullScreen) {
+                        // Coverage alone is not fullscreen: with the taskbar
+                        // auto-hidden a MAXIMIZED window is exactly the monitor
+                        // rect. Distinguish by window style so ordinary
+                        // maximized apps (proven live with a maximized
+                        // Windows Terminal, 3840x2160) do not freeze the
+                        // wallpaper.
+                        const LONG style = GetWindowLongPtr(fg, GWL_STYLE);
+                        fullScreen = IsTrueFullscreenWindow(
+                            static_cast<long>(style), IsZoomed(fg) != FALSE);
+                    }
                     if (fullScreen) {
                         char cls[64] = {};
                         WideCharToMultiByte(CP_UTF8, 0, fgClass, -1, cls,
@@ -1970,25 +1987,38 @@ void Engine::RenderLoop() {
             {
                 const double totalMs =
                     duration<double, std::milli>(frameEnd - frameStart).count();
-                const double targetMs = 1000.0 / CadenceController::PresentationTarget(
-                    m_videoManager && m_videoManager->IsOpen()
-                        ? m_videoManager->GetFrameRate() : 0.0,
-                    m_speed.load(std::memory_order_relaxed),
-                    m_displayHzCached.load(std::memory_order_acquire),
-                    m_config.maxFps);
-                // gap between consecutive presents == targetInterval + work, so any frame
-                // whose WORK exceeds a small budget shows up as a late gap.
+                const double beginMs =
+                    duration<double, std::milli>(beginFrameEnd - frameStart).count();
+                const double endMs =
+                    duration<double, std::milli>(frameEnd - beginFrameEnd).count();
+                // Rolling phase means. A present spike shows up as a rising
+                // presentMs mean long before it shows up in any percentile.
+                m_phaseBeginMs.store(m_phaseBeginMs.load(std::memory_order_relaxed) * 0.9 + beginMs * 0.1,
+                                     std::memory_order_relaxed);
+                m_phaseDrawMs.store(m_phaseDrawMs.load(std::memory_order_relaxed) * 0.9 + endMs * 0.1,
+                                    std::memory_order_relaxed);
+                m_phaseWorkMs.store(totalMs, std::memory_order_relaxed);
+                m_phaseFrameIndex.store(m_frameCount, std::memory_order_relaxed);
+                if (m_renderer) {
+                    m_phaseWaitMs.store(m_renderer->LastFrameLatencyWaitMs(),
+                                        std::memory_order_relaxed);
+                }
+                // gap(n) == targetInterval + work(n): any frame whose WORK
+                // exceeds a small budget shows up as a late gap.
                 if (totalMs > 12.0) {
-                    const double beginMs =
-                        duration<double, std::milli>(beginFrameEnd - frameStart).count();
-                    const double endMs =
-                        duration<double, std::milli>(frameEnd - beginFrameEnd).count();
+                    const double targetMs =
+                        1000.0 / CadenceController::PresentationTarget(
+                                     m_videoManager && m_videoManager->IsOpen()
+                                         ? m_videoManager->GetFrameRate() : 0.0,
+                                     m_speed.load(std::memory_order_relaxed),
+                                     m_displayHzCached.load(std::memory_order_acquire),
+                                     m_config.maxFps);
                     REX_LOG_WARN("Engine",
                                  "late frame: total={:.2f}ms target={:.2f}ms "
                                  "begin+wake={:.2f}ms draw+present={:.2f}ms "
-                                 "sleep={:.2f}ms",
+                                 "latencyWait={:.2f}ms",
                                  totalMs, targetMs, beginMs, endMs,
-                                 totalMs - endMs);
+                                 m_renderer ? m_renderer->LastFrameLatencyWaitMs() : 0.0);
                 }
             }
             double deltaMs = duration<double, std::milli>(

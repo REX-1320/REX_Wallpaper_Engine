@@ -95,3 +95,44 @@ TEST(PlaybackArbitrationTest, TransientAutoPausedWhileRunningNeedsNoDecision) {
     in.autoPaused = true;  // pause applied, state not yet flipped
     EXPECT_EQ(EvaluatePlayback(in), PlaybackArbitration::None);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fullscreen detection: maximized must not count as fullscreen
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Regression: CheckFullScreenPause decided "fullscreen" purely from window
+// coverage. With the taskbar auto-hidden a maximized window is genuinely
+// 3840x2160, so a maximized Windows Terminal produced "Auto-pause applied
+// (fullscreen=true)" and pinned playback at position 2.4 s. This corrupted four
+// of six headless timing measurements during the stutter investigation, so the
+// false positive has to be nailed down by test, not by inspection.
+
+// WS_OVERLAPPEDWINDOW = WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_THICKFRAME|
+//                       WS_MINIMIZEBOX|WS_MAXIMIZEBOX
+constexpr long kOverlapped = 0x00000000L | kWsCaption | kWsThickFrame;
+
+TEST(FullscreenDetection, MaximizedWindowIsNotFullscreen) {
+    // IsZoomed() true short-circuits: this is the auto-hidden-taskbar case.
+    EXPECT_FALSE(IsTrueFullscreenWindow(kOverlapped, /*isZoomed=*/true));
+}
+
+TEST(FullscreenDetection, CaptionedWindowIsNotFullscreen) {
+    // Restored (not zoomed) but still a normal app window.
+    EXPECT_FALSE(IsTrueFullscreenWindow(kOverlapped, /*isZoomed=*/false));
+}
+
+TEST(FullscreenDetection, BorderlessPopupIsFullscreen) {
+    // Borderless-fullscreen games / players: WS_POPUP, no caption.
+    EXPECT_TRUE(IsTrueFullscreenWindow(kWsPopup, /*isZoomed=*/false));
+}
+
+TEST(FullscreenDetection, CaptionlessOverlappedIsFullscreen) {
+    // Caption removed but not a popup (some kiosk/embedded hosts).
+    EXPECT_TRUE(IsTrueFullscreenWindow(kWsThickFrame, /*isZoomed=*/false));
+}
+
+TEST(FullscreenDetection, ZoomedPopupStillNotFullscreen) {
+    // IsZoomed wins even for a popup style: a maximized window is still an
+    // ordinary window the user can restore, and must not freeze the wallpaper.
+    EXPECT_FALSE(IsTrueFullscreenWindow(kWsPopup, /*isZoomed=*/true));
+}

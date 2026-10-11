@@ -678,7 +678,8 @@ static void TelemetryThread(std::mutex& engineGuard,
                      "gpuDed=%llu gpuShared=%llu gpuBudget=%llu | "
                       "decFps=%.1f rendFps=%.1f | slots=%llu ringBytes=%llu | presents=%llu | "
                       "srcFps=%.1f convFps=%.1f schedDrops=%llu repeat=%llu queue=%llu effFps=%.1f dispHz=%d "
-                      "| gapP50=%.2fms gapP95=%.2fms gapP99=%.2fms gapMax=%.2fms gapJit=%.2fms\n",
+                      "| gapP50=%.2fms gapP95=%.2fms gapP99=%.2fms gapMax=%.2fms gapJit=%.2fms "
+                      "| phBegin=%.2fms phDraw=%.2fms phWork=%.2fms phWait=%.2fms\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -699,7 +700,9 @@ static void TelemetryThread(std::mutex& engineGuard,
                       t.effectiveVideoFps, t.displayHz,
                        t.presentGapP50Ms, t.presentGapP95Ms,
                        t.presentGapP99Ms, t.presentGapMaxMs,
-                       t.presentGapJitterMs);
+                       t.presentGapJitterMs,
+                       t.phaseBeginMeanMs, t.phaseDrawMeanMs,
+                       t.phaseWorkLastMs, t.phaseWaitLastMs);
         std::fclose(f);
     }
 }
@@ -1274,6 +1277,11 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("presentGapP99Ms", json::Json(t.presentGapP99Ms));
             tel.emplace("presentGapMaxMs", json::Json(t.presentGapMaxMs));
             tel.emplace("presentGapJitterMs", json::Json(t.presentGapJitterMs));
+            tel.emplace("phaseBeginMeanMs", json::Json(t.phaseBeginMeanMs));
+            tel.emplace("phaseDrawMeanMs", json::Json(t.phaseDrawMeanMs));
+            tel.emplace("phaseWorkLastMs", json::Json(t.phaseWorkLastMs));
+            tel.emplace("phaseWaitLastMs", json::Json(t.phaseWaitLastMs));
+            tel.emplace("sendEagainStalls", json::Json(static_cast<double>(t.sendEagainStalls)));
             tel.emplace("repeatedFrames", json::Json(static_cast<double>(t.repeatedFrames)));
             tel.emplace("queueDepth", json::Json(static_cast<double>(t.queueDepth)));
             tel.emplace("pacingMs", json::Json(t.pacingMs));

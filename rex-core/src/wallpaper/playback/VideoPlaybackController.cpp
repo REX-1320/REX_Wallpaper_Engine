@@ -360,6 +360,7 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
         t.vpMsP95     = d.vpMsP95;
         t.vpMsP99     = d.vpMsP99;
         t.recoveryCount = d.recoveryCount;
+        t.sendEagainStalls = d.sendEagainStalls;
         t.deviceResets = d.deviceResets;
     }
     return t;

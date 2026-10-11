@@ -88,9 +88,32 @@ struct DecoderDiagnostics {
     double   vpMsP99          = 0.0;
     uint32_t recoveryCount    = 0;
     uint32_t deviceResets     = 0;
+    // Packets abandoned because avcodec_send_packet stayed at EAGAIN for the
+    // whole retry budget. Zero is the healthy state; non-zero means the
+    // decoder refused input and a frame may have been lost.
+    uint64_t sendEagainStalls = 0;
     bool     hardwareAccelerated = false;
     bool     eof              = false;
 };
+
+// ─── Send-EAGAIN retry policy (pure, unit-testable) ──────────────────────
+//
+// FFmpeg's contract: avcodec_send_packet returning AVERROR(EAGAIN) means the
+// packet was NOT consumed and the caller must keep it and retry — unreffing it
+// punches a permanent hole in the compressed stream.
+//
+// D3D11VA breaks the contract's convenience assumption though: once its surface
+// pool saturates, send_packet AND receive_frame can both return EAGAIN, so an
+// unbounded retry spins forever while holding the decode mutex (proven live
+// 2026-10-11: position froze at 2.45 s). Hence a bounded budget with a
+// last-resort advance.
+//
+// retryCount is the number of consecutive EAGAIN retries already spent on the
+// CURRENT packet; maxBudget < 0 means "unbounded" (used by tests to show the
+// contract's ideal behaviour).
+inline bool ShouldRetrySendPacket(int retryCount, int maxBudget) {
+    return retryCount < maxBudget;
+}
 
 // ─── FfmpegVideoDecoder ─────────────────────────────────────────────────
 //

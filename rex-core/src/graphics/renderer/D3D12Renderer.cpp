@@ -1138,7 +1138,8 @@ bool D3D12Renderer::BeginFrame() {
     // (and the early-out below) disarm it before unlocking.
     m_frameLock.EnterFrame();
 
-    m_swapChain.WaitForFrame();
+    m_lastFrameLatencyWaitMs.store(m_swapChain.MeasureWaitForFrameMs(),
+                                   std::memory_order_relaxed);
 
     // P0-4: reset only a context whose fence completed. With max frame
     // latency 2 the ring always has a ready context absent a real GPU

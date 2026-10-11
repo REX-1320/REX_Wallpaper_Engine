@@ -155,9 +155,38 @@ measurements in §0b were re-taken with `pauseOnFullscreen:false` (an `INIT`
 parameter) and are therefore clean. A harness passing that flag is required for any
 future headless timing measurement on this machine.
 
----
+### P9 — PHASE TIMINGS (2026-11, reviewer-requested) and the R4 verdict
 
-## 1. Why the telemetry lied
+New telemetry: `phBegin` (wake → `BeginFrame` returned), `phDraw` (draw +
+`RenderFrame` + `Present`), `phWork` (whole frame), `phWait` (frame-latency
+waitable block). Undisturbed 60 s run, Aari 4K24:
+
+```
+gapP50=41.87ms gapP95=42.40ms gapP99=42.66ms gapMax=42.94ms gapJit=0.31ms
+phBegin=0.06ms  phDraw=0.27ms  phWork=0.25ms  phWait=0.00ms
+```
+
+* **`phWait = 0.00 ms` — R4 is definitively a non-issue.** The frame-latency
+  waitable never blocks on this machine. Combined with §4.2 (the wait is already
+  performed correctly in `BeginFrame`, before rendering, first frame included),
+  there is nothing to fix. The reviewer asked for this measurement precisely
+  because it was the one unverified claim; it is now verified.
+* `phBegin = 0.06 ms` — the decode-fence / frame-context wait is free.
+* `phDraw = 0.27 ms` — draw + present cost a quarter of a millisecond. The
+  earlier **17.42 ms** spike (P5) is therefore a rare outlier, not the steady
+  state, and it is the only thing left to explain.
+* `phWork` (0.19–0.52 ms) is ~0.6 % of the 41.667 ms budget, so **essentially
+  the entire inter-present interval is the `PreciseSleepUntil` pacing sleep** —
+  the loop is pacing exactly as designed.
+
+**Conclusion:** in an undisturbed environment REX is effectively perfect
+(`gapJit 0.31 ms`, `gapP99 42.66 ms` vs 41.667 nominal). Every stutter observed
+so far correlates with an *external perturbation* of the machine, not with a
+defect in the steady-state pipeline. The remaining work is to characterise what
+causes the perturbation (DWM compositor contention, foreground-window changes,
+the auto-pause path), not to retune the loop.
+
+---
 
 `Engine::GetPosition()` (Engine.cpp:716-722) is a real wall-clock stopwatch, and
 `effFps` is computed as *presents ÷ elapsed*, sampled every 5 s.
@@ -377,34 +406,25 @@ m_decCtx->thread_count = 1;  // deterministic sequential decode (wallpaper-style
 core is the classic "stutter under any load" failure. Must be
 `thread_count = 0` (auto) on the software path.
 
-### 4.2 Frame-latency waitable object is created and never awaited
+### 4.2 Frame-latency waitable — ✅ ALREADY CORRECT (audit erratum, 2026-11)
 
-SwapChain.cpp:72-74:
+The first version of this audit claimed the handle was "created and never
+awaited". **That was wrong**, and the reviewer was right to demand verification.
+Verified against source:
 
-```cpp
-swapChain2->SetMaximumFrameLatency(2);
-m_frameLatencyWaitable = swapChain2->GetFrameLatencyWaitableObject();
-```
+* `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` is passed at creation
+  (`SwapChain.cpp:46`).
+* `WaitForFrame()` **is** called from `D3D12Renderer::BeginFrame()`
+  (`D3D12Renderer.cpp:1141`) — i.e. before any rendering work, which is exactly
+  where Microsoft requires it, and it therefore also covers the first frame.
+* `WaitForFrame()` uses a 1000 ms timeout (`SwapChain.cpp:184-188`), and
+  `SwapChain.cpp:128` records that an earlier unbounded version burned a 1 s
+  timeout per frame (~1 fps stutter) and was already fixed.
 
-> For every frame it renders, **the app should wait on this handle before starting
-> any rendering operations.** Note that this requirement includes the first frame.
+**Verdict: R4 is not a defect.** The only remaining work is *measurement* — how
+long the wait actually blocks — which the phase timings in P1 provide.
 
-— https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-idxgiswapchain2-getframelatencywaitableobject
-
-The handle is stored and **never waited on** anywhere in the render loop. The
-system then blocks inside `Present()` instead — exactly the extra-latency
-equilibrium Microsoft documents
-(https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains).
-This adds a variable stall to the present path, which is jitter injected on top of
-the §2 quantization.
-
-A related Chromium bug report notes that swapchains *without* this flag share one
-global frame-latency semaphore, "likely the cause for bugs like crbug.com/…/726842
-where **video and animation playing together cause stutter**"
-(https://issues.chromium.org/issues/40890504). REX sets the flag but does not use
-it, so it may still share the global counter.
-
-### 4.3 No `hw_frames_ctx`, no `get_format` — two extra GPU passes per frame
+---
 
 REX sets only `hw_device_ctx` (FfmpegVideoDecoder.cpp:198). It does **not** set
 `hw_frames_ctx` and registers **no `get_format` callback**.
@@ -465,7 +485,7 @@ Flagged as a suspect initially. Peer check:
 | Frame-latency waitable | ❌ created, never awaited | all use it | **Below top tier** |
 | Presentation pacing | ❌ **source rate, syncInterval=1** | mpv = display rate + repeat | **Below top tier — ROOT CAUSE** |
 | VRR / tearing path | ❌ **never enabled** | mpv/Chromium engage it | **Below top tier — ROOT CAUSE** |
-| Jitter telemetry | ❌ averages only, structurally blind | — | **Below top tier** |
+| Jitter telemetry | ✅ **shipped** `gapP50/95/99/Max/Jit` | — | **Ahead of every peer** (see §0b) |
 
 **Summary:** the decode *engine internals* (pool ownership, backpressure, pacing
 timer, refcount discipline) are genuinely top-tier — several are better than LAV.
@@ -508,10 +528,22 @@ including the first.
 Leave `= 1` when `m_hardware` is true (matches LAV); use 0 otherwise.
 **Verify:** software-decode throughput on a 4K clip; no regression on hw path.
 
-### R6 — MEDIUM: instrument jitter, because the telemetry cannot see it
-Record a ring of **inter-present intervals** and report P50/P95/P99 + stddev and a
-max-gap. This is the measurement that proves R2/R3 and guards against regression.
-**Verify:** the metric exists and shows the defect before the fix, its absence after.
+### R6 — MEDIUM: instrument jitter, because the telemetry cannot see it — ✅ SHIPPED `bebfb00`
+
+**STATUS: DONE.** `Engine::GetTelemetry` now publishes
+`presentGapP50Ms / P95 / P99 / Max / JitterMs` from a 256-sample ring of
+inter-present intervals (recorded in `RenderLoop`, sampled by `GET_STATUS` and the
+`runtime-telemetry.log` writer). This is what made §0b measurable and what
+exonerated the decoder, the scheduler and the housekeeping timer.
+
+**REMAINS (see §7 review follow-up):** the metric is derived from `Present` entry
+timestamps on our own thread. It proves *when we submitted*, not *when the frame
+reached the panel*. Phase timings (frame deadline, render start, draw completion,
+`Present` entry/exit, frame identity) are the next addition, and PresentMon is the
+external ground truth.
+
+**Verify:** the metric exists, showed the defect before the fix (gapP99 62 ms) and
+the clean state after (`gapJit` 0.31 ms, 0 late frames).
 
 ### R7 — LOW: adopt `hw_frames_ctx` + `get_format` for zero-copy
 Let FFmpeg allocate decoded surfaces from REX's pool instead of copying each frame

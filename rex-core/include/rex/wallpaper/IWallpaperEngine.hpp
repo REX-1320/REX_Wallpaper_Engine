@@ -157,6 +157,19 @@ struct EngineTelemetry {
     double   presentGapP99Ms    = 0.0;
     double   presentGapMaxMs    = 0.0;
     double   presentGapJitterMs = 0.0;  // stddev of the interval
+    // ─── Per-phase work attribution (last frame + rolling means) ────────
+    // "Successful Present() and a healthy average FPS do not establish when a
+    // frame actually appeared on screen" — these split the frame so a stall can
+    // be attributed to wake / latency-wait / draw+present instead of guessed.
+    double   phaseBeginMeanMs = 0.0;   // wake -> BeginFrame
+    double   phaseDrawMeanMs  = 0.0;   // draw + RenderFrame + Present
+    double   phaseWorkLastMs  = 0.0;   // whole frame, last frame
+    double   phaseWaitLastMs  = 0.0;   // frame-latency waitable, last frame
+    uint64_t phaseFrameIndex  = 0;
+    // Packets abandoned because avcodec_send_packet stayed at EAGAIN for the
+    // whole retry budget. Zero is healthy; non-zero means the decoder refused
+    // input and a frame may have been lost (send/receive contract).
+    uint64_t sendEagainStalls = 0;
     // ─── Wall-cadence presentation (Phase 3) ──────────────────────────
     double   effectiveVideoFps = 0.0;  // unique video frames presented/s
                                        // (excludes cadence re-presents)
