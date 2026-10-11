@@ -155,13 +155,39 @@ measurements in §0b were re-taken with `pauseOnFullscreen:false` (an `INIT`
 parameter) and are therefore clean. A harness passing that flag is required for any
 future headless timing measurement on this machine.
 
-### P10 — PRESENTMON GROUND TRUTH (2026-11): our telemetry was measuring the WRONG CLOCK
+### P10 — PRESENTMON (2026-11): capability facts + one retracted finding
 
-PresentMon is present on this machine (AMD ships it):
-`C:\Program Files\AMD\CNext\CNext\PresentMon-x64.exe`.
+**ERRATUM (self-caught).** An earlier revision of this section reported a
+"bimodal displayed-frame distribution (P50 14.67 / P95 73.96 ms)" as proof that
+the stutter was real and invisible to REX's telemetry. **That was a measurement
+artifact and is withdrawn.** It came from taking successive deltas of
+`DisplayedTime`, which in this AMD PresentMon build is *not* a monotonic
+timestamp: 196 of 474 successive deltas are negative, with and without
+`--qpc_time`, and zero frames report `DisplayedTime == 0`. Delta-ing a latency
+column manufactures exactly the bimodality that was reported.
 
-**Refutes §5.3.** The audit inferred (labelled "INFERENCE, strong") that a WorkerW
-wallpaper can *never* take the independent-flip path. Measured, 475 presents:
+The sound columns are `CPUStartTime` (monotonic, ~41.8 ms steps) and `FrameTime`
+(present-to-present): **P50 41.87 ms, P95 42.38 ms, MAX 47.11 ms**, which agrees
+with REX's own `gapP50 41.87 / gapP95 42.40`. **No bimodality exists in the
+present cadence.**
+
+Method lesson, recorded because it nearly derailed the milestone: *validate a
+ground-truth tool against a known-good reference before believing its output.*
+REX's own telemetry was independently correct, and the external tool was
+misapplied.
+
+**Tooling prerequisite for Phase 1/2:** the AMD-bundled PresentMon
+(`C:\Program Files\AMD\CNext\CNext\PresentMon-x64.exe`) is usable for
+`PresentMode`, `AllowsTearing`, `SyncInterval`, `CPUStartTime` and `FrameTime`,
+but its `DisplayedTime`/`DisplayLatency` cannot be used for interval statistics
+in this build. To measure *displayed*-frame timing as the roadmap requires, either
+a current upstream PresentMon 2.x is needed, or the ETW `DxgKrnl`
+`Displayed*` events must be read directly. **This is an open tooling gap, not an
+engine finding.**
+
+---
+WorkerW wallpaper can *never* take the independent-flip path. Measured, 475
+presents:
 
 ```
 PresentMode = 'Hardware Composed: Independent Flip'   x475
@@ -169,40 +195,25 @@ AllowsTearing = '0'                                    x475
 SyncInterval  = '1'                                    x475
 ```
 
-The wallpaper **does** get an independent flip. §5.3's central claim is wrong and
-its "one shared DWM cadence" reasoning cannot be relied on.
+§5.3's central claim is **wrong**: the wallpaper does get an independent flip.
+Its "one shared DWM cadence" reasoning cannot be relied on.
 
-**The stutter is real, and our own telemetry could not see it.** Aari 4K24,
-headless (no Electron), 20 s capture:
+`AllowsTearing = 0` is real and actionable: the swap chain never passes
+`DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`. That is a concrete Phase 2 prerequisite,
+currently unmet and cheaply testable.
 
-| Metric | REX self-measured (submit) | **PresentMon (displayed)** |
-|---|---|---|
-| P50 | 41.87 ms | **14.67 ms** |
-| P95 | 42.40 ms | **73.96 ms** |
-| P99 | 42.66 ms | **85.62 ms** |
-| MAX | 44.64 ms | **87.09 ms** |
-| jitter | 0.31 ms | bimodal |
+`SyncInterval = 1` confirms the presentation is vsync-locked and therefore off
+the VRR code path (Microsoft: tearing requires sync interval 0).
 
-Mean ≈ 42 ms (consistent with 475 presents in 20 s), but the distribution is
-**bimodal**: roughly half the frames land in ~14 ms bursts and ~45 % take ~74 ms.
-The engine submits on a rock-steady 41.67 ms grid; the panel receives them in
-irregular clumps. That is precisely "a good average FPS cannot be used to pass a
-smoothness test" — and precisely the case where "successful Present() calls and a
-healthy average FPS do not establish when frames actually appeared on screen".
+**Present cadence is steady.** `FrameTime` (present-to-present) over 475 presents:
 
-Per-frame costs from the same capture: `GPUTime` 31.8 ms, `GPUWait` 8.6 ms,
-`CPUBusy` 41.8 ms, `CPUWait` 0.13 ms.
+```
+P50 = 41.87 ms    P95 = 42.38 ms    MAX = 47.11 ms
+```
 
-**Consequences for the roadmap:**
-1. Phase 1's "displayed frame identity" is not optional — it is the missing
-   clock. `gapP*` must be re-labelled as *submit* interval and kept alongside a
-   *displayed* interval.
-2. `AllowsTearing=0` is because the swap chain never passes
-   `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`; that is a concrete Phase 2 prerequisite
-   that is currently unmet and cheaply testable.
-3. The earlier 160 Hz experiment was rejected on *self-measured* tail metrics,
-   which we now know do not measure the displayed result. **That rejection may
-   have been wrong** and must be re-run against PresentMon.
+matching REX's own `gapP50 = 41.87 / gapP95 = 42.40` almost exactly, so the
+submit clock is healthy. `CPUStartTime` is monotonic at ~41.8 ms steps and
+`GPUWait` ranges 0–35.5 ms, `DisplayLatency` 43–116 ms.
 
 ---
 
