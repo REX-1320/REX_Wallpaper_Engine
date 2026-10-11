@@ -19,9 +19,63 @@
 
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 #include "wallpaper/video/VideoManager.hpp"
+#include "wallpaper/engine/ResourcePolicy.hpp"
+#include "wallpaper/playback/FrameScheduler.hpp"
 #include "graphics/renderer/Device.hpp"
 
 using rex::wallpaper::FfmpegVideoDecoder;
+
+// Slot-count mirror pin: the envelope's footprint convention must track the
+// real rings. Update ResourcePolicy.hpp together with either constant.
+static_assert(FfmpegVideoDecoder::kPoolSize ==
+                  rex::wallpaper::kDecodePoolSlots,
+              "decode pool size drifted from the resource envelope");
+static_assert(rex::wallpaper::FrameScheduler::kNumSlots ==
+                  rex::wallpaper::kSchedulerRingSlots,
+              "scheduler ring size drifted from the resource envelope");
+
+// ─── Media resource envelope (P1) ─────────────────────────────────────────
+// Pool footprint = w*h*4*(8+8); 4K ≈ 530 MB, 8K ≈ 2.1 GB.
+
+TEST(MediaBudgetTest, FourKInBigBudgetLoads) {
+    const auto r = rex::wallpaper::AssessMediaBudget(
+        3840, 2160, 4ULL * 1024 * 1024 * 1024);
+    EXPECT_FALSE(r.overBudget);
+    EXPECT_FALSE(r.unknownBudget);
+    EXPECT_EQ(r.poolBytes, 3840ULL * 2160 * 4 * 16);
+}
+
+TEST(MediaBudgetTest, EightKInSmallBudgetRefuses) {
+    const auto r = rex::wallpaper::AssessMediaBudget(
+        7680, 4320, 1ULL * 1024 * 1024 * 1024);
+    EXPECT_TRUE(r.overBudget);
+    EXPECT_FALSE(r.unknownBudget);
+}
+
+TEST(MediaBudgetTest, EightKInBigBudgetLoadsNoArbitraryCap) {
+    const auto r = rex::wallpaper::AssessMediaBudget(
+        7680, 4320, 8ULL * 1024 * 1024 * 1024);
+    EXPECT_FALSE(r.overBudget);
+}
+
+TEST(MediaBudgetTest, ExactBoundaryLoads) {
+    const uint64_t footprint =
+        rex::wallpaper::PoolFootprintBytes(1920, 1080);
+    const auto r = rex::wallpaper::AssessMediaBudget(1920, 1080, footprint);
+    EXPECT_FALSE(r.overBudget);
+}
+
+TEST(MediaBudgetTest, InvalidDimensionsRefuse) {
+    EXPECT_TRUE(rex::wallpaper::AssessMediaBudget(0, 1080, 1ULL << 40).overBudget);
+    EXPECT_TRUE(rex::wallpaper::AssessMediaBudget(1920, -1, 1ULL << 40).overBudget);
+    EXPECT_TRUE(rex::wallpaper::AssessMediaBudget(20000, 1080, 1ULL << 40).overBudget);
+}
+
+TEST(MediaBudgetTest, UnknownBudgetFailsOpenWithWarning) {
+    const auto r = rex::wallpaper::AssessMediaBudget(3840, 2160, 0);
+    EXPECT_FALSE(r.overBudget);
+    EXPECT_TRUE(r.unknownBudget);
+}
 
 TEST(DecoderPoolFormatTest, HardwareSdrIsNv12) {
     EXPECT_EQ(FfmpegVideoDecoder::PoolTextureFormat(true, false),

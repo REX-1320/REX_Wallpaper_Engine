@@ -1289,6 +1289,11 @@ void D3D12Renderer::EndFrame() {
 
     HRESULT hr = m_swapChain.Present(1, 0);
 
+    // Feed the per-swapchain occlusion tracker BEFORE branching: S_OK
+    // clears the run, OCCLUDED extends it, real failures end it (the
+    // device path — not parking — owns failures).
+    m_occlusion.NotifyPresent(static_cast<long>(hr));
+
     // ── Present diagnostics ──────────────────────────────────────────────
     //
     // DXGI_STATUS_OCCLUDED (0x087A0001) is a SUCCESS code returned when
@@ -1313,14 +1318,13 @@ void D3D12Renderer::EndFrame() {
         }
     } else if (hr == DXGI_STATUS_OCCLUDED) {
         // DWM dropped this frame. Throttle to ~1 log every 10 seconds
-        // so the log isn't spammed at 60 fps.
-        static thread_local int s_occludedCount = 0;
-        s_occludedCount++;
-        if (s_occludedCount % 300 == 1) {
+        // so the log isn't spammed at 60 fps. The throttle rides the
+        // occlusion tracker's consecutive count (single source of truth).
+        if (m_occlusion.ConsecutiveOccluded() % 300 == 1) {
             REX_LOG_WARN("D3D12",
                 "Present returned DXGI_STATUS_OCCLUDED. "
                 "DWM considers the render target fully occluded "
-                "(frame count: {}).", s_occludedCount);
+                "(frame count: {}).", m_occlusion.ConsecutiveOccluded());
         }
     } else if (hr != S_OK) {
         REX_LOG_INFO("D3D12", "Present returned non-S_OK: 0x{:08x}",

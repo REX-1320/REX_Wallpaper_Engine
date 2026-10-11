@@ -385,11 +385,14 @@ if(BUILD_TESTING)
         tests/wallpaper/test_decoder_lifetime.cpp
         tests/wallpaper/test_decoder_eof.cpp
         tests/wallpaper/test_audio_resample.cpp
+        tests/wallpaper/test_audio_dolby.cpp
         tests/wallpaper/test_cadence.cpp
         tests/wallpaper/test_protocol_safety.cpp
         tests/wallpaper/test_runtime_guard.cpp
         tests/wallpaper/test_hot_reload_guard.cpp
         tests/wallpaper/test_power_policy.cpp
+        tests/wallpaper/test_playback_policy.cpp
+        tests/wallpaper/test_occlusion_policy.cpp
         ${PLATFORM_WINDOWS_SOURCES}
         ${WALLPAPER_SOURCES}
         ${GRAPHICS_SOURCES}

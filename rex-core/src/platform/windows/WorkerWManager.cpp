@@ -245,6 +245,20 @@ void WorkerWManager::Release() {
     StopWindowThread();
 }
 
+// ─── Render-window visibility (P0.1: video→image frozen-frame cover) ─────
+// Hide the layer without releasing it so an OS-drawn static wallpaper shows
+// through; show restores it instantly with the backbuffer intact.
+void WorkerWManager::SetVisible(bool visible) {
+    HWND hwnd = m_renderWindow;
+    if (!hwnd || !IsWindow(hwnd)) return;  // pre-Acquire or released: no-op
+    RunOnWindowThread([hwnd, visible] {
+        if (IsWindow(hwnd)) {
+            ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
+        }
+        return true;
+    });
+}
+
 // ─── Non-destructive repair (BUG-001) ──────────────────────────────────────
 //
 // A layer that Explorer merely pushed above the desktop icons is still alive

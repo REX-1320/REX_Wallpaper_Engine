@@ -303,6 +303,25 @@ shared::Result<void> VideoManager::AddMonitor(const MonitorInfo& info,
     return shared::Result<void>();
 }
 
+std::vector<std::pair<std::string, uint64_t>> VideoManager::GetMonitorPresentCounts() const {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    std::vector<std::pair<std::string, uint64_t>> out;
+    for (const auto& entry : m_monitorEntries) {
+        out.emplace_back(entry.info.id,
+                         entry.compositor ? entry.compositor->GetFrameCount() : 0);
+    }
+    return out;
+}
+
+std::vector<bool> VideoManager::GetMonitorOcclusionStates() const {
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
+    std::vector<bool> out;
+    for (const auto& entry : m_monitorEntries) {
+        out.push_back(entry.compositor ? entry.compositor->IsOccluded() : false);
+    }
+    return out;
+}
+
 shared::Result<void> VideoManager::RemoveMonitor(const std::string& monitorId) {
     std::lock_guard<std::mutex> lock(m_monitorMutex);
 

@@ -200,6 +200,17 @@ public:
     /// Shutdown all monitor compositors (call on shutdown/device loss).
     void ShutdownMonitorCompositors();
 
+    /// Per-monitor present counts (P2 telemetry): monitor id → compositor
+    /// presents since creation (0 when the compositor is dormant/absent).
+    /// Lock-guarded snapshot; safe from any thread.
+    std::vector<std::pair<std::string, uint64_t>> GetMonitorPresentCounts() const;
+
+    /// Per-monitor occlusion states (occlusion park): one flag per active
+    /// monitor entry, true when that compositor's last present was dropped
+    /// by DWM as fully occluded. Lock-guarded snapshot; safe from any
+    /// thread. Order matches GetMonitorPresentCounts.
+    std::vector<bool> GetMonitorOcclusionStates() const;
+
 private:
     ID3D12Device* m_d3d12Device = nullptr;  // borrowed
     WallpaperConfig m_config{};

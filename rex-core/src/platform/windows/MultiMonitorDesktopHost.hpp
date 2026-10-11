@@ -19,6 +19,11 @@ public:
     shared::Result<void> Acquire() override;
     void Release() override;
 
+    /// Show/hide the shared render window without releasing the layer
+    /// (P0.1). Per-monitor compositors sample the shared decode and present
+    /// through the main render window, so hiding it hides all of them.
+    void SetVisible(bool visible) override;
+
     HWND GetRenderWindow() const override;
     int  GetWidth()  const override;
     int  GetHeight() const override;

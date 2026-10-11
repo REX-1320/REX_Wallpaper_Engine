@@ -23,6 +23,8 @@ namespace {
 constexpr const char* kModule = "AudioPlayer";
 constexpr size_t kMinFreeChunkFrames = 2048;  // pace decode when ring is this full
 constexpr size_t kRingSeconds = 1;            // ring capacity in seconds of audio
+constexpr int    kPrefillMs    = 150;          // audio headroom before WASAPI Start
+constexpr int    kPrefillTimeoutMs = 2000;    // bounded: never stall startup
 
 inline int16_t ClampToS16(float v) {
     if (v <= -1.0f) return INT16_MIN;
@@ -36,7 +38,75 @@ inline bool IsEndpointLost(HRESULT hr) {
     return hr == AUDCLNT_E_DEVICE_INVALIDATED ||
            hr == AUDCLNT_E_SERVICE_NOT_RUNNING;
 }
+
+/// FFmpeg error code -> text. NOT av_err2str: that is a GNU statement
+/// expression `({ ... })`, which MSVC rejects outright (C4576) — every use
+/// of it silently prevented this file from compiling.
+std::string AvErrStr(int err) {
+    char buf[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(err, buf, sizeof(buf));
+    return std::string(buf);
+}
+
+// ─── Downmix matrix ───────────────────────────────────────────────────────
+//
+// The ring is always laid out at the DEVICE channel count. Previously a frame
+// carrying more channels than the device was "downmixed" by reading only the
+// first `channels` of it — a 5.1 track lost its centre and surrounds and
+// sounded hollow. These are the standard Dolby / ITU-R BS.775 coefficients.
+//
+// LFE is deliberately EXCLUDED (no coefficient): the standard stereo downmix
+// drops it rather than folding sub-bass into full-range channels. Tests assert
+// this, so the behaviour cannot silently regress to "add everything".
+constexpr float kSurroundAtten   = 0.5f;      // -6 dB
+constexpr float kCentreToStereo = 0.7071f;   // -3 dB
+constexpr float kDirectToStereo = 0.7071f;
+
 } // namespace
+
+// Channel orders (FFmpeg): 5.1 = FL FR FC LFE SL SR
+//                          7.1 = FL FR FC LFE BL BR SL SR
+float AudioPlayer::GetDownmixCoefficients(int srcChannels, int dstChannels,
+                                          int srcChannel, int dstChannel) {
+    if (srcChannels <= 0 || dstChannels <= 0) return 0.0f;
+    if (srcChannel < 0 || srcChannel >= srcChannels) return 0.0f;
+
+    if (dstChannels == 1) return 1.0f;   // mono out: every channel folds in
+    if (srcChannels == dstChannels) return 1.0f;  // identity
+    if (dstChannels != 2) {
+        // No matrix defined for this pair: pass the source channel straight
+        // through when it exists, otherwise contribute nothing.
+        return dstChannel < srcChannels ? 1.0f : 0.0f;
+    }
+
+    if (srcChannels == 1) return 1.0f;   // mono -> both outputs
+    if (srcChannels == 2) return dstChannel < 2 ? 1.0f : 0.0f;  // stereo
+
+    if (srcChannels == 4) {             // quad: FL FR BL BR
+        if (srcChannel == 0 && dstChannel == 0) return 1.0f;
+        if (srcChannel == 2 && dstChannel == 0) return kSurroundAtten;
+        if (srcChannel == 1 && dstChannel == 1) return 1.0f;
+        if (srcChannel == 3 && dstChannel == 1) return kSurroundAtten;
+        return 0.0f;
+    }
+
+    // 5.1 / 7.1: front + centre into both, surrounds into their own side.
+    const bool is71 = (srcChannels >= 7);
+    const int centre  = 2;
+    const int sl = is71 ? 6 : 4;
+    const int sr = is71 ? 7 : 5;
+    const int bl = 4;   // 7.1 back-left (quad handled above)
+    const int br = 5;
+
+    if (srcChannel == centre) return kCentreToStereo;   // centre feeds BOTH
+    if (srcChannel == 0 && dstChannel == 0) return kDirectToStereo;
+    if (srcChannel == 1 && dstChannel == 1) return kDirectToStereo;
+    if (srcChannel == sl && dstChannel == 0) return kSurroundAtten;
+    if (srcChannel == sr && dstChannel == 1) return kSurroundAtten;
+    if (is71 && srcChannel == bl && dstChannel == 0) return kSurroundAtten;
+    if (is71 && srcChannel == br && dstChannel == 1) return kSurroundAtten;
+    return 0.0f;   // LFE (index 3) and the far-side surrounds land here
+}
 
 void AudioPlayer::ResampleLinear(const int16_t* src, size_t srcFrames,
                                  int channels, int16_t* dst,
@@ -128,6 +198,7 @@ shared::Result<void> AudioPlayer::Open(std::string_view path) {
     m_fmtCtx = fmtCtx;
     m_decCtx = decCtx;
     m_streamIndex = streamIndex;
+    m_codecName = codec->name ? codec->name : "unknown";
     m_frame = av_frame_alloc();
     m_pkt   = av_packet_alloc();
     if (!m_frame || !m_pkt) {
@@ -137,8 +208,15 @@ shared::Result<void> AudioPlayer::Open(std::string_view path) {
     }
 
     m_sampleRate = stream->codecpar->sample_rate > 0 ? stream->codecpar->sample_rate : 48000;
-    m_channels   = stream->codecpar->ch_layout.nb_channels > 0
-                       ? stream->codecpar->ch_layout.nb_channels : 2;
+    m_srcChannels = stream->codecpar->ch_layout.nb_channels > 0
+                        ? stream->codecpar->ch_layout.nb_channels : 2;
+    // The DEVICE layout is always stereo. Requesting the source layout (6ch
+    // for AC-3/E-AC-3) in SHARED mode makes the engine period describe a
+    // format the endpoint never hands us, so writing framesAvail*m_channels
+    // samples overruns the endpoint buffer and faults. Mixing down to stereo
+    // here also means the 5.1 downmix matrix is actually used, instead of the
+    // surround channels being dropped.
+    m_channels = 2;
     m_bytesPerSample = 2;  // we always feed interleaved S16
 
     // Ring: 1 second of audio, but never less than 4x the WASAPI buffer.
@@ -155,8 +233,8 @@ shared::Result<void> AudioPlayer::Open(std::string_view path) {
     m_thread = std::thread(&AudioPlayer::ThreadLoop, this);
 
     m_open.store(true, std::memory_order_release);
-    REX_LOG_INFO(kModule, "opened audio stream {} ({} Hz, {} ch)", streamIndex,
-                 m_sampleRate, m_channels);
+REX_LOG_INFO(kModule, "opened audio stream {} ({} Hz, {} ch -> {} ch device)",
+                 streamIndex, m_sampleRate, m_srcChannels, m_channels);
     return shared::Result<void>();
 }
 
@@ -329,6 +407,15 @@ void AudioPlayer::ThreadLoop() {
         }
         if (wasapiOk && m_client) {
             if (!streamStarted) {
+                // Prime the ring BEFORE Start(). Starting an empty ring
+                // forces the first buffers to render silence, and any decoder
+                // hiccup after that zero-fills a gap — the classic
+                // beep-beep at the head of playback. ~150 ms of headroom
+                // absorbs a decode hiccup without an audible dropout.
+                if (!streamStarted && !PrimedForStart()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;  // bounded: keep trying, never block forever
+                }
                 const HRESULT startHr = m_client->Start();
                 if (SUCCEEDED(startHr)) {
                     streamStarted = true;
@@ -376,39 +463,133 @@ void AudioPlayer::ThreadLoop() {
 
 // ─── Demux / decode ──────────────────────────────────────────────────────
 
+// ─── FFmpeg send/receive state machine ───────────────────────────────────
+
+int AudioPlayer::DrainAvailableFrames(AVCodecContext* dec, AVFrame* frame,
+                                      const std::function<void(AVFrame*)>& sink) {
+    // FFmpeg: "repeat this call until it returns AVERROR(EAGAIN) or an error"
+    // — a single packet may yield 0 or more than one frame.
+    int delivered = 0;
+    for (;;) {
+        const int rr = avcodec_receive_frame(dec, frame);
+        if (rr == 0) {
+            ++delivered;
+            sink(frame);
+            av_frame_unref(frame);
+            continue;
+        }
+        if (rr == AVERROR(EAGAIN) || rr == AVERROR_EOF) return delivered;
+        return rr;   // terminal error — caller logs it
+    }
+}
+
+int AudioPlayer::SubmitPacketAndDrain(AVCodecContext* dec, AVPacket* pkt,
+                                      AVFrame* frame,
+                                      const std::function<void(AVFrame*)>& sink) {
+    int delivered = 0;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        const int sr = avcodec_send_packet(dec, pkt);
+        if (sr == 0) break;                 // accepted
+        if (sr == AVERROR(EAGAIN)) {
+            // The decoder has not drained its previous output. FFmpeg
+            // requires draining and then resubmitting THIS SAME packet —
+            // unreffing it here (as the old loop did) silently loses audio.
+            const int drained = DrainAvailableFrames(dec, frame, sink);
+            if (drained < 0) return drained;
+            delivered += drained;
+            continue;                       // retry the same packet
+        }
+        return sr;                          // EINVAL / EOF / real failure
+    }
+    return delivered + DrainAvailableFrames(dec, frame, sink);
+}
+
 bool AudioPlayer::DecodeNextChunk() {
+    // Sends packets until at least one decoded frame reaches the ring.
+    // Returns false at end of stream (m_eof set) or on a terminal error
+    // (logged — playback must never stop silently again).
+    auto sink = [this](AVFrame* f) {
+        if (f->pts != AV_NOPTS_VALUE) {
+            const AVRational tb = m_fmtCtx->streams[m_streamIndex]->time_base;
+            m_position.store(static_cast<double>(f->pts) * av_q2d(tb),
+                             std::memory_order_release);
+        }
+        PushFrameToRing(f);
+    };
+
     while (true) {
+        if (m_eof) {
+            // Drain the decoder's internal delay. AC-3/E-AC-3 hold frames
+            // back; without this the tail is lost and looping desyncs.
+            const int drained = DrainAvailableFrames(m_decCtx, m_frame, sink);
+            if (drained < 0) {
+                REX_LOG_ERROR(kModule, "EOF drain failed for {}: {}",
+                              m_codecName, AvErrStr(drained));
+            }
+            return false;
+        }
+
         const int pr = av_read_frame(m_fmtCtx, m_pkt);
         if (pr == AVERROR_EOF) {
             m_eof = true;
-            return false;
+            avcodec_send_packet(m_decCtx, nullptr);  // enter draining mode
+            continue;
         }
         if (pr < 0) {
+            REX_LOG_WARN(kModule, "demux read failed ({}); draining",
+                         AvErrStr(pr));
             m_eof = true;
-            return false;
+            avcodec_send_packet(m_decCtx, nullptr);
+            continue;
         }
         if (m_pkt->stream_index != m_streamIndex) {
             av_packet_unref(m_pkt);
             continue;
         }
-        avcodec_send_packet(m_decCtx, m_pkt);
-        av_packet_unref(m_pkt);
 
-        const int rr = avcodec_receive_frame(m_decCtx, m_frame);
-        if (rr == AVERROR(EAGAIN)) {
-            continue;  // need more packets
-        }
-        if (rr < 0) {
+        const int delivered = SubmitPacketAndDrain(m_decCtx, m_pkt, m_frame, sink);
+        av_packet_unref(m_pkt);   // only safe AFTER the packet was accepted
+
+        if (delivered < 0) {
+            REX_LOG_ERROR(kModule, "{} decode failed: {} ({})", m_codecName,
+                          AvErrStr(delivered), delivered);
+            m_eof = true;
             return false;
         }
-        if (m_frame->pts != AV_NOPTS_VALUE) {
-            const AVRational tb = m_fmtCtx->streams[m_streamIndex]->time_base;
-            m_position.store(static_cast<double>(m_frame->pts) * av_q2d(tb),
-                             std::memory_order_release);
+        if (delivered > 0) return true;
+        // Packet produced no frame yet — feed the next one.
+    }
+}
+
+bool AudioPlayer::PrimedForStart() {
+    if (!m_hasAudio) return true;
+    const size_t want = static_cast<size_t>(
+        std::max(1, m_sampleRate * kPrefillMs / 1000));
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kPrefillTimeoutMs);
+    for (;;) {
+        {
+            std::lock_guard lock(m_ringMutex);
+            if (m_bufferedFrames >= want) return true;
         }
-        PushFrameToRing(m_frame);
-        av_frame_unref(m_frame);
-        return true;
+        // EOF with a short clip: start anyway rather than stall forever.
+        if (m_eof || !DecodeNextChunk()) {
+            std::lock_guard lock(m_ringMutex);
+            if (m_bufferedFrames == 0) {
+                REX_LOG_INFO(kModule,
+                             "prefill skipped for {} (source exhausted)",
+                             m_codecName);
+            }
+            return true;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+            REX_LOG_WARN(kModule, "prefill timed out after {} ms ({} buffered)",
+                         kPrefillTimeoutMs, [&] {
+                             std::lock_guard l(m_ringMutex);
+                             return m_bufferedFrames;
+                         }());
+            return true;  // start with whatever we have
+        }
     }
 }
 
@@ -439,6 +620,82 @@ void AudioPlayer::DoSeek(double seconds) {
 
 // ─── Sample conversion (any AVSampleFormat -> interleaved S16) ───────────
 
+// Reads one sample of a decoded frame as float, handling both planar and
+// interleaved layouts. `planar` is derived from the frame's format.
+static float ReadSample(const AVFrame* frame, bool planar, int ch, int idx,
+                        int srcChannels) {
+    const uint8_t* plane = frame->data[planar ? ch : 0];
+    if (!plane) return 0.0f;
+    switch (frame->format) {
+        case AV_SAMPLE_FMT_U8:
+        case AV_SAMPLE_FMT_U8P:
+            return (static_cast<int>(plane[planar ? idx
+                                                 : idx * srcChannels + ch]) - 128)
+                   / 128.0f;
+        case AV_SAMPLE_FMT_S16:
+        case AV_SAMPLE_FMT_S16P:
+            return reinterpret_cast<const int16_t*>(plane)[planar
+                       ? idx : idx * srcChannels + ch] / 32768.0f;
+        case AV_SAMPLE_FMT_S32:
+        case AV_SAMPLE_FMT_S32P:
+            return reinterpret_cast<const int32_t*>(plane)[planar
+                       ? idx : idx * srcChannels + ch] / 2147483648.0f;
+        case AV_SAMPLE_FMT_FLT:
+        case AV_SAMPLE_FMT_FLTP:
+            return reinterpret_cast<const float*>(plane)[planar
+                       ? idx : idx * srcChannels + ch];
+        case AV_SAMPLE_FMT_DBL:
+        case AV_SAMPLE_FMT_DBLP:
+            return static_cast<float>(reinterpret_cast<const double*>(plane)[planar
+                       ? idx : idx * srcChannels + ch]);
+        default:
+            return 0.0f;
+    }
+}
+
+static bool IsSupportedSampleFormat(AVSampleFormat f) {
+    switch (f) {
+        case AV_SAMPLE_FMT_U8: case AV_SAMPLE_FMT_U8P:
+        case AV_SAMPLE_FMT_S16: case AV_SAMPLE_FMT_S16P:
+        case AV_SAMPLE_FMT_S32: case AV_SAMPLE_FMT_S32P:
+        case AV_SAMPLE_FMT_FLT: case AV_SAMPLE_FMT_FLTP:
+        case AV_SAMPLE_FMT_DBL: case AV_SAMPLE_FMT_DBLP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+int AudioPlayer::ConvertFrameToS16(const AVFrame* frame, int dstChannels,
+                                   int16_t* dst, size_t dstCapacityFrames) {
+    if (!frame || !dst || dstChannels <= 0 || dstCapacityFrames == 0) return 0;
+    const int frames = frame->nb_samples;
+    if (frames <= 0) return 0;
+    const int srcChannels = frame->ch_layout.nb_channels > 0
+                                ? frame->ch_layout.nb_channels : dstChannels;
+    if (srcChannels <= 0) return 0;
+    if (!IsSupportedSampleFormat(static_cast<AVSampleFormat>(frame->format))) {
+        return AVERROR(ENOSYS);
+    }
+    const bool planar = av_sample_fmt_is_planar(
+        static_cast<AVSampleFormat>(frame->format));
+    const size_t n = std::min<size_t>(static_cast<size_t>(frames),
+                                      dstCapacityFrames);
+
+    for (size_t i = 0; i < n; ++i) {
+        for (int d = 0; d < dstChannels; ++d) {
+            float acc = 0.0f;
+            for (int c = 0; c < srcChannels; ++c) {
+                const float k = GetDownmixCoefficients(srcChannels, dstChannels, c, d);
+                if (k == 0.0f) continue;      // channel does not reach this output
+                acc += k * ReadSample(frame, planar, c, static_cast<int>(i), srcChannels);
+            }
+            dst[i * static_cast<size_t>(dstChannels) + d] = ClampToS16(acc);
+        }
+    }
+    return static_cast<int>(n);
+}
+
 int AudioPlayer::PushFrameToRing(AVFrame* frame) {
     const int frames = frame->nb_samples;
     // P1-11: the ring layout is ALWAYS the device channel count. Frames
@@ -452,95 +709,54 @@ int AudioPlayer::PushFrameToRing(AVFrame* frame) {
     if (frames <= 0 || channels <= 0 || srcChannels <= 0) {
         return 0;
     }
-    {
-        std::lock_guard lock(m_ringMutex);
-        if (m_bufferedFrames + static_cast<size_t>(frames) > m_ringFrames) {
-            return 0;  // ring full: drop-new (decode is gated, rare)
-        }
-        int16_t* const ringBase = m_ring.data();
-        const size_t ringCh = static_cast<size_t>(channels);
-        const bool planar = av_sample_fmt_is_planar(
-            static_cast<AVSampleFormat>(frame->format));
-
-        if (frame->format == AV_SAMPLE_FMT_S16 &&
-            srcChannels == channels && !planar) {
-            const int16_t* src = reinterpret_cast<const int16_t*>(frame->data[0]);
-            // The ring is CIRCULAR (m_writePos advances modulo m_ringFrames),
-            // so the copy must split at the wrap boundary. Indexing it
-            // linearly wrote past the end of the vector whenever
-            // m_writePos + frames > m_ringFrames — which is exactly what
-            // happens once the consumer has advanced m_readPos past 0, i.e.
-            // once audio has actually played. That heap overflow is what
-            // corrupted the process heap (0xC0000374) and killed the runtime
-            // on every switch away from a playing video.
-            const size_t total = static_cast<size_t>(frames) * ringCh;
-            size_t done = 0;
-            size_t wp = m_writePos;
-            while (done < total) {
-                if (wp >= m_ringFrames) wp = 0;
-                const size_t avail = (m_ringFrames - wp) * ringCh;
-                const size_t n = std::min(total - done, avail);
-                // Ring offset is wp*ringCh ONLY — `done` indexes the source,
-                // never the destination (adding it re-ran past the ring end).
-                std::memcpy(ringBase + wp * ringCh, src + done,
-                            n * sizeof(int16_t));
-                done += n;
-                wp += n / ringCh;
-            }
-        } else {
-            for (int f = 0; f < frames; ++f) {
-                // Wrap per row for the same reason as the S16 fast path.
-                const size_t wp = (m_writePos + static_cast<size_t>(f)) % m_ringFrames;
-                int16_t* const row = ringBase + wp * ringCh;
-                for (int c = 0; c < channels; ++c) {
-                    const int srcC = c < srcChannels ? c : 0;
-                    float v = 0.0f;
-                    const int16_t* p16;
-                    const int32_t* p32;
-                    const float* pf;
-                    const double* pd;
-                    switch (frame->format) {
-                        case AV_SAMPLE_FMT_U8:
-                        case AV_SAMPLE_FMT_U8P:
-                            v = (static_cast<int>(
-                                    static_cast<const uint8_t*>(frame->data[planar ? srcC : 0])
-                                        [planar ? f : f * srcChannels + srcC]) - 128) / 128.0f;
-                            break;
-                        case AV_SAMPLE_FMT_S16:
-                        case AV_SAMPLE_FMT_S16P:
-                            p16 = reinterpret_cast<const int16_t*>(
-                                frame->data[planar ? srcC : 0]);
-                            v = p16[planar ? f : f * srcChannels + srcC] / 32768.0f;
-                            break;
-                        case AV_SAMPLE_FMT_S32:
-                        case AV_SAMPLE_FMT_S32P:
-                            p32 = reinterpret_cast<const int32_t*>(
-                                frame->data[planar ? srcC : 0]);
-                            v = p32[planar ? f : f * srcChannels + srcC] / 2147483648.0f;
-                            break;
-                        case AV_SAMPLE_FMT_FLT:
-                        case AV_SAMPLE_FMT_FLTP:
-                            pf = reinterpret_cast<const float*>(
-                                frame->data[planar ? srcC : 0]);
-                            v = pf[planar ? f : f * srcChannels + srcC];
-                            break;
-                        case AV_SAMPLE_FMT_DBL:
-                        case AV_SAMPLE_FMT_DBLP:
-                            pd = reinterpret_cast<const double*>(
-                                frame->data[planar ? srcC : 0]);
-                            v = static_cast<float>(pd[planar ? f : f * srcChannels + srcC]);
-                            break;
-                        default:
-                            return 0;
-                    }
-                    row[c] = ClampToS16(v);
-                }
-            }
-        }
-        m_writePos = (m_writePos + static_cast<size_t>(frames)) % m_ringFrames;
-        m_bufferedFrames += static_cast<size_t>(frames);
+    std::lock_guard lock(m_ringMutex);
+    if (m_bufferedFrames + static_cast<size_t>(frames) > m_ringFrames) {
+        return 0;  // ring full: drop-new (decode is gated, rare)
     }
-    return frames;
+
+    // Convert+downmix ONCE into a contiguous scratch buffer, then do a single
+    // wrap-aware copy into the ring. Keeping conversion and ring storage apart
+    // means the channel matrix and the wrap logic cannot drift into each other.
+    const size_t needed = static_cast<size_t>(frames) *
+                          static_cast<size_t>(channels);
+    if (m_scratch.size() < needed) m_scratch.resize(needed);
+    const int converted = ConvertFrameToS16(frame, channels, m_scratch.data(),
+                                            static_cast<size_t>(frames));
+    if (converted <= 0) {
+        if (converted < 0) {
+            REX_LOG_WARN(kModule, "unsupported audio sample format {} ({})",
+                         static_cast<int>(frame->format), av_get_sample_fmt_name(
+                             static_cast<AVSampleFormat>(frame->format)));
+        }
+        return 0;
+    }
+
+    // The ring is CIRCULAR (m_writePos advances modulo m_ringFrames), so the
+    // copy must split at the wrap boundary. Indexing it linearly wrote past
+    // the end of the vector whenever m_writePos + frames > m_ringFrames —
+    // which is exactly what happens once the consumer has advanced m_readPos
+    // past 0, i.e. once audio has actually played. That heap overflow is what
+    // corrupted the process heap (0xC0000374) and killed the runtime on every
+    // switch away from a playing video.
+    int16_t* const ringBase = m_ring.data();
+    const size_t ringCh = static_cast<size_t>(channels);
+    const size_t total = static_cast<size_t>(converted) * ringCh;
+    size_t done = 0;
+    size_t wp = m_writePos;
+    while (done < total) {
+        if (wp >= m_ringFrames) wp = 0;
+        const size_t avail = (m_ringFrames - wp) * ringCh;
+        const size_t n = std::min(total - done, avail);
+        // Ring offset is wp*ringCh ONLY — `done` indexes the scratch source,
+        // never the ring destination (adding it ran past the ring end).
+        std::memcpy(ringBase + wp * ringCh, m_scratch.data() + done,
+                    n * sizeof(int16_t));
+        done += n;
+        wp += n / ringCh;
+    }
+    m_writePos = (m_writePos + static_cast<size_t>(converted)) % m_ringFrames;
+    m_bufferedFrames += static_cast<size_t>(converted);
+    return converted;
 }
 
 // ─── WASAPI render ───────────────────────────────────────────────────────

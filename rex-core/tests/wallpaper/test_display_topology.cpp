@@ -76,6 +76,35 @@ TEST(TopologyChangedTest, DpiChangeIsDetected) {
     EXPECT_TRUE(MonitorTopologyChanged(a, b));
 }
 
+TEST(TopologyChangedTest, PhysicalSwapSameNameIsDetected) {
+    // Same device name + geometry (Windows reuses \\.\DISPLAY1) but a
+    // different physical panel: the EDID hash is the only witness.
+    auto a = SoloPrimary();
+    a[0].edidHash = 0x1234;
+    auto b = SoloPrimary();
+    b[0].edidHash = 0x5678;
+    EXPECT_TRUE(MonitorTopologyChanged(a, b));
+}
+
+TEST(TopologyChangedTest, AdapterMoveIsDetected) {
+    // Same name, geometry, EDID — moved to a different GPU.
+    auto a = SoloPrimary();
+    a[0].adapterLuid = 0xf956;
+    auto b = SoloPrimary();
+    b[0].adapterLuid = 0xe29c;
+    EXPECT_TRUE(MonitorTopologyChanged(a, b));
+}
+
+TEST(TopologyChangedTest, UnknownToKnownAdapterReconciles) {
+    // 0 = unresolvable: unknown→known counts as changed (safe direction),
+    // unknown→unknown stays steady (no reconcile storm on headless/RDP).
+    auto a = SoloPrimary();
+    auto b = SoloPrimary();
+    b[0].adapterLuid = 0xf956;
+    EXPECT_TRUE(MonitorTopologyChanged(a, b));
+    EXPECT_FALSE(MonitorTopologyChanged(a, a));
+}
+
 TEST(TopologyChangedTest, EmptyToEmptyIsUnchanged) {
     EXPECT_FALSE(MonitorTopologyChanged({}, {}));
 }

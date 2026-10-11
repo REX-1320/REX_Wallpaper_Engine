@@ -62,6 +62,10 @@ void MultiMonitorDesktopHost::Release() {
     REX_LOG_INFO("MultiMonitorDesktopHost", "Desktop host released");
 }
 
+void MultiMonitorDesktopHost::SetVisible(bool visible) {
+    if (m_manager) m_manager->SetVisible(visible);
+}
+
 HWND MultiMonitorDesktopHost::GetRenderWindow() const {
     return m_manager->GetRenderWindow();
 }

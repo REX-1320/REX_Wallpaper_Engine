@@ -4,6 +4,8 @@
 #include "wallpaper/engine/CadencePolicy.hpp"
 #include "wallpaper/playback/CadenceController.hpp"
 #include "wallpaper/engine/PowerPolicy.hpp"
+#include "wallpaper/engine/PlaybackPolicy.hpp"
+#include "wallpaper/engine/ResourcePolicy.hpp"
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "platform/windows/MonitorEdid.hpp"
 #include <shared/PreciseSleep.hpp>
@@ -56,6 +58,31 @@ uint64_t QueryDisplayAdapterLuid(const std::string& monitorDeviceName) {
 }
 
 } // namespace
+
+// P1 resource envelope: LOCAL video-memory budget for the renderer's
+// adapter (0 when unqueryable — the gate fails open with a warning).
+// Dedicated helper rather than reusing GetTelemetry: that path publishes
+// atomics under m_mutex and must not run mid-LoadScene.
+static uint64_t QueryLocalVideoMemoryBudget(uint64_t rendererLuid) {
+    if (rendererLuid == 0) return 0;
+    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 0;
+    LUID luid{};
+    luid.LowPart = static_cast<DWORD>(rendererLuid & 0xFFFFFFFFull);
+    luid.HighPart = static_cast<LONG>(rendererLuid >> 32);
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter)))) {
+        return 0;
+    }
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+    if (FAILED(adapter.As(&adapter3))) return 0;
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+    if (FAILED(adapter3->QueryVideoMemoryInfo(
+            0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
+        return 0;
+    }
+    return static_cast<uint64_t>(local.Budget);
+}
 
 Engine::Engine() {
     REX_LOG_INFO("Engine", "Engine instance created");
@@ -461,6 +488,35 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
                 m_playing = false;
                 return videoResult;
             } else {
+                // P1 resource envelope: refuse media whose GPU footprint
+                // exceeds the renderer's video-memory budget instead of
+                // exhausting it mid-playback. Same cleanup + loud failure
+                // as a failed open (LOAD -> ok:false, callers skip PLAY).
+                const MediaBudget mediaBudget = AssessMediaBudget(
+                    m_videoManager->GetWidth(), m_videoManager->GetHeight(),
+                    QueryLocalVideoMemoryBudget(
+                        m_videoManager->GetD3D12AdapterLuid()));
+                if (mediaBudget.unknownBudget) {
+                    REX_LOG_WARN("Engine", "Video '{}': {}",
+                                 scene.sourcePath.c_str(),
+                                 mediaBudget.reason.c_str());
+                }
+                if (mediaBudget.overBudget) {
+                    REX_LOG_WARN("Engine", "Refusing video '{}': {} ({} MB)",
+                                 scene.sourcePath.c_str(),
+                                 mediaBudget.reason.c_str(),
+                                 mediaBudget.poolBytes / (1024 * 1024));
+                    m_videoManager->ClearVideoFrames();
+                    if (m_renderer) {
+                        m_renderer->ClearVideoFrame();
+                    }
+                    m_currentScene = SceneInfo{};
+                    m_playing = false;
+                    return shared::Result<void>(
+                        shared::ErrorCode::OutOfMemory,
+                        "video exceeds GPU video-memory budget: " +
+                            mediaBudget.reason);
+                }
                 // Apply scene-level playback settings immediately (all four
                 // knobs in one path — P1-7).
                 ApplyPlaybackSettings();
@@ -472,6 +528,10 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
                     m_videoManager->SetTargetResolution(m_desktopHost->GetWidth(),
                                                         m_desktopHost->GetHeight());
                 }
+                // Occlusion park starts armed: a LOAD onto a covered desktop
+                // parks after the threshold instead of burning full rate.
+                m_occlusion.Reset();
+                m_occlusion.Arm();
             }
         }
     } else if (scene.type == "audio") {
@@ -509,6 +569,13 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
         m_renderer->ClearVideoFrame();
     }
 
+    // P0.1: a loaded scene (static/video/audio) has something to show —
+    // make sure the layer is visible (a previous UnloadScene hid it).
+    // PLAY arrives as a separate command; visibility is scene-driven.
+    if (m_desktopHost) {
+        m_desktopHost->SetVisible(true);
+    }
+
     SetState(EngineState::Stopped);
     return shared::Result<void>();
 }
@@ -541,11 +608,20 @@ shared::Result<void> Engine::UnloadScene() {
     m_currentScene = SceneInfo{};
     m_currentPosition = 0.0;
     m_positionBase.store(0.0, std::memory_order_relaxed);
+    // P0.1: no scene, nothing to show — hide the layer so an OS-drawn
+    // static wallpaper (or the plain desktop) shows through instead of a
+    // frozen video frame. Stop() intentionally does NOT hide (the frozen
+    // snap is the cleared-wallpaper behavior); Shutdown() releases.
+    if (m_desktopHost) {
+        m_desktopHost->SetVisible(false);
+    }
     // A pending recovery request refers to the previous scene: a device
     // re-init racing this unload would otherwise reload the just-
     // discarded video over whatever comes next (image-cover bug).
     m_recoveryNeeded.store(false, std::memory_order_release);
     m_recoveryDelayMs = 0;
+    // No scene, no occlusion timing.
+    m_occlusion.Reset();
 
     SetState(EngineState::Initialized);
     return shared::Result<void>();
@@ -573,6 +649,10 @@ shared::Result<void> Engine::Play() {
     // User-driven play overrides any auto-pause bookkeeping: a later flag
     // clear must not "resume" (re-pause state is re-evaluated anyway).
     m_autoPaused.store(false, std::memory_order_release);
+    // Fresh playback: occlusion timing restarts (a stale park must not
+    // survive a user Play; the controller was resumed above).
+    m_occlusion.Reset();
+    m_occlusion.Arm();
     return shared::Result<void>();
 }
 
@@ -602,6 +682,8 @@ shared::Result<void> Engine::Pause() {
     m_stopwatch.Reset();
     // User-driven pause: a later auto-resume must not override it.
     m_autoPaused.store(false, std::memory_order_release);
+    // A user pause disowns any occlusion park (stale parked flag + timer).
+    m_occlusion.Reset();
 
     return shared::Result<void>();
 }
@@ -625,6 +707,8 @@ shared::Result<void> Engine::Stop() {
     m_stopwatch.Reset();
     // User-driven stop: a later auto-resume must not override it.
     m_autoPaused.store(false, std::memory_order_relaxed);
+    // Stopped playback has no occlusion timing (parked flag + timer die).
+    m_occlusion.Reset();
 
     return shared::Result<void>();
 }
@@ -752,6 +836,13 @@ std::vector<MonitorInfo> Engine::EnumerateMonitors() const {
 
             // Stable identity across disconnects (EDID descriptor hash).
             info.edidHash = rex::platform::windows::GetMonitorEdidHash(hMon);
+
+            // Rendering adapter for the topology predicate (P1): same
+            // device name/geometry on a different GPU must reconcile.
+            // Best-effort (0 when unresolvable); DXGI factory churn is
+            // ~ms per call at housekeeping cadence (precedent: the
+            // per-GET_STATUS topology query already pays it).
+            info.adapterLuid = QueryDisplayAdapterLuid(info.id);
 
             vec->push_back(std::move(info));
             return TRUE;
@@ -1022,7 +1113,15 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.convertFps     = vt.convertFps;
         out.schedulerDrops = vt.schedulerDrops;
         out.loopWraps = vt.loopWraps;
+        out.monitorPresents.clear();
+        for (const auto& [id, count] : m_videoManager->GetMonitorPresentCounts()) {
+            EngineTelemetry::MonitorPresentCount mc;
+            mc.monitorId = id;
+            mc.presents = count;
+            out.monitorPresents.push_back(std::move(mc));
+        }
         out.queueDepth     = vt.queueDepth;
+        out.occlusionParked = m_occlusion.IsParked();
         out.pacingMs       = vt.pacingMs;
         out.playbackSpeed  = vt.playbackSpeed;
         out.repeatedFrames =
@@ -1502,19 +1601,23 @@ void Engine::RenderLoop() {
         }
 
         // ── Service pause/resume requests (lock-free) ──────────────────
-        // Fullscreen and suspend sources post independently; the effective
-        // pause is their OR. Resume fires only for OUR pauses (m_autoPaused)
-        // — never a user-initiated pause. We service the requests here, at
-        // the top of the frame, before any GPU work begins.
+        // Unified arbitration (P1 PlaybackPolicy): fullscreen and suspend
+        // sources post independently; the effective pause is their OR and
+        // resume fires only for OUR pauses (m_autoPaused) — never a
+        // user-initiated pause. Serviced here, at the top of the frame,
+        // before any GPU work begins. Bodies unchanged by the extraction.
         if (const int fsReq = m_fullScreenRequest.exchange(0, std::memory_order_acq_rel)) {
             m_fullScreenPaused = (fsReq == 1);
         }
         if (const int suspReq = m_suspendRequest.exchange(0, std::memory_order_acq_rel)) {
             m_suspPaused = (suspReq == 1);
         }
-        const bool wantPaused = m_fullScreenPaused || m_suspPaused;
-        if (wantPaused && !m_autoPaused.load(std::memory_order_acquire) &&
-            m_state == EngineState::Running) {
+        const PlaybackArbitration arb = EvaluatePlayback(PlaybackInputs{
+            m_fullScreenPaused, m_suspPaused,
+            m_autoPaused.load(std::memory_order_acquire),
+            m_state == EngineState::Running,
+            m_state == EngineState::Paused});
+        if (arb == PlaybackArbitration::AutoPause) {
                 // Pause: stop video + mark engine paused (no m_mutex needed;
                 // render thread exclusively owns these during normal operation)
                 if (m_videoManager) m_videoManager->Pause();
@@ -1531,16 +1634,23 @@ void Engine::RenderLoop() {
                 m_stopwatch.Reset();
                 SetState(EngineState::Paused);
                 m_autoPaused.store(true, std::memory_order_release);
+                // Ownership handoff: auto-pause owns the decoder now; any
+                // occlusion park (stale flag + timer) is disowned. Resume
+                // re-arms below.
+                m_occlusion.Reset();
                 REX_LOG_INFO("Engine", "Auto-pause applied (fullscreen={}, suspend={})",
                              m_fullScreenPaused, m_suspPaused);
-            } else if (!wantPaused && m_autoPaused.load(std::memory_order_acquire) &&
-                       m_state == EngineState::Paused) {
+            } else if (arb == PlaybackArbitration::AutoResume) {
                 // Resume: restart video + mark engine running
                 if (m_videoManager) m_videoManager->Play();
                 m_playing = true;
                 m_stopwatch.Start();
                 SetState(EngineState::Running);
                 m_autoPaused.store(false, std::memory_order_release);
+                // Fresh timing from here: the decoder just resumed, so a
+                // still-covered desktop re-parks after the threshold.
+                m_occlusion.Reset();
+                m_occlusion.Arm();
                 REX_LOG_INFO("Engine", "Auto-resume applied");
             }
 
@@ -1659,11 +1769,69 @@ void Engine::RenderLoop() {
             const bool isVideoScene = (m_state == EngineState::Running
                 && m_videoManager && m_videoManager->IsOpen()
                 && renderSceneType == "video");
+            // ── Occlusion park (vendor-neutral idle) ────────────────────
+            // Trackers reflect the presents submitted on previous passes;
+            // dt is the pass spacing (clamped — the first pass and any
+            // sleep/wake gap would otherwise fake a huge occlusion run).
+            // Park/Resume mirror the AutoPause/AutoResume bookkeeping
+            // (controller + m_playing + position fold + stopwatch) but keep
+            // EngineState::Running so this branch keeps probing; the parked
+            // flag — not the state — is the parking signal. Composes with
+            // auto-pause by ownership: auto-pause flips the state (which
+            // skips this branch) and Resets the policy on both transitions.
+            if (isVideoScene) {
+                double occlusionDt = 0.0;
+                {
+                    using seconds_d = std::chrono::duration<double>;
+                    const double gap =
+                        seconds_d(frameStart - m_occlusionPrevStart).count();
+                    if (gap >= 0.0 && gap <= 5.0) occlusionDt = gap;
+                }
+                m_occlusionPrevStart = frameStart;
+                const std::vector<bool> compOccluded =
+                    m_videoManager->GetMonitorOcclusionStates();
+                const bool allOccluded = AllPathsOccluded(
+                    m_renderer->IsPresentOccluded(), compOccluded);
+                switch (m_occlusion.Update(allOccluded, occlusionDt)) {
+                case OcclusionAction::Park: {
+                    if (m_videoManager) m_videoManager->Pause();
+                    m_playing = false;
+                    m_positionBase.store(
+                        m_positionBase.load(std::memory_order_relaxed) +
+                            m_stopwatch.ElapsedSeconds() *
+                                m_speed.load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+                    m_stopwatch.Reset();
+                    REX_LOG_WARN("Engine",
+                                 "Occlusion park: all {} present path(s) "
+                                 "DWM-occluded — decode+audio paused, probing at 4 Hz",
+                                 1 + compOccluded.size());
+                    break;
+                }
+                case OcclusionAction::Resume: {
+                    if (m_videoManager) m_videoManager->Play();
+                    m_playing = true;
+                    m_stopwatch.Start();
+                    REX_LOG_WARN("Engine",
+                                 "Occlusion resume: present path visible again — "
+                                 "decode+audio resumed from parked position");
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
             if (isVideoScene) {
                 if (!pending && !m_hasVideoFrame.load(std::memory_order_acquire)
                     && !m_frameDirty.load(std::memory_order_acquire)) {
                     m_frameCount++;
-                    PaceLoop(frameStart, true);
+                    if (m_occlusion.IsParked()) {
+                        // Parked with nothing decoded yet (LOAD while
+                        // covered): 4 Hz probe, not video cadence.
+                        std::this_thread::sleep_for(milliseconds(250));
+                    } else {
+                        PaceLoop(frameStart, true);
+                    }
                     continue;
                 }
             } else if (!pending && !m_frameDirty.load(std::memory_order_acquire)) {
@@ -1753,7 +1921,13 @@ void Engine::RenderLoop() {
             Update(deltaMs / 1000.0);
 
             m_presentCount.fetch_add(1, std::memory_order_relaxed);
-            PaceLoop(frameStart, isVideoScene);
+            if (m_occlusion.IsParked()) {
+                // Parked probe: the one cached-frame present per pass is
+                // the uncover detector — 4 Hz, not wall cadence.
+                std::this_thread::sleep_for(milliseconds(250));
+            } else {
+                PaceLoop(frameStart, isVideoScene);
+            }
         } else {
             // Renderer not ready — wait before retrying
             std::this_thread::sleep_for(milliseconds(16));

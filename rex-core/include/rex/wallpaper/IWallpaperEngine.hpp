@@ -87,6 +87,10 @@ struct MonitorInfo {
     int     refreshHz  = 0;
     // Stable identity across disconnects (EDID hash; 0 = not available).
     uint64_t edidHash  = 0;
+    // Rendering adapter (DXGI LUID; 0 = unknown). A monitor moved to a
+    // different GPU keeps its device name and geometry, so the predicate
+    // must compare this too (P1 topology identity).
+    uint64_t adapterLuid = 0;
 };
 
 // ─── WallpaperConfig ───────────────────────────────────────────────────────
@@ -125,8 +129,20 @@ struct EngineTelemetry {
     double   sourceFps      = 0.0;  // stream frame rate
     double   convertFps     = 0.0;  // ConvertAndSignal+publish rate
     uint64_t schedulerDrops = 0;    // skipped between decode & consume
-    double   presentFps     = 0.0;  // Present() rate (== renderFps until
-                                    // Phase 3 re-present; then >= renderFps)
+    uint64_t loopWraps       = 0;    // PTS wrap/seek events (loop restart or
+                                    // explicit seek): separates wrap churn
+                                    // from steady-state playback
+    // ─── Per-monitor presents (P2) ──────────────────────────────────
+    // Compositor present counts keyed by monitor id (0 when dormant).
+    struct MonitorPresentCount { std::string monitorId; uint64_t presents = 0; };
+    std::vector<MonitorPresentCount> monitorPresents;
+    // ─── Occlusion park (vendor-neutral idle) ────────────────────────
+    // True while decode+audio are parked because every present path is
+    // DWM-occluded (wallpaper hidden). Probe presents continue at ~4 Hz.
+    bool occlusionParked = false;
+    double   presentFps     = 0.0;  // Present() call rate, trailing ~1 s
+                                    // window (unique + cadence re-presents;
+                                    // use effectiveVideoFps for unique)
     uint64_t repeatedFrames = 0;    // re-presents of the same frame (Phase 3)
     uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
     int      displayHz      = 0;    // current monitor refresh rate (0 = unknown)

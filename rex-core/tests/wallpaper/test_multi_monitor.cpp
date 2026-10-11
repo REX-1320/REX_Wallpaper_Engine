@@ -95,9 +95,49 @@ TEST(MonitorTest, PerMonitorWallpaperAssignment) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Per-monitor present counts (P2 telemetry, headless: fake monitors)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(MonitorPresentCountsTest, FakeMonitorsReportZeroCounts) {
+    rex::graphics::Device d3d12;
+    if (d3d12.Initialize().IsError()) {
+        GTEST_SKIP() << "D3D12 device unavailable";
+    }
+    WallpaperConfig config;
+    config.enableHardwareAcceleration = true;
+    VideoManager vm;
+    if (vm.Initialize(config, d3d12.Get()).IsError()) {
+        GTEST_SKIP() << "VideoManager init unavailable";
+    }
+
+    MonitorInfo m1;
+    m1.id = "FAKE-1";
+    m1.name = "FAKE-1";
+    m1.width = 1920;
+    m1.height = 1080;
+    m1.isPrimary = true;
+    MonitorInfo m2 = m1;
+    m2.id = "FAKE-2";
+    m2.name = "FAKE-2";
+    m2.isPrimary = false;
+    ASSERT_TRUE(vm.AddMonitor(m1).IsSuccess());
+    ASSERT_TRUE(vm.AddMonitor(m2).IsSuccess());
+
+    // Dormant compositors (no WorkerW headless) report zero, keyed by id.
+    const auto counts = vm.GetMonitorPresentCounts();
+    ASSERT_EQ(counts.size(), 2u);
+    EXPECT_EQ(counts[0].first, "FAKE-1");
+    EXPECT_EQ(counts[0].second, 0u);
+    EXPECT_EQ(counts[1].first, "FAKE-2");
+    EXPECT_EQ(counts[1].second, 0u);
+
+    vm.Shutdown();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Single-audio-owner policy (P3-G4 proof, headless: fake monitors)
 // ═══════════════════════════════════════════════════════════════════════════
-//
+
 // Layered per-monitor videos would mix WASAPI streams into cacophony.
 // The first opened monitor video owns the audio; later ones start muted.
 // Fake MonitorInfos exercise this with no second display present.

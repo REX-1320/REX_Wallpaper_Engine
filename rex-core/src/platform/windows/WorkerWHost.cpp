@@ -90,6 +90,10 @@ void WorkerWHost::Release() {
     REX_LOG_INFO("WorkerWHost", "WorkerW released");
 }
 
+void WorkerWHost::SetVisible(bool visible) {
+    if (m_manager) m_manager->SetVisible(visible);
+}
+
 HWND WorkerWHost::GetRenderWindow() const {
     return m_manager->GetRenderWindow();
 }

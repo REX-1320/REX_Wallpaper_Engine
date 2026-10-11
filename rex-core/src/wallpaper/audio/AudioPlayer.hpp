@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -77,6 +78,45 @@ public:
     static void ResampleLinear(const int16_t* src, size_t srcFrames,
                                int channels, int16_t* dst, size_t dstFrames);
 
+    // ─── Testable seams ────────────────────────────────────────────────
+    // The decode loop and the sample conversion are exposed as pure
+    // functions so the state machine and the channel mix can be verified
+    // without a live WASAPI endpoint. Production uses these exact functions,
+    // so a test failure is a production failure — not a copy of it.
+
+    /// FFmpeg send/receive state machine: submits `pkt` and delivers every
+    /// frame the decoder produces. If the decoder rejects the packet with
+    /// EAGAIN (its output was not drained), it drains first and RETRIES THE
+    /// SAME PACKET — FFmpeg requires the rejected packet to be resubmitted,
+    /// and unreffing it instead silently loses audio.
+    /// Returns frames delivered (>= 0) or a negative AVERROR.
+    static int SubmitPacketAndDrain(AVCodecContext* dec, AVPacket* pkt,
+                                    AVFrame* frame,
+                                    const std::function<void(AVFrame*)>& sink);
+
+    /// Delivers every frame the decoder currently has ready, repeating
+    /// avcodec_receive_frame until EAGAIN/EOF. A single submitted packet may
+    /// produce 0 or more than one frame. Returns frames delivered, or a
+    /// negative AVERROR on a terminal decode failure.
+    static int DrainAvailableFrames(AVCodecContext* dec, AVFrame* frame,
+                                    const std::function<void(AVFrame*)>& sink);
+
+    /// Converts one decoded frame (any sample format, planar or interleaved)
+    /// to interleaved S16 at `dstChannels`, applying the 5.1/7.1 -> stereo
+    /// downmix coefficients instead of discarding the surround channels.
+    /// Writes at most `dstCapacityFrames`; returns frames written, or
+    /// negative AVERROR if the sample format is unsupported.
+    static int ConvertFrameToS16(const AVFrame* frame, int dstChannels,
+                                 int16_t* dst, size_t dstCapacityFrames);
+
+    /// Downmix coefficient applied to `srcChannel` when folding a source of
+    /// `srcChannels` into `dstChannels`. Returns 0 when the channel does not
+    /// feed that output (this is how LFE stays out of the stereo mix).
+    /// Exposed so tests can assert the exact matrix rather than "some audio
+    /// came out".
+    static float GetDownmixCoefficients(int srcChannels, int dstChannels,
+                                        int srcChannel, int dstChannel);
+
     int  GetSampleRate() const { return m_sampleRate; }
     int  GetChannels()   const { return m_channels; }
     double GetPosition() const { return m_position.load(std::memory_order_acquire); }
@@ -86,6 +126,10 @@ private:
 
     // ─── Demux / decode (internal thread only) ──────────────────────────
     bool DecodeNextChunk();
+    /// Fills the ring to ~150 ms of audio before the WASAPI stream starts.
+    /// True when primed, or when the source is too short to prime (starting
+    /// is still correct then — it simply has no headroom).
+    bool PrimedForStart();
     bool RewindToStart();
     void DoSeek(double seconds);
     int  PushFrameToRing(AVFrame* frame);
@@ -103,8 +147,10 @@ private:
     AVPacket*        m_pkt       = nullptr;
     int  m_streamIndex           = -1;
     bool m_eof                   = false;
-    int  m_sampleRate            = 48000;
-    int  m_channels              = 2;
+    std::string m_codecName;     // for error logs (e.g. "eac3")
+int  m_sampleRate            = 48000;
+    int  m_channels            = 2;   // DEVICE layout (always stereo)
+    int  m_srcChannels         = 2;   // codec layout (6 for AC-3/E-AC-3)
     int  m_bytesPerSample        = 2;
 
     // ─── WASAPI state (internal thread only) ────────────────────────────
@@ -114,6 +160,7 @@ private:
 
     // ─── Ring buffer (frames of interleaved int16) ──────────────────────
     std::vector<int16_t> m_ring;
+    std::vector<int16_t> m_scratch;  // conversion staging (decode thread)
     size_t m_ringFrames   = 0;   // capacity in frames
     size_t m_readPos      = 0;   // frames
     size_t m_writePos     = 0;

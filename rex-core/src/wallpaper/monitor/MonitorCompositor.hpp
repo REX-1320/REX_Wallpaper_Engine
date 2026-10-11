@@ -80,6 +80,9 @@ public:
 
     const MonitorInfo& GetInfo() const { return m_info; }
     bool IsActive() const { return m_active; }
+    /// Occlusion-park signal: whether this compositor's swapchain last
+    /// present was dropped by DWM as fully occluded (render thread only).
+    bool IsOccluded() const;
     bool IsDeviceRemoved() const {
         return m_renderer && m_renderer->IsDeviceRemoved();
     }

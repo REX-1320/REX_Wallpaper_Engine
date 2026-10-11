@@ -165,6 +165,10 @@ class FfmpegVideoDecoder {
     /// SDR. Uploading RGB bytes into a YUV pool corrupts every frame.
     static DXGI_FORMAT PoolTextureFormat(bool hardwarePath, bool hdrContent);
 
+    /// Shareable pool slot count, public for the P1 resource envelope
+    /// (ResourcePolicy.hpp mirrors it; MediaBudgetMirrorTest pins equality).
+    static constexpr UINT kPoolSize = 8;
+
     /// Picks the video stream closest to (but not above) the target
     /// resolution; if none fits, the smallest stream. Re-opens the codec
     /// on the chosen stream, keeping the current decode session alive.
@@ -231,7 +235,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D>      m_staging;
 
     // ─── Shareable BGRA pool ────────────────────────────────────────────
-    static constexpr UINT kPoolSize = 8;
+    // (slot count lives in the public kPoolSize above)
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> m_poolTex;
     std::vector<HANDLE> m_poolHandles;
     std::atomic<UINT64> m_slotFence[kPoolSize]{};

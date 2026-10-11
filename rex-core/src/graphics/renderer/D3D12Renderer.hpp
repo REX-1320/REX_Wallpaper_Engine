@@ -9,6 +9,7 @@
 #include "ResourceStateTracker.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
+#include "wallpaper/engine/OcclusionPolicy.hpp"
 
 #include <shared/Result.hpp>
 #include <rex/wallpaper/IWallpaperEngine.hpp>
@@ -137,6 +138,15 @@ public:
 
     bool IsInitialized()   const { return m_initialized; }
     bool IsDeviceRemoved() const { return m_deviceRemoved; }
+
+    // ─── Occlusion-park signal (vendor-neutral) ────────────────────────
+    // Whether this swapchain's last present was dropped by DWM as fully
+    // occluded. Render-thread only (written in EndFrame, read in the
+    // engine loop on the same thread).
+    bool IsPresentOccluded() const { return m_occlusion.IsOccluded(); }
+    uint32_t ConsecutiveOccludedPresents() const {
+        return m_occlusion.ConsecutiveOccluded();
+    }
 
     // ─── Telemetry counters (for the memory-retention diagnostics) ─────
     uint64_t GetTextureBytes()        const { return m_textureBytes; }
@@ -290,6 +300,10 @@ private:
     float m_clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     bool  m_initialized  = false;
     bool  m_deviceRemoved = false;
+
+    // Per-swapchain present-occlusion tracker (occlusion park). Written in
+    // EndFrame, read by the engine on the same render thread.
+    rex::wallpaper::OcclusionTracker m_occlusion;
 
     // ─── Thread safety ────────────────────────────────────────────────
     mutable std::mutex m_renderMutex;

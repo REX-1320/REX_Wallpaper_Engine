@@ -5,10 +5,10 @@
 #include <shared/UUID.hpp>
 #include <shared/Stopwatch.hpp>
 
-#include <atomic>
-#include <chrono>
-#include <mutex>
-#include <memory>
+#include <atomic>                             
+#include <chrono>                             
+#include <mutex>                              
+#include <memory>                             
 #include <thread>
 #include <vector>
 #include <filesystem>
@@ -16,6 +16,7 @@
 #include "platform/windows/IDesktopHost.hpp"
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "wallpaper/video/VideoManager.hpp"
+#include "wallpaper/engine/OcclusionPolicy.hpp"
 #include "wallpaper/audio/AudioCapture.hpp"
 #include "modules/Settings/interfaces/ISettingsService.hpp"
 #include <rex/wallpaper/IRendererAdapter.hpp>
@@ -232,6 +233,13 @@ private:
     /// fires only for our own pauses. Touched under m_mutex (user side)
     /// and lock-free on the render thread: atomic.
     std::atomic<bool> m_autoPaused{false};
+    /// Occlusion-park decision (vendor-neutral idle). Command thread
+    /// Arms/Resets on playback transitions; the render thread Updates per
+    /// pass and owns the parked bookkeeping. See OcclusionPolicy.hpp.
+    OcclusionPolicy m_occlusion;
+    /// Previous pass start for the occlusion dt (pass spacing, clamped).
+    /// Default-epoch on the first pass: dt clamps, never a spurious park.
+    std::chrono::high_resolution_clock::time_point m_occlusionPrevStart{};
     /// Position clock base (seconds). The Stopwatch restarts from zero on
     /// every Start(), so pause/resume used to rewind the reported position
     /// while the decoder kept its own PTS. The base is folded forward at

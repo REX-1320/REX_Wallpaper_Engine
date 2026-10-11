@@ -343,6 +343,17 @@ void ProgmanHost::Release() {
     StopWindowThread();
 }
 
+void ProgmanHost::SetVisible(bool visible) {
+    HWND hwnd = m_renderWindow;
+    if (!hwnd || !IsWindow(hwnd)) return;  // pre-Acquire or released: no-op
+    RunOnWindowThread([hwnd, visible] {
+        if (IsWindow(hwnd)) {
+            ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
+        }
+        return true;
+    });
+}
+
 HWND ProgmanHost::GetRenderWindow() const { return m_renderWindow; }
 int  ProgmanHost::GetWidth()  const { return m_width; }
 int  ProgmanHost::GetHeight() const { return m_height; }

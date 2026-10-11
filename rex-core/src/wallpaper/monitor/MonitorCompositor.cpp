@@ -114,6 +114,10 @@ void MonitorCompositor::PresentFrame(const VideoFrame& frame,
     m_frameCount.fetch_add(1, std::memory_order_relaxed);
 }
 
+bool MonitorCompositor::IsOccluded() const {
+    return m_renderer && m_renderer->IsPresentOccluded();
+}
+
 void MonitorCompositor::PresentStaticTexture(const std::string& path) {
     if (!m_active || !m_renderer) return;
 

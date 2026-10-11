@@ -32,6 +32,13 @@ public:
     shared::Result<void> Acquire();
     void Release();
 
+    /// Show/hide the render window without releasing the layer (P0.1).
+    /// Hiding lets an OS-drawn static wallpaper show through; the frozen
+    /// backbuffer is preserved so re-showing is instant. Safe before
+    /// Acquire (no-op when there is no live window). Marshalled to the
+    /// window thread like every other mutating HWND op.
+    void SetVisible(bool visible);
+
     void StartMonitor(WorkerWRecoveryCallback onRecovery);
     void StopMonitor();
 

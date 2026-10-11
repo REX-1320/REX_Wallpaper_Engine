@@ -19,6 +19,7 @@
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "platform/windows/WorkerWHost.hpp"
 #include "platform/windows/ProgmanHost.hpp"
+#include "platform/windows/MultiMonitorDesktopHost.hpp"
 
 #include <memory>
 #include <string>
@@ -289,6 +290,46 @@ TEST(ProgmanHostTest, MonitorStartStopIsSafe) {
     host.StartMonitor([&called]() { called++; });
     host.StopMonitor();
     EXPECT_EQ(called, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Render-window visibility (P0.1: video→image frozen-frame cover bug)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The WorkerW render window is shown on acquire and nothing ever hid it, so
+// UnloadScene/Stop left the last video frame covering an OS-drawn static
+// image. SetVisible(false) must hide it; SetVisible(true) must re-show it.
+// Pre-acquire calls must be safe no-ops (same contract as StartMonitor).
+
+TEST(WorkerWHostTest, SetVisibleSafeBeforeAcquire) {
+    WorkerWHost host;
+    host.SetVisible(false);
+    host.SetVisible(true);
+}
+
+TEST(ProgmanHostTest, SetVisibleSafeBeforeAcquire) {
+    ProgmanHost host;
+    host.SetVisible(false);
+    host.SetVisible(true);
+}
+
+TEST(MultiMonitorDesktopHostTest, SetVisibleSafeBeforeAcquire) {
+    MultiMonitorDesktopHost host;
+    host.SetVisible(false);
+    host.SetVisible(true);
+}
+
+TEST(WorkerWHostTest, SetVisibleHidesAndShowsAcquiredWindow) {
+    WorkerWHost host;
+    auto result = host.Acquire();
+    if (result.IsError()) {
+        GTEST_SKIP() << "Acquire failed: " << result.Error().message;
+    }
+    host.SetVisible(false);
+    EXPECT_FALSE(IsWindowVisible(host.GetRenderWindow()));
+    host.SetVisible(true);
+    EXPECT_TRUE(IsWindowVisible(host.GetRenderWindow()));
+    host.Release();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -20,6 +20,10 @@ public:
     shared::Result<void> Acquire() override;
     void Release() override;
 
+    /// Show/hide the render window without releasing the layer (P0.1).
+    /// Safe before Acquire (no-op when there is no live window).
+    void SetVisible(bool visible) override;
+
     HWND    GetRenderWindow() const override;
     int     GetWidth()  const override;
     int     GetHeight() const override;

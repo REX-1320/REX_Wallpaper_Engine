@@ -14,6 +14,12 @@ public:
     virtual shared::Result<void> Acquire() = 0;
     virtual void Release() = 0;
 
+    /// Show or hide the render window without releasing the layer (P0.1).
+    /// Hiding leaves the OS wallpaper visible underneath; the window keeps
+    /// its parent/size so showing is instant. Must be safe to call before
+    /// Acquire (no-op). Window-thread affine in all implementations.
+    virtual void SetVisible(bool visible) = 0;
+
     virtual HWND GetRenderWindow() const = 0;
     virtual int GetWidth()  const = 0;
     virtual int GetHeight() const = 0;

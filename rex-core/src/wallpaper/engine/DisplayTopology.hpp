@@ -19,9 +19,13 @@
 namespace rex::wallpaper {
 
 /// True when the rendering-relevant topology changed: arrival/removal,
-/// geometry move/resize, primary swap, or DPI change. Order-sensitive
+/// geometry move/resize, primary swap, DPI change, physical-monitor swap
+/// (EDID hash: same device name + geometry, different panel), or adapter
+/// move (same everything, different GPU). Order-sensitive
 /// (EnumDisplayMonitors order is deterministic per topology); a spurious
 /// true only costs an idempotent refresh + an early-return Resize.
+/// Unknown (0) vs known adapter/EDID counts as changed (safe direction:
+/// reconcile once rather than miss a move); 0-vs-0 is steady.
 inline bool MonitorTopologyChanged(const std::vector<MonitorInfo>& before,
                                    const std::vector<MonitorInfo>& after) {
     if (before.size() != after.size()) return true;
@@ -30,7 +34,8 @@ inline bool MonitorTopologyChanged(const std::vector<MonitorInfo>& before,
         const MonitorInfo& b = after[i];
         if (a.id != b.id || a.x != b.x || a.y != b.y || a.width != b.width ||
             a.height != b.height || a.isPrimary != b.isPrimary ||
-            a.dpiScale != b.dpiScale || a.refreshHz != b.refreshHz) {
+            a.dpiScale != b.dpiScale || a.refreshHz != b.refreshHz ||
+            a.edidHash != b.edidHash || a.adapterLuid != b.adapterLuid) {
             return true;
         }
     }
