@@ -1257,6 +1257,41 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         }
         out.presentFps = m_presentFps;
     }
+    // Inter-present-interval distribution. presentFps is an AVERAGE over the
+    // window, so a pipeline alternating 37.5/43.75 ms and one locked at 41.667
+    // ms report the SAME presentFps. Stutter is jitter, so it is invisible in
+    // any mean — the percentiles and the worst gap are what expose it.
+    {
+        std::array<float, kPresentIntervalRingSize> sorted{};
+        size_t n = 0;
+        for (size_t i = 0; i < kPresentIntervalRingSize; ++i) {
+            const float v = m_presentIntervalRing[i].load(std::memory_order_relaxed);
+            if (v > 0.0f) sorted[n++] = v;
+        }
+        if (n == 0) {
+            out.presentGapP50Ms = out.presentGapP95Ms = out.presentGapP99Ms = 0.0f;
+            out.presentGapMaxMs = 0.0f;
+            out.presentGapJitterMs = 0.0f;
+        } else {
+            std::sort(sorted.begin(), sorted.begin() + static_cast<long>(n));
+            auto pick = [&](double q) {
+                size_t i = static_cast<size_t>(q * static_cast<double>(n - 1));
+                return sorted[std::min(i, n - 1)];
+            };
+            out.presentGapP50Ms = pick(0.50);
+            out.presentGapP95Ms = pick(0.95);
+            out.presentGapP99Ms = pick(0.99);
+            double sum = 0.0, sumSq = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                sum += sorted[i];
+                sumSq += static_cast<double>(sorted[i]) * sorted[i];
+            }
+            const double mean = sum / static_cast<double>(n);
+            const double var = sumSq / static_cast<double>(n) - mean * mean;
+            out.presentGapJitterMs = static_cast<float>(std::sqrt(var > 0.0 ? var : 0.0));
+            out.presentGapMaxMs = sorted[n - 1];
+        }
+    }
     // Unique-video-present sampler (Phase 3): same folding over
     // m_uniqueVideoFrames, so effectiveVideoFps excludes cadence
     // re-presents. Shares the present-rate window.
@@ -1657,7 +1692,19 @@ void Engine::RenderLoop() {
 
         // ── Periodically check for display topology changes ─────────────
         if (m_frameCount % 120 == 0) {
+            const auto housekeepingStart = high_resolution_clock::now();
             CheckDisplayChanges();
+            const double housekeepingMs = duration<double, std::milli>(
+                high_resolution_clock::now() - housekeepingStart).count();
+            // This runs ON the render thread inside the frame budget. A DXGI
+            // output query plus GetDpiForMonitor can block for tens of ms,
+            // which shows up as a late frame — invisible in any average FPS.
+            if (housekeepingMs >= 4.0) {
+                REX_LOG_WARN("Engine",
+                             "slow housekeeping: CheckDisplayChanges took "
+                             "{:.2f} ms on the render thread",
+                             housekeepingMs);
+            }
         }
 
         // ── Desktop host / shell restart + device-loss recovery ────────
@@ -1856,6 +1903,7 @@ void Engine::RenderLoop() {
                 PaceLoop(frameStart, isVideoScene);
                 continue;
             }
+            const auto beginFrameEnd = high_resolution_clock::now();
 
             if (pending && m_renderer) {
                 m_renderer->DrawVideoFrame(*pending,
@@ -1916,11 +1964,51 @@ void Engine::RenderLoop() {
             m_frameDirty.store(false, std::memory_order_release);
 
             auto frameEnd = high_resolution_clock::now();
+            // Attribute every over-budget frame to a phase. A late frame is
+            // invisible in presentFps, so the breakdown is the only way to
+            // tell a slow Present from a slow draw from a long sleep.
+            {
+                const double totalMs =
+                    duration<double, std::milli>(frameEnd - frameStart).count();
+                const double targetMs = 1000.0 / CadenceController::PresentationTarget(
+                    m_videoManager && m_videoManager->IsOpen()
+                        ? m_videoManager->GetFrameRate() : 0.0,
+                    m_speed.load(std::memory_order_relaxed),
+                    m_displayHzCached.load(std::memory_order_acquire),
+                    m_config.maxFps);
+                // gap between consecutive presents == targetInterval + work, so any frame
+                // whose WORK exceeds a small budget shows up as a late gap.
+                if (totalMs > 12.0) {
+                    const double beginMs =
+                        duration<double, std::milli>(beginFrameEnd - frameStart).count();
+                    const double endMs =
+                        duration<double, std::milli>(frameEnd - beginFrameEnd).count();
+                    REX_LOG_WARN("Engine",
+                                 "late frame: total={:.2f}ms target={:.2f}ms "
+                                 "begin+wake={:.2f}ms draw+present={:.2f}ms "
+                                 "sleep={:.2f}ms",
+                                 totalMs, targetMs, beginMs, endMs,
+                                 totalMs - endMs);
+                }
+            }
             double deltaMs = duration<double, std::milli>(
                 frameEnd - frameStart).count();
             Update(deltaMs / 1000.0);
 
             m_presentCount.fetch_add(1, std::memory_order_relaxed);
+            {
+                const auto gap = std::chrono::duration<double, std::milli>(
+                    frameEnd - m_lastPresentAt).count();
+                if (m_lastPresentAt.time_since_epoch().count() != 0 &&
+                    gap > 0.0 && gap < 1000.0) {
+                    const size_t idx =
+                        m_presentIntervalIndex % kPresentIntervalRingSize;
+                    m_presentIntervalRing[idx].store(
+                        static_cast<float>(gap), std::memory_order_relaxed);
+                    m_presentIntervalIndex = idx + 1;
+                }
+                m_lastPresentAt = frameEnd;
+            }
             if (m_occlusion.IsParked()) {
                 // Parked probe: the one cached-frame present per pass is
                 // the uncover detector — 4 Hz, not wall cadence.
@@ -1956,12 +2044,19 @@ void Engine::PaceLoop(
     }
     double targetIntervalMs;
     if (isVideoScene && m_videoManager && m_videoManager->IsOpen()) {
-        // Phase 3: maximum-useful presentation cadence. The decoder still
-        // paces itself to the source rate; this only sets how often we
-        // present (new frame or cached re-present). maxFps <= 0 is
-        // uncapped: min(sourceFps x rate, displayHz). A hardcoded 60 here
-        // starves high-fps content on high-Hz displays (120fps on 160Hz
-        // presented 60, drops exploding — proven live 2026-10-09).
+        // Presentation cadence = the CONTENT rate, not the display rate.
+        //
+        // Tested 2026-10-11: presenting per-vblank (mpv/Chromium display-sync
+        // model) was measured on this machine and REJECTED. At 160 Hz target
+        // the median gap did become a clean 6.25 ms, but 4K x 160 presents/s
+        // is beyond the GPU: 346 frames exceeded 12 ms of work in 45 s,
+        // gapP99 rose 62 -> 72 ms, gapMax reached 98 ms, and effectiveFps
+        // FELL 24.0 -> 22.2. Source-rate pacing keeps gapP50 at 41.88 ms
+        // (nominal 41.667) with gapP95 at 42.5 ms, i.e. the median and the
+        // 95th percentile are already correct. Only the tail is left, and the
+        // tail is a draw/present stall, not a cadence error (wall_research.md
+        // §0b P5/P7). Presentation rate is therefore left at the content rate;
+        // the remaining work is to remove the stall, not to re-grid.
         const int userCap = m_config.maxFps;
         targetIntervalMs =
             1000.0 / CadenceController::PresentationTarget(

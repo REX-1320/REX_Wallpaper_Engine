@@ -147,6 +147,16 @@ struct EngineTelemetry {
     uint64_t queueDepth     = 0;    // published-but-unconsumed frames now
     int      displayHz      = 0;    // current monitor refresh rate (0 = unknown)
     double   pacingMs       = 0.0;  // live decode-pacing interval
+    // ─── Present-interval distribution (jitter) ─────────────────────────
+    // presentFps above is a MEAN over the sampling window, and a mean cannot
+    // express jitter — a pipeline alternating 37.5/43.75 ms and one locked at
+    // 41.667 ms report the identical presentFps. These carry the shape of the
+    // distribution, which is what stutter actually is.
+    double   presentGapP50Ms    = 0.0;
+    double   presentGapP95Ms    = 0.0;
+    double   presentGapP99Ms    = 0.0;
+    double   presentGapMaxMs    = 0.0;
+    double   presentGapJitterMs = 0.0;  // stddev of the interval
     // ─── Wall-cadence presentation (Phase 3) ──────────────────────────
     double   effectiveVideoFps = 0.0;  // unique video frames presented/s
                                        // (excludes cadence re-presents)

@@ -179,6 +179,14 @@ private:
     mutable uint64_t m_presentRateBase{0};
     mutable std::chrono::steady_clock::time_point m_presentRateTime{};
     mutable double m_presentFps{0.0};
+    // Inter-present-interval ring. presentFps is a mean over the sampling
+    // window, and a mean cannot express jitter: alternating 37.5/43.75 ms and
+    // a flat 41.667 ms both average to 24 fps. This ring keeps the distribution
+    // so telemetry can publish P50/P95/P99, worst gap and stddev.
+    static constexpr size_t kPresentIntervalRingSize = 256;
+    std::array<std::atomic<float>, kPresentIntervalRingSize> m_presentIntervalRing{};
+    size_t m_presentIntervalIndex{0};
+    std::chrono::steady_clock::time_point m_lastPresentAt{};
     // Unique-video-present sampler (Phase 3): same folding for
     // effectiveVideoFps (excludes cadence re-presents).
     mutable uint64_t m_uniqueRateBase{0};

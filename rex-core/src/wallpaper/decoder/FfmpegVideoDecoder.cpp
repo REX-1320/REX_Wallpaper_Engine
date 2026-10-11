@@ -29,6 +29,10 @@ namespace {
 
 constexpr const char* kModule = "FfmpegVideoDecoder";
 
+// Bounded retry budget for avcodec_send_packet returning EAGAIN. Zero means
+// never stall; this many retries lets a transiently-full decoder drain first.
+constexpr int kMaxSendEagainRetries = 8;
+
 std::string Hex(HRESULT hr) {
     char buf[16] = {};
     std::snprintf(buf, sizeof(buf), "%08lX", static_cast<unsigned long>(hr));
@@ -170,10 +174,10 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
         Close();
         return shared::Result<void>(shared::ErrorCode::OutOfMemory, "cannot create codec context");
     }
-    m_decCtx->thread_count = 1;  // deterministic sequential decode (wallpaper-style)
+m_decCtx->thread_count = 1;  // deterministic sequential decode (wallpaper-style)
     m_decCtx->pkt_timebase = m_stream->time_base;
 
-    // â”€â”€ Hardware decode (D3D11VA on our D3D11 device) â”€â”€
+    // ─── Hardware decode (D3D11VA on our D3D11 device) ───
     m_hardware = false;
     if (useHardware) {
         AVBufferRef* hwDevRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
@@ -664,10 +668,30 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             }
             m_pktPending = true;
         }
-        const int s = avcodec_send_packet(m_decCtx, m_pkt);
+        int s = avcodec_send_packet(m_decCtx, m_pkt);
+        if (s == AVERROR(EAGAIN)) {
+            // The decoder did NOT accept the packet, so it is still ours and
+            // must NOT be unreffed — doing so punches a permanent hole in the
+            // compressed stream (a dropped frame plus a decoder fed a
+            // discontinuity), which is intermittent-stutter shaped rather than
+            // a constant rate deficit.
+            //
+            // The retry is bounded because D3D11VA can return EAGAIN from send
+            // while receive also returns EAGAIN (saturated surface pool), and
+            // an unbounded retry spins forever holding the decode mutex.
+            if (++m_sendEagainRetries < kMaxSendEagainRetries) {
+                continue;
+            }
+            REX_LOG_WARN(kModule, "avcodec_send_packet stuck at EAGAIN ({} "
+                         "retries) — advancing demuxer; frame may be lost",
+                         kMaxSendEagainRetries);
+            m_sendEagainStalls.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            m_sendEagainRetries = 0;
+        }
         av_packet_unref(m_pkt);
         m_pktPending = false;
-        if (s == 0 || s == AVERROR(EAGAIN)) {
+        if (s == 0) {
             continue;
         }
         REX_LOG_ERROR(kModule, "avcodec_send_packet failed ({})", s);

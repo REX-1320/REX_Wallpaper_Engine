@@ -207,6 +207,12 @@ private:
     int  m_videoStreamIndex        = -1;
     AVStream* m_stream             = nullptr;
     bool m_pktPending              = false;
+    // Send-EAGAIN instrumentation. m_sendEagainRetries is the per-packet retry
+    // counter (decode thread only); m_sendEagainStalls counts packets that
+    // exhausted the budget and had to be abandoned. A non-zero stall count is
+    // proof the decoder was refusing input, i.e. a saturated surface pool.
+    int  m_sendEagainRetries      = 0;
+    std::atomic<uint64_t> m_sendEagainStalls{0};
     // P1-8: written by the decode thread, read unlocked by diagnostics —
     // plain bools were a data race. Relaxed: flags only, no ordering.
     std::atomic<bool> m_hardware{false};
