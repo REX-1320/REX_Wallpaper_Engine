@@ -170,6 +170,8 @@ struct EngineTelemetry {
     // whole retry budget. Zero is healthy; non-zero means the decoder refused
     // input and a frame may have been lost (send/receive contract).
     uint64_t sendEagainStalls = 0;
+    // Driver hardware decoder profile count (0 = no hardware decode).
+    uint32_t hwDecoderProfiles = 0;
     // ─── Display cadence, sampled from DXGI (not from our own submits) ───
     // dwellVblanks = refreshes the last presented frame occupied;
     // dwellP50/P95/P99 are over the ring. For a source rate that is not an

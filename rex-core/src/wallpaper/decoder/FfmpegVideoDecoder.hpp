@@ -92,6 +92,11 @@ struct DecoderDiagnostics {
     // whole retry budget. Zero is the healthy state; non-zero means the
     // decoder refused input and a frame may have been lost.
     uint64_t sendEagainStalls = 0;
+    // Driver-reported hardware decoder profile count, from
+    // ID3D11VideoDevice::GetVideoDecoderProfileCount(). 0 means the device
+    // advertises no hardware decode at all, so REX should say so up front
+    // instead of discovering it by attempting an open and failing.
+    uint32_t hwDecoderProfiles = 0;
     bool     hardwareAccelerated = false;
     bool     eof              = false;
 };
@@ -236,6 +241,8 @@ private:
     // proof the decoder was refusing input, i.e. a saturated surface pool.
     int  m_sendEagainRetries      = 0;
     std::atomic<uint64_t> m_sendEagainStalls{0};
+    // Driver hardware-decoder capability, probed once at Open().
+    uint32_t m_hwDecoderProfiles = 0;
     // P1-8: written by the decode thread, read unlocked by diagnostics —
     // plain bools were a data race. Relaxed: flags only, no ordering.
     std::atomic<bool> m_hardware{false};

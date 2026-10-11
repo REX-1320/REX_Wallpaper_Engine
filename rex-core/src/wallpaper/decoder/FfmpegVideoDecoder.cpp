@@ -105,6 +105,15 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     m_videoContext1.Attach(rawVideoContext1);
     m_context4.Attach(rawContext4);
 
+    // Capability probe (Phase 6): ask the driver what it can actually decode
+    // instead of discovering the answer by attempting an open and reading a
+    // warning afterwards. GetVideoDecoderProfileCount needs no codec GUID, so
+    // this is exact where a per-codec query would depend on GUID constants we
+    // do not carry. 0 => the device advertises no hardware decode at all.
+    m_hwDecoderProfiles = m_videoDevice->GetVideoDecoderProfileCount();
+    REX_LOG_INFO(kModule, "hardware decoder profiles reported by driver: {}",
+                 m_hwDecoderProfiles);
+
     if (fenceHandle) {
         Microsoft::WRL::ComPtr<ID3D11Device5> d5;
         if (FAILED(m_device11.As(&d5)) ||
@@ -178,8 +187,12 @@ m_decCtx->thread_count = 1;  // deterministic sequential decode (wallpaper-style
     m_decCtx->pkt_timebase = m_stream->time_base;
 
     // ─── Hardware decode (D3D11VA on our D3D11 device) ───
+    if (useHardware && m_hwDecoderProfiles == 0) {
+        REX_LOG_INFO(kModule, "driver reports 0 hardware decoder profiles "
+                     "— skipping hardware decode, using software path");
+    }
     m_hardware = false;
-    if (useHardware) {
+    if (useHardware && m_hwDecoderProfiles > 0) {
         AVBufferRef* hwDevRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
         if (hwDevRef) {
             AVHWDeviceContext* hwDev =
@@ -737,6 +750,7 @@ DecoderDiagnostics FfmpegVideoDecoder::GetDiagnostics() const {
     d.hardwareAccelerated = m_hardware;
     d.eof = m_eof;
     d.sendEagainStalls = m_sendEagainStalls.load(std::memory_order_relaxed);
+    d.hwDecoderProfiles = m_hwDecoderProfiles;
     d.decodeMsP50 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.50);
     d.decodeMsP95 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.95);
     d.decodeMsP99 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.99);

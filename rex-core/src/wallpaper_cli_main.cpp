@@ -680,7 +680,7 @@ static void TelemetryThread(std::mutex& engineGuard,
                       "srcFps=%.1f convFps=%.1f schedDrops=%llu repeat=%llu queue=%llu effFps=%.1f dispHz=%d "
                       "| gapP50=%.2fms gapP95=%.2fms gapP99=%.2fms gapMax=%.2fms gapJit=%.2fms "
                       "| phBegin=%.2fms phDraw=%.2fms phWork=%.2fms phWait=%.2fms "
-                      "| dwell=%.0f/%.0f/%.0f/%.0f vblanks\n",
+                      "| dwell=%.0f/%.0f/%.0f/%.0f vblanks hwProfiles=%u\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -704,7 +704,8 @@ static void TelemetryThread(std::mutex& engineGuard,
                        t.presentGapJitterMs,
                        t.phaseBeginMeanMs, t.phaseDrawMeanMs,
                        t.phaseWorkLastMs, t.phaseWaitLastMs,
-                       t.dwellP50, t.dwellP95, t.dwellP99, t.dwellVblanks);
+                       t.dwellP50, t.dwellP95, t.dwellP99, t.dwellVblanks,
+                       t.hwDecoderProfiles);
         std::fclose(f);
     }
 }
@@ -1284,6 +1285,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("phaseWorkLastMs", json::Json(t.phaseWorkLastMs));
             tel.emplace("phaseWaitLastMs", json::Json(t.phaseWaitLastMs));
             tel.emplace("sendEagainStalls", json::Json(static_cast<double>(t.sendEagainStalls)));
+            tel.emplace("hwDecoderProfiles", json::Json(static_cast<double>(t.hwDecoderProfiles)));
             tel.emplace("repeatedFrames", json::Json(static_cast<double>(t.repeatedFrames)));
             tel.emplace("queueDepth", json::Json(static_cast<double>(t.queueDepth)));
             tel.emplace("pacingMs", json::Json(t.pacingMs));

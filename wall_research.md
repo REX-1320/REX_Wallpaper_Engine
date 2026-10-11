@@ -693,9 +693,27 @@ What *is* established, and stands independent of this gap:
 * the surface is `Hardware Composed: Independent Flip` (so §5.3 was wrong);
 * `AllowsTearing=0` is a missing swap-chain flag, not a driver limitation.
 
----
+### P12 — Phase 6 capability probe (shipped, measured)
 
-## 9. Verified research status
+`ID3D11VideoDevice` was already obtained (`FfmpegVideoDecoder.cpp:87`) but never
+queried; hardware decode was selected by *attempting* `avcodec_open2` and reacting
+to failure. That produces no explanation for the user and no up-front report.
+
+Now probed at `Open()` via `GetVideoDecoderProfileCount()`, which takes no codec
+GUID (the `D3D11_VIDDECODERS_*` constants are not in the SDK headers and were
+deliberately not guessed). **Measured on the RX 6700 XT: 24 hardware decoder
+profiles**, surfaced as `hwDecoderProfiles` in `GET_STATUS` and the telemetry log.
+A device reporting 0 now skips the hardware path explicitly and says so.
+
+Deliberately deferred: per-codec probe via
+`ID3D11VideoDevice::GetVideoDecoderConfigCount(&guid, …)`. That needs the
+`D3D11_VIDDECODERS_*` GUID values, which are absent from this SDK. Guessing them
+would risk probing the wrong codec and reporting a confident falsehood — the exact
+failure mode the roadmap forbids ("no claimed capability that has not been
+tested"). H.264/HEVC/VP9/AV1 per-codec verification therefore still rides on
+end-to-end open tests, which do exercise the real path.
+
+---
 
 Every item below is **measured or read from source**, not assumed.
 

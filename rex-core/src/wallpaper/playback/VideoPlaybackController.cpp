@@ -361,6 +361,7 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
         t.vpMsP99     = d.vpMsP99;
         t.recoveryCount = d.recoveryCount;
         t.sendEagainStalls = d.sendEagainStalls;
+        t.hwDecoderProfiles = d.hwDecoderProfiles;
         t.deviceResets = d.deviceResets;
     }
     return t;

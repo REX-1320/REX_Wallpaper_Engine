@@ -1137,6 +1137,7 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.vpMsP95        = vt.vpMsP95;
         out.vpMsP99        = vt.vpMsP99;
         out.sendEagainStalls = vt.sendEagainStalls;
+        out.hwDecoderProfiles = vt.hwDecoderProfiles;
     }    if (m_renderer) {
         out.textureBytes    = m_renderer->GetTextureBytes();
         out.uploadBytes     = m_renderer->GetUploadBytes();

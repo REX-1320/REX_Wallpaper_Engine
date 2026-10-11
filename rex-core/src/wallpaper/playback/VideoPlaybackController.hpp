@@ -53,7 +53,8 @@ struct VideoPlaybackTelemetry {
     double   decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
     double   vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;
     uint32_t recoveryCount   = 0;
-    uint64_t sendEagainStalls = 0;  // packets abandoned at send-EAGAIN
+    uint64_t sendEagainStalls = 0;  // packets abandoned at send-EAGAIN
+    uint32_t hwDecoderProfiles = 0;   // driver HW decoder profile count
     uint32_t deviceResets    = 0;
     uint64_t ringSlotCount   = 0;
     uint64_t ringBytes       = 0;
