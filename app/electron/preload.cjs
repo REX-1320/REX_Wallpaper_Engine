@@ -61,6 +61,10 @@ contextBridge.exposeInMainWorld('rexDesktop', {
     return () => ipcRenderer.removeListener('window:maximized', listener)
   },
 
+  // Window move / maximize / Aero Snap need no IPC: the titlebar strip is a real
+  // `-webkit-app-region: drag` region and the window is not transparent, so the
+  // OS caption handles all of it natively (same path as Windows Terminal).
+
   // Tray-driven navigation (e.g. tray "Settings" -> Settings tab). Returns an
   // unsubscribe function.
   onNavigate: (callback) => {

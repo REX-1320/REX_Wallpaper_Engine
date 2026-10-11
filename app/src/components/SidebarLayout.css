@@ -36,6 +36,7 @@
   justify-content: center;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
+  -webkit-app-region: no-drag;
 }
 
 .titlebar-icon:hover {
@@ -51,6 +52,7 @@
   background: rgba(255, 255, 255, 0.08);
   border: 1.5px solid transparent;
   overflow: hidden;
+  -webkit-app-region: no-drag;
 }
 
 .search-pill.open {
@@ -109,14 +111,18 @@
   cursor: pointer;
   color: #000;
   padding: 0;
+  -webkit-app-region: no-drag;
 }
 
 .titlebar-dot svg {
   opacity: 0;
+  color: #000;
+  stroke: #000;
+  stroke-width: 2.75;
   transition: opacity 0.15s ease;
 }
 
-.titlebar-controls:hover .titlebar-dot svg {
+.titlebar-dot:hover svg {
   opacity: 1;
 }
 
@@ -175,6 +181,9 @@
   top: 24px;
   width: 38px;
   height: 38px;
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 .sidebar.closed .sidebar-nav {
@@ -184,6 +193,10 @@
 .sidebar-toggle {
   position: absolute;
   top: 20px;
+  right: 28px;
+  /* Sits inside the 44px caption strip, so it must opt out or Windows would
+     swallow the click as a titlebar drag. */
+  -webkit-app-region: no-drag;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -484,7 +497,6 @@
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.35);
   background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(8px);
   font-family: inherit;
   font-size: 11px;
   font-weight: 600;
@@ -539,7 +551,6 @@
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.35);
   background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(8px);
   transition:
     padding 0.35s cubic-bezier(0.22, 1, 0.36, 1),
     border-color 0.35s cubic-bezier(0.22, 1, 0.36, 1);
@@ -630,7 +641,6 @@
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.35);
   background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(8px);
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
   transition:
     padding 0.35s cubic-bezier(0.22, 1, 0.36, 1),
@@ -805,7 +815,6 @@
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 12px;
   background: rgba(10, 10, 14, 0.95);
-  backdrop-filter: blur(14px);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
   font-family: inherit;
 }
@@ -855,7 +864,6 @@
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 12px;
   background: rgba(10, 10, 14, 0.95);
-  backdrop-filter: blur(14px);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
   overflow-y: auto;
   scrollbar-width: none;
@@ -1198,7 +1206,6 @@
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(6px);
 }
 
 .pl-dialog {
@@ -1434,7 +1441,6 @@
   background:
     radial-gradient(120% 120% at 15% 20%, rgba(255, 255, 255, 0.22) 0%, transparent 45%),
     var(--file-gradient, linear-gradient(135deg, #2b3a8f 0%, #6a2fa0 50%, #d24a86 100%));
-  backdrop-filter: blur(8px);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
   font-family: inherit;
   font-size: 11.5px;
@@ -1543,7 +1549,6 @@
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.35);
   background: transparent;
-  backdrop-filter: blur(8px);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
   overflow: hidden;
   font-family: inherit;
@@ -1621,7 +1626,6 @@
   padding: 2px 7px;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(4px);
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -1699,7 +1703,6 @@
   background:
     radial-gradient(120% 120% at 15% 20%, rgba(255, 255, 255, 0.22) 0%, transparent 45%),
     var(--file-gradient, linear-gradient(135deg, #2b3a8f 0%, #6a2fa0 50%, #d24a86 100%));
-  backdrop-filter: blur(8px);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
   font-family: inherit;
   font-size: 11px;

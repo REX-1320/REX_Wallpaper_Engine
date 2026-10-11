@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { motion } from 'motion/react'
 import './SidebarLayout.css'
 import { Home, Component, Settings, User, Bell, ChevronLeft, ChevronRight, Minus, Square, X, Blocks, Search, Image, Palette, LayoutGrid, Paintbrush, Store, Download, Star, Gauge, Package, Activity, FlaskConical, Info } from 'lucide-react'
-import MicaBackdrop from './MicaBackdrop'
+import Glass_effect from './Glass_effect'
 import ShinyText from './ShinyText'
 import DesktopApply from '../wallpapers/DesktopApply'
 
@@ -85,11 +85,18 @@ function SidebarLayout({ active, onSelect, children }) {
     close: () => window.rexDesktop?.close?.(),
   }
 
+  // The titlebar strip is a real `-webkit-app-region: drag` region and the window
+  // is not transparent, so Windows owns move / double-click maximize / Aero Snap
+  // through its own caption (HTCAPTION) loop — identical to Windows Terminal.
+  // That means the strip swallows DOM mouse events by design; anything that must
+  // stay clickable carries `-webkit-app-region: no-drag` in the CSS instead
+  // (traffic-light dots, search pill, sidebar toggle).
+
   return (
     <div className="window">
       <DesktopApply />
-      <MicaBackdrop variant="mica" dark />
-      <div className="titlebar-drag" onDoubleClick={winControls.toggleMaximize} />
+      <Glass_effect dark />
+      <div className="titlebar-drag" />
 
       <motion.div
         className="titlebar"
@@ -98,7 +105,12 @@ function SidebarLayout({ active, onSelect, children }) {
         transition={{ type: 'spring', stiffness: 200, damping: 20 }}
       >
         <div className="titlebar-controls">
-          <button type="button" className={`titlebar-dot green${maximized ? ' maximized' : ''}`} aria-label={maximized ? 'Restore' : 'Maximize'} onClick={winControls.toggleMaximize}>
+          <button
+            type="button"
+            className={`titlebar-dot green${maximized ? ' maximized' : ''}`}
+            aria-label={maximized ? 'Restore' : 'Maximize'}
+            onClick={winControls.toggleMaximize}
+          >
             <Square size={11} />
           </button>
           <button type="button" className="titlebar-dot yellow" aria-label="Minimize" onClick={winControls.minimize}>
@@ -158,20 +170,14 @@ function SidebarLayout({ active, onSelect, children }) {
         }}
         transition={{ type: 'spring', stiffness: 180, damping: 24 }}
       >
-        <motion.button
+        <button
           type="button"
           className="sidebar-toggle"
           onClick={() => setOpen(!open)}
           aria-label={open ? 'Collapse sidebar' : 'Expand sidebar'}
-          animate={
-            open
-              ? { right: 28, left: 'auto', x: 0 }
-              : { left: '50%', right: 'auto', x: '-50%' }
-          }
-          transition={{ type: 'spring', stiffness: 260, damping: 24 }}
         >
           {open ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
-        </motion.button>
+        </button>
 
         <nav className="sidebar-nav">
           {NAV_GROUPS.map((group, gi) => (

@@ -1,6 +1,8 @@
 #include "shared/Logger.hpp"
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
+#include <filesystem>
 #include <iostream>
 
 namespace rex::shared {
@@ -22,8 +24,15 @@ void Logger::Initialize(const std::string& logFilePath, LogLevel level) {
         auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         consoleSink->set_level(m_consoleEnabled ? spdlog::level::trace : spdlog::level::off);
 
-        // Create file sink
-        auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logFilePath, true);
+        // Create file sink: bounded growth (P2). Rotate at 2 MB, keep 2
+        // spares (mirrors the Electron app log). Fresh file per process
+        // start is preserved by removing any stale log first — each run
+        // still starts readable from the top, but long soaks can no longer
+        // grow logs indefinitely.
+        std::error_code ec;
+        std::filesystem::remove(logFilePath, ec);
+        auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+            logFilePath, 2 * 1024 * 1024, 2);
         fileSink->set_level(spdlog::level::trace);
 
         // Create logger with multiple sinks

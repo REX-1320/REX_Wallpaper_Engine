@@ -33,6 +33,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Local snapshots (full-UI backup before ship-scope trim; see backup/)
+backup/
+
 # OS
 Thumbs.db
 .DS_Store

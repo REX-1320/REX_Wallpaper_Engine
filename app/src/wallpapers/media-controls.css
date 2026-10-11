@@ -79,8 +79,6 @@
   padding: 5px 12px;
   border-radius: 999px;
   background: rgba(10, 12, 18, 0.5);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
-  backdrop-filter: blur(14px) saturate(140%);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
 }
 
@@ -129,8 +127,6 @@
   padding: 6px;
   border-radius: 16px;
   background: rgba(10, 12, 18, 0.52);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
-  backdrop-filter: blur(18px) saturate(150%);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
@@ -311,8 +307,6 @@
   padding: 5px 7px;
   border-radius: 10px;
   background: rgba(10, 12, 18, 0.8);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   pointer-events: none;
 }
@@ -342,8 +336,6 @@
   border-radius: 50%;
   border: none;
   background: rgba(10, 12, 18, 0.55);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  backdrop-filter: blur(16px) saturate(140%);
   color: #fff;
   display: flex;
   align-items: center;
@@ -371,8 +363,6 @@
   padding: 8px;
   border-radius: 14px;
   background: rgba(12, 14, 22, 0.82);
-  -webkit-backdrop-filter: blur(24px) saturate(150%);
-  backdrop-filter: blur(24px) saturate(150%);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
   opacity: 0;
   pointer-events: none;
@@ -774,8 +764,6 @@
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.6);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
 }
 
 .mco-modal {
@@ -786,8 +774,6 @@
   padding: 14px;
   border-radius: 16px;
   background: rgba(14, 16, 24, 0.92);
-  -webkit-backdrop-filter: blur(24px);
-  backdrop-filter: blur(24px);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.25) transparent;

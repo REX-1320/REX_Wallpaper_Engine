@@ -6,7 +6,7 @@
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
   line-height: 1.5;
   color: #213547;
-  background: #fff;
+  background: transparent;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -25,7 +25,7 @@ body {
   min-height: 100svh;
   display: flex;
   justify-content: center;
-  background: #fff;
+  background: transparent;
 }
 
 #root {

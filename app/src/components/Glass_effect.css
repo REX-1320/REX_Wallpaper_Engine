@@ -1,0 +1,18 @@
+/* Glass_effect — flat translucent background layer (backdrop-filter removed
+ * 2026-10-11: full-window blur was the #1 GPU consumer competing with the
+ * wallpaper's D3D12 Present on the same GPU, causing visible stutter). */
+
+.glass-effect {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+  border-radius: var(--glass-radius, 0);
+  background: rgba(20, 20, 28, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-effect.dark {
+  background: rgba(12, 12, 18, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}

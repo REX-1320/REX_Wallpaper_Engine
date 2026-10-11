@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain } = require('electron')
+﻿const { app, BrowserWindow, shell, ipcMain } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { WallpaperRuntime } = require('./wallpaperRuntime.cjs')
@@ -62,6 +62,12 @@ function logLine(...args) {
     } catch {}
     fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${args.join(' ')}\n`)
   } catch {}
+}
+
+// Window-interaction diagnostics. Off by default; set REX_WINDBG=1 to trace
+// maximize-state and drag size-drift while reproducing titlebar bugs.
+function winDbg(...args) {
+  if (process.env.REX_WINDBG) logLine('[win]', ...args)
 }
 
 function getWallpaperCliPath() {
@@ -206,8 +212,18 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     title: 'REX',
-    backgroundColor: '#000000',
-    frame: false,
+    // NOT transparent. A transparent window is not snap-assist aware
+    // (electron#37888) and cannot be maximized by double-click (PR #28207), so
+    // it can never behave like a normal Windows app. Instead the glass comes
+    // from the system-drawn DWM material -- exactly how Windows Terminal does
+    // it -- which also paints behind the non-client area.
+    backgroundMaterial: 'mica',
+    // Hidden NATIVE caption instead of frame:false. A frameless window has no
+    // WS_CAPTION, so Windows refuses to Aero-Snap it and gives us no native
+    // drag loop. With the caption hidden the OS owns the titlebar drag, the
+    // snap preview and the snap itself — the same behaviour Windows Terminal
+    // has — while our own traffic lights still paint over it.
+    titleBarStyle: 'hidden',
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
@@ -218,10 +234,29 @@ function createWindow() {
   })
   mainWindow = win
 
+  // REX_WINDBG=1: log the OS move-loop boundaries so a drag that never starts
+  // (or starts then aborts) can be told apart instead of guessed at.
+  // ENTERSIZEMOVE = OS modal move loop started. EXITSIZEMOVE = it ended.
+  // CAPTURECHANGED = mouse capture lost (aborts a drag).
+  if (process.env.REX_WINDBG && typeof win.hookWindowMessage === 'function') {
+    const WM = { LBUTTONDOWN: 0x201, LBUTTONUP: 0x202, CAPTURECHANGED: 0x215, ENTERSIZEMOVE: 0x231, EXITSIZEMOVE: 0x232, MOVING: 0x216 }
+    for (const [name, id] of Object.entries(WM)) {
+      try {
+        win.hookWindowMessage(id, () => { winDbg('msg=' + name) })
+      } catch {}
+    }
+  }
+
   win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
 
-  win.on('maximize', () => win.webContents.send('window:maximized', true))
-  win.on('unmaximize', () => win.webContents.send('window:maximized', false))
+  win.on('maximize', () => {
+    winDbg('event=maximize nativeIsMaximized=', win.isMaximized(), 'bounds=', JSON.stringify(win.getBounds()))
+    win.webContents.send('window:maximized', true)
+  })
+  win.on('unmaximize', () => {
+    winDbg('event=unmaximize nativeIsMaximized=', win.isMaximized(), 'bounds=', JSON.stringify(win.getBounds()))
+    win.webContents.send('window:maximized', false)
+  })
 
   // Close → hide, never quit. REX lives in the tray; only Exit REX quits.
   win.on('close', (event) => {
@@ -509,16 +544,36 @@ app.whenReady().then(() => {
   ipcMain.on('window:toggle-maximize', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return
-    if (win.isMaximized()) win.unmaximize()
+    const before = win.isMaximized()
+    winDbg('toggle: isMaximized(before)=', before, 'bounds=', JSON.stringify(win.getBounds()))
+    if (before) win.unmaximize()
     else win.maximize()
+    winDbg('toggle: isMaximized(after)=', win.isMaximized(), 'bounds=', JSON.stringify(win.getBounds()))
   })
   ipcMain.on('window:close', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close()
   })
   ipcMain.handle('window:is-maximized', (event) => {
-    return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
+    const v = BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
+    winDbg('is-maximized ->', v)
+    return v
   })
 
+  // ─── Window move / maximize / Aero Snap ─────────────────────────────────────
+  // Owned entirely by the OS. The titlebar strip is a real
+  // -webkit-app-region: drag region and the window is NOT transparent, so
+  // Windows runs its own caption (HTCAPTION) modal move loop. That gives drag,
+  // double-click maximize/restore, Aero Snap (halves, quarters, corners),
+  // drag-from-maximized, the snap preview and the system menu -- byte-for-byte
+  // the same behaviour as Windows Terminal, because it is the same code path.
+  //
+  // A hand-rolled poll-loop implementation lived here and could not match it:
+  //   * a 	ransparent: true window is not snap-assist aware (electron#37888)
+  //     and cannot be maximized by double-clicking (PR #28207);
+  //   * it snapped the OUTER rect to the work-area half, so the client came out
+  //     SMALLER than half -- native instead inflates the rect by the invisible
+  //     resize border (Terminal reports -9,0 1938x2169 for a 1920x2160 client);
+  //   * its size pin ratcheted up ~1px on every drag (1280 -> 1281 -> 1282).
   createWindow()
 
   trayManager = new TrayManager({
@@ -609,6 +664,39 @@ app.whenReady().then(() => {
   if (!startInBackground && mainWindow) {
     mainWindow.show()
     logLine('window: shown (normal launch)')
+    // REX_WINDBG=1: DOM-level caption audit. Logs what actually sits at the
+    // titlebar viewport points, so a dead drag region can be blamed on a
+    // covering overlay instead of guessed at.
+    if (process.env.REX_WINDBG) {
+      setTimeout(() => {
+        if (!mainWindow || mainWindow.isDestroyed()) return
+        mainWindow.webContents.executeJavaScript(`(() => {
+          const out = []
+          const cx = Math.round(window.innerWidth * 0.5)
+          const qx = Math.round(window.innerWidth * 0.25)
+          for (const [nx, x] of [['50%', cx], ['25%', qx]]) {
+            const el = document.elementFromPoint(x, 24)
+            out.push(nx + ' -> ' + (el ? (el.tagName + '.' + el.className + '#' + el.id) : 'null'))
+          }
+          const strip = document.querySelector('.titlebar-drag')
+          out.push('strip-present=' + !!strip)
+          if (strip) {
+            const cs = getComputedStyle(strip)
+            out.push('strip-region=' + cs['-webkit-app-region'] + ' rect=' + JSON.stringify(strip.getBoundingClientRect()))
+          }
+          out.push('dialogs=' + document.querySelectorAll('.pl-dialog-overlay,.pl-dialog,.playlist-context-menu').length)
+          out.push('fixed-full=' + [...document.querySelectorAll('*')].filter(e => {
+            const r = e.getBoundingClientRect()
+            const cs = getComputedStyle(e)
+            return cs.position === 'fixed' && r.width >= window.innerWidth - 2 && r.height >= 44 && r.top <= 0
+          }).map(e => e.tagName + '.' + e.className).join('|'))
+          return out.join(' ;; ')
+        })()`).then(
+          (s) => logLine('[win] dom-audit:', s),
+          (e) => logLine('[win] dom-audit ERROR', String(e && e.message || e))
+        )
+      }, 4000)
+    }
   } else {
     logLine('window: kept hidden (background launch)')
   }
