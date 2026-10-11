@@ -1,5 +1,6 @@
 const fs = require('fs')
 const path = require('path')
+const { pathToFileURL } = require('node:url')
 const { app, ipcMain } = require('electron')
 const crypto = require('crypto')
 
@@ -165,6 +166,48 @@ class WallpaperLibrary {
     return idx !== undefined ? this.items[idx] : null
   }
 
+  // Metadata only — NEVER the file bytes.
+  //
+  // The renderer restores a library tile by (a) learning name/size/mtime/type
+  // and (b) pointing createThumbnail at a file:// URL so the browser can decode
+  // a poster frame itself. Returning bytes here was never viable: a 4K video is
+  // hundreds of MB and a data URL would be a base64 copy of the whole thing in
+  // the renderer.
+  //
+  // This handler used to be MISSING while preload already exposed readFile, so
+  // every gallery restore failed with "no handler registered", galleryRestoreFile
+  // swallowed it as { missing: true }, and the gallery rendered EMPTY after every
+  // restart.
+  readFile(filePath) {
+    if (typeof filePath !== 'string' || !filePath) {
+      return { ok: false, error: 'invalid path' }
+    }
+    try {
+      const st = fs.statSync(filePath)
+      if (!st.isFile()) return { ok: false, error: 'not a file' }
+      const ext = path.extname(filePath).toLowerCase()
+      const mime = {
+        '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+        '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
+        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+        '.webp': 'image/webp', '.bmp': 'image/bmp', '.gif': 'image/gif',
+      }[ext] || 'application/octet-stream'
+      return {
+        ok: true,
+        path: filePath,
+        // file:// URL so <video>/<img> can load and seek it directly. Chromium
+        // renders the element; the bytes are never materialised as a Blob.
+        url: pathToFileURL(filePath).href,
+        name: path.basename(filePath),
+        size: st.size,
+        lastModified: st.mtimeMs,
+        type: mime,
+      }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  }
+
   registerIpcHandlers() {
     ipcMain.handle('gallery.add', async (event, filePath, type, extra) => {
       return await this.add(filePath, type, extra)
@@ -175,6 +218,9 @@ class WallpaperLibrary {
     )
     ipcMain.handle('gallery.list', (event, filter) => this.list(filter || {}))
     ipcMain.handle('gallery.get', (event, filePath) => this.get(filePath))
+    ipcMain.handle('gallery.read-file', (event, { path: filePath } = {}) =>
+      this.readFile(filePath)
+    )
   }
 }
 

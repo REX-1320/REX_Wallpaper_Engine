@@ -23,7 +23,7 @@ import {
 import DisplaySection from './inspector/sections/DisplaySection'
 import PlaylistEngineDialog from './playlist/PlaylistEngineDialog'
 import { playlistEngine } from './playlist/engine'
-import { deleteThumbnail } from './thumbnail'
+import { createThumbnailFromUrl, deleteThumbnail } from './thumbnail'
 import { buildFileRecord, galleryAdd, galleryGet, galleryList, galleryRemove, galleryRestoreFile } from './gallery'
 
 const SORT_OPTIONS = [
@@ -162,21 +162,50 @@ export default function WallpaperGallery() {
       if (cancelled || !items || items.length === 0) return
       const restored = []
       for (const item of items.slice(0, 100)) {
-        const { file, path: itemPath, missing } = await galleryRestoreFile(item)
+        const { file, path: itemPath, url, missing } =
+          await galleryRestoreFile(item)
         if (cancelled) return
         if (missing || !file) continue
         try {
-          restored.push(await buildFileRecord(file, itemPath ?? item?.path ?? null))
+          // Metadata only for now. Posters are decoded AFTER the tiles are on
+          // screen (see below): restoring 11 library entries means 11 video
+          // seeks, and doing that inline delays the first paint and competes
+          // with the wallpaper's first seconds of playback — which is exactly
+          // the window that already stutters while Chromium warms up.
+          restored.push(
+            await buildFileRecord(file, itemPath ?? item?.path ?? null, url, {
+              skipThumbnail: true,
+            }),
+          )
         } catch {
           // unloadable file: skip tile, keep library entry
         }
       }
+      // Restored tiles are appended even when none produced a thumbnail; a
+      // poster-less tile is still a usable, clickable entry.
       if (cancelled || restored.length === 0) return
       for (const r of restored) {
         if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
       }
       forceThumbs((n) => n + 1)
       setFiles((prev) => [...prev, ...restored])
+
+      // Posters, progressively, off the critical path.
+      for (const r of restored) {
+        if (cancelled || r.thumbDataUrl || !r.thumbUrl) continue
+        try {
+          const thumb = await createThumbnailFromUrl(
+            r.thumbUrl,
+            r.isVideo,
+          )
+          if (cancelled || !thumb) continue
+          r.thumbDataUrl = thumb
+          thumbsRef.current.set(r.id, thumb)
+          forceThumbs((n) => n + 1)
+        } catch {
+          // poster failed: the tile stays, just without an image
+        }
+      }
     })().catch(() => {})
     return () => {
       cancelled = true

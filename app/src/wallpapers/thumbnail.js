@@ -20,19 +20,12 @@ export async function deleteThumbnail(path) {
   await window.rexDesktop?.deleteThumbnail?.(path)
 }
 
-// Decode once and downscale to a small poster. Resolves null on failure.
-export function createThumbnail(file, maxSize = 480) {
+export async function createThumbnailFromUrl(url, isVideo, maxSize = 480) {
   return new Promise((resolve) => {
-    const isVideo = file.type?.startsWith('video/')
-    const url = URL.createObjectURL(file)
-    const done = (result) => {
-      URL.revokeObjectURL(url)
-      resolve(result)
-    }
-
+    if (!url) return resolve(null)
+    const done = (result) => resolve(result)
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
-
     const encode = (el) => {
       const w = el.videoWidth || el.naturalWidth || 0
       const h = el.videoHeight || el.naturalHeight || 0
@@ -57,9 +50,8 @@ export function createThumbnail(file, maxSize = 480) {
         }
       }
       if (!dataUrl || dataUrl.length < 100) return done(null)
-      return done({ dataUrl, width: w, height: h })
+      return done(dataUrl)
     }
-
     if (isVideo) {
       const video = document.createElement('video')
       video.muted = true
@@ -68,15 +60,12 @@ export function createThumbnail(file, maxSize = 480) {
       video.onloadedmetadata = () => {
         try {
           if (video.duration > 0.5) video.currentTime = Math.min(1, video.duration / 2)
-        } catch {
-          // ignore — fall back to the timeout below
-        }
+        } catch { /* ignore */ }
       }
       video.onseeked = () => {
         if (video.readyState >= 1 && video.videoWidth) encode(video)
       }
       video.onerror = () => done(null)
-      // Some sources never fire seeked; fall back to the first decodable frame.
       const fallback = setTimeout(() => {
         if (video.readyState >= 1 && video.videoWidth) encode(video)
         else done(null)
@@ -91,4 +80,17 @@ export function createThumbnail(file, maxSize = 480) {
       img.src = url
     }
   })
+}
+
+// Decode once and downscale to a small poster. Resolves null on failure.
+//
+// urlOverride lets a restored library tile point straight at the file on disk
+// (file:// URL) instead of an object URL built from bytes. That matters for
+// video: the bytes never have to enter the renderer at all.
+export function createThumbnail(file, maxSize = 480, urlOverride = null) {
+  return createThumbnailFromUrl(
+    urlOverride || URL.createObjectURL(file),
+    file.type?.startsWith('video/'),
+    maxSize,
+  )
 }

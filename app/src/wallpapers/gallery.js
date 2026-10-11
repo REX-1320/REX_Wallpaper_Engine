@@ -42,8 +42,11 @@ export async function galleryRemove(filePath) {
 // identical records. pathHint carries the real filesystem path: restored
 // Files are rebuilt from bytes and have no .path, so without the hint the
 // store entry would keep a bare filename the runtime cannot resolve.
-export async function buildFileRecord(f, pathHint = null) {
-  const thumb = await createThumbnail(f)
+export async function buildFileRecord(f, pathHint = null, thumbUrl = null,
+                                       opts = {}) {
+  // skipThumbnail defers poster decoding so a large library restore can paint
+  // its tiles immediately instead of blocking on N video seeks.
+  const thumb = opts.skipThumbnail ? null : await createThumbnail(f, thumbUrl)
   const id = crypto.randomUUID()
   const thumbDataUrl = thumb?.dataUrl ?? null
   let thumbPath = null
@@ -63,24 +66,32 @@ export async function buildFileRecord(f, pathHint = null) {
     path: typeof pathHint === 'string' && pathHint ? pathHint : (f.path ?? null),
     thumbDataUrl,
     thumbPath,
+    // Kept so a deferred poster can be decoded later from the file:// URL.
+    thumbUrl: thumbUrl ?? null,
     isVideo: (f.type || '').startsWith('video/'),
   }
 }
 
 // Reads a persisted library path back into a File for gallery restore.
-// Returns { file, path } on success, { missing: true } when the file is
+// Returns { file, path, url } on success, { missing: true } when the file is
 // gone (kept in the library — the drive may be temporarily unavailable).
+//
+// Metadata only, never bytes: main hands back a file:// URL so createThumbnail
+// can decode a poster frame directly. A 4K clip is hundreds of MB, and the
+// previous data-URL approach would have copied the whole thing into the
+// renderer as base64.
 export async function galleryRestoreFile(item) {
   try {
     const res = await window.rexDesktop?.gallery?.readFile(item?.path)
     if (!res || res.ok !== true) return { missing: true }
-    const resp = await fetch(res.dataUrl)
-    const blob = await resp.blob()
-    const file = new File([blob], res.name ?? item.path.split(/[\\/]/).pop(), {
-      type: blob.type,
+    // A real File carrying the true metadata but no payload: everything
+    // downstream (apply, sorting, display) reads name/size/type/mtime, and the
+    // thumbnail comes from the file:// URL below.
+    const file = new File([], res.name ?? item.path.split(/[\\/]/).pop(), {
+      type: res.type ?? '',
       lastModified: Math.round(res.lastModified ?? Date.now()),
     })
-    return { file, path: item.path }
+    return { file, path: res.path ?? item.path, url: res.url ?? null }
   } catch {
     return { missing: true }
   }
