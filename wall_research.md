@@ -662,10 +662,17 @@ all three failed, for different and documented reasons:
 
 | Route | Result |
 |---|---|
-| Bundled PresentMon `DisplayedTime` | Non-monotonic (196/474 negative deltas, with and without `--qpc_time`) |
+| Bundled PresentMon `DisplayedTime` | Non-monotonic (196/474 negative deltas, with and without `--qpc_time`). Its `FrameTime`/`PresentMode`/`SyncInterval` columns ARE valid |
 | `IDXGISwapChain::GetFrameStatistics` | Succeeds but never converges: `PresentCount=2`, `PresentRefreshCount=2087421` |
 | `IDXGISwapChainMedia::GetFrameStatisticsMedia` | Returns `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` on every call |
-| ETW `DxgKrnl` + `tracerpt` | **96,096 events captured successfully** (10 MB ETL), but `tracerpt` cannot decode the payload without the provider manifest — the fields are opaque |
+| ETW `DxgKrnl` via `logman` + `tracerpt` | **96,096 events captured** (10 MB ETL), but `tracerpt` has no `-manifest` flag and the payload decodes as opaque `User Data` |
+| WPR `Video` profile | Correct tool, refuses to start: *"Failed to enable the policy to profile system performance"* — **requires elevation** |
+
+The ETW route is closest: events *are* captured correctly; only decoding is
+missing. Two completions, both requiring something this session does not have:
+**run elevated** (WPR `Video` decodes DxgKrnl natively), or **obtain upstream
+PresentMon 2.x**, which resolves manifests internally and emits
+`DisplayedTime`/`AllowsTearing` as absolute QPC values.
 
 The ETW route is the most promising and is only one step short: the events *are*
 being captured (session started with `logman start REXDxg -p
