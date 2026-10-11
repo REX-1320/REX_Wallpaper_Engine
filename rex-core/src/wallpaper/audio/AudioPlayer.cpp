@@ -17,6 +17,8 @@ extern "C" {
 #include <avrt.h>
 #pragma comment(lib, "avrt.lib")
 
+#include <Functiondiscoverykeys_devpkey.h>
+
 namespace rex::wallpaper {
 
 namespace {
@@ -37,6 +39,14 @@ inline int16_t ClampToS16(float v) {
 inline bool IsEndpointLost(HRESULT hr) {
     return hr == AUDCLNT_E_DEVICE_INVALIDATED ||
            hr == AUDCLNT_E_SERVICE_NOT_RUNNING;
+}
+
+const std::string WideToUtf8Str(const wchar_t* s) {
+    if (!s) return "(null)";
+    char buf[512] = {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, buf, (int)sizeof(buf) - 1,
+                                      nullptr, nullptr);
+    return n > 0 ? std::string(buf) : "(unprintable)";
 }
 
 /// FFmpeg error code -> text. NOT av_err2str: that is a GNU statement
@@ -364,6 +374,19 @@ bool AudioPlayer::OpenEndpoint() {
             hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
         }
         if (SUCCEEDED(hr)) {
+            // Say WHICH device we are rendering to. Silence with healthy
+            // counters usually means a routing surprise (monitor/HDMI sink,
+            // a disconnected headset still set as default) rather than a bug.
+            Microsoft::WRL::ComPtr<IPropertyStore> props;
+            if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props))) {
+                PROPVARIANT name{};
+                if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &name)) &&
+                    name.vt == VT_LPWSTR && name.pwszVal) {
+                    REX_LOG_INFO(kModule, "render endpoint: {}",
+                                 WideToUtf8Str(name.pwszVal));
+                    PropVariantClear(&name);
+                }
+            }
             hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                                   reinterpret_cast<void**>(m_client.GetAddressOf()));
         }
@@ -533,12 +556,15 @@ void AudioPlayer::ThreadLoop() {
                 lastRendered = rendered;
                 lastStats = nowStats;
                 const uint64_t dt = 10;
+                const int peak = m_peakWindow.exchange(0, std::memory_order_relaxed);
                 REX_LOG_INFO(kModule,
-                             "audio out: {} fps decoded, {} fps rendered, {} underruns, {}ch -> {}ch @ {} Hz",
+                             "audio out: {} fps decoded, {} fps rendered, {} underruns, peak {:.3f}, {}ch -> {}ch @ {} Hz, mute={}",
                              (decoded - decodedAtLastStats) / dt,
                              (rendered - prev) / dt,
                              m_underruns.load(std::memory_order_relaxed),
-                             m_srcChannels, m_channels, m_sampleRate);
+                             static_cast<double>(peak) / 32768.0,
+                             m_srcChannels, m_channels, m_sampleRate,
+                             m_muted.load(std::memory_order_relaxed) ? 1 : 0);
                 decodedAtLastStats = decoded;
             }
             if (!streamStarted) {
@@ -1016,6 +1042,17 @@ void AudioPlayer::RenderStep() {
     }
     m_render->ReleaseBuffer(framesAvail, 0);
     m_renderedFrames.fetch_add(framesAvail, std::memory_order_relaxed);
+    // Signed peak of what actually left for the endpoint.
+    int peak = 0;
+    for (size_t i = 0; i < totalSamples; ++i) {
+        const int v = dst[i];
+        const int a = v < 0 ? -v : v;
+        if (a > peak) peak = a;
+    }
+    int prev = m_peakWindow.load(std::memory_order_relaxed);
+    while (prev < peak &&
+           !m_peakWindow.compare_exchange_weak(prev, peak,
+                                               std::memory_order_relaxed)) {}
     // Ring ran short of the endpoint period: the tail is zero-filled silence,
     // which is exactly the "beep" artefact. Counted so it can be measured
     // without needing ears.

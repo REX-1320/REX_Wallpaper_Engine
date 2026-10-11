@@ -260,6 +260,10 @@ int  m_sampleRate            = 48000;
     std::atomic<bool> m_endpointLost{false};
     // Render-path telemetry (see getters).
     std::atomic<uint64_t> m_renderedFrames{0};
+    // Signed peak handed to the endpoint in the current window (S16 units).
+    // Healthy counters with peak 0 means WE rendered silence; nonzero peak
+    // the user cannot hear means the OS routed it elsewhere.
+    std::atomic<int> m_peakWindow{0};
     std::atomic<uint64_t> m_decodedFrames{0};
     std::atomic<uint64_t> m_underruns{0};
     bool m_hasAudio = false;
