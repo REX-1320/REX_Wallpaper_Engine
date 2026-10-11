@@ -155,7 +155,56 @@ measurements in §0b were re-taken with `pauseOnFullscreen:false` (an `INIT`
 parameter) and are therefore clean. A harness passing that flag is required for any
 future headless timing measurement on this machine.
 
-### P9 — PHASE TIMINGS (2026-11, reviewer-requested) and the R4 verdict
+### P10 — PRESENTMON GROUND TRUTH (2026-11): our telemetry was measuring the WRONG CLOCK
+
+PresentMon is present on this machine (AMD ships it):
+`C:\Program Files\AMD\CNext\CNext\PresentMon-x64.exe`.
+
+**Refutes §5.3.** The audit inferred (labelled "INFERENCE, strong") that a WorkerW
+wallpaper can *never* take the independent-flip path. Measured, 475 presents:
+
+```
+PresentMode = 'Hardware Composed: Independent Flip'   x475
+AllowsTearing = '0'                                    x475
+SyncInterval  = '1'                                    x475
+```
+
+The wallpaper **does** get an independent flip. §5.3's central claim is wrong and
+its "one shared DWM cadence" reasoning cannot be relied on.
+
+**The stutter is real, and our own telemetry could not see it.** Aari 4K24,
+headless (no Electron), 20 s capture:
+
+| Metric | REX self-measured (submit) | **PresentMon (displayed)** |
+|---|---|---|
+| P50 | 41.87 ms | **14.67 ms** |
+| P95 | 42.40 ms | **73.96 ms** |
+| P99 | 42.66 ms | **85.62 ms** |
+| MAX | 44.64 ms | **87.09 ms** |
+| jitter | 0.31 ms | bimodal |
+
+Mean ≈ 42 ms (consistent with 475 presents in 20 s), but the distribution is
+**bimodal**: roughly half the frames land in ~14 ms bursts and ~45 % take ~74 ms.
+The engine submits on a rock-steady 41.67 ms grid; the panel receives them in
+irregular clumps. That is precisely "a good average FPS cannot be used to pass a
+smoothness test" — and precisely the case where "successful Present() calls and a
+healthy average FPS do not establish when frames actually appeared on screen".
+
+Per-frame costs from the same capture: `GPUTime` 31.8 ms, `GPUWait` 8.6 ms,
+`CPUBusy` 41.8 ms, `CPUWait` 0.13 ms.
+
+**Consequences for the roadmap:**
+1. Phase 1's "displayed frame identity" is not optional — it is the missing
+   clock. `gapP*` must be re-labelled as *submit* interval and kept alongside a
+   *displayed* interval.
+2. `AllowsTearing=0` is because the swap chain never passes
+   `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`; that is a concrete Phase 2 prerequisite
+   that is currently unmet and cheaply testable.
+3. The earlier 160 Hz experiment was rejected on *self-measured* tail metrics,
+   which we now know do not measure the displayed result. **That rejection may
+   have been wrong** and must be re-run against PresentMon.
+
+---
 
 New telemetry: `phBegin` (wake → `BeginFrame` returned), `phDraw` (draw +
 `RenderFrame` + `Present`), `phWork` (whole frame), `phWait` (frame-latency
