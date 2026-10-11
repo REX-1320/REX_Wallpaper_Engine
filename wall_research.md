@@ -633,6 +633,43 @@ through `VideoProcessorBlt` + `CopyResource`.
 
 ---
 
+## 9. Verified research status (loop iteration 1)
+
+Every item below is **measured or read from source**, not assumed.
+
+| # | Item | Status | Evidence |
+|---|---|---|---|
+| A | Shipped decoder inventory | ✅ **ANSWERED** | `DecoderInventory.*` (3 tests) against the shipped `avcodec-62.dll`: **247 video decoders**; H.264/HEVC/VP9/AV1 all present; MPEG-4/2, VP8, VC-1, Theora, ProRes, DNxHD, UTVideo, FFV1, WMV3, RV40 all present |
+| A2 | HW-accel decoder names | ✅ explained | `*_d3d11va` / `*_nvdec` are **absent by design** — FFmpeg removed those pseudo-decoders. Hardware decode is the *standard* decoder plus `hw_device_ctx`, which is exactly what `FfmpegVideoDecoder.cpp:198` does. Not a gap |
+| B | PresentMon availability | ✅ **ANSWERED** | `C:\Program Files\AMD\CNext\CNext\PresentMon-x64.exe`. Columns verified: `PresentMode`, `AllowsTearing`, `SyncInterval`, `CPUStartTime`, `FrameTime` |
+| B2 | PresentMon `DisplayedTime` | ⚠️ **UNUSABLE in this build** | 196/474 successive deltas negative, with and without `--qpc_time`. Cannot be used for interval statistics. **Open tooling gap** for measured *displayed*-frame timing |
+| C | DXGI colour space | ✅ **ALREADY CORRECT** | `SwapChain.cpp:217-220` calls `SetColorSpace1` with `RGB_FULL_G2084_NONE_P2020` (HDR10) / `RGB_FULL_G22_NONE_P709` (SDR), and re-derives format from `desc1.ColorSpace`. Phase 5 has a foundation; it needs *validation*, not authoring |
+| D | HW-decode capability probing | ❌ **ABSENT** | `ID3D11VideoDevice` is obtained (`FfmpegVideoDecoder.cpp:87`) but `GetVideoDecoderConfiguration` is **never called**. Path selection is reactive: try HW, and on `avcodec_open2` failure fall back to software (`:205`, `:218`) |
+| E | Software-decode threading | ⏸ deferred | Correctly deferred by the reviewer until it has its own benchmark |
+| F | Benchmark matrix | ⏸ design only | See §10 |
+
+### 9.1 What this changes about the plan
+
+1. **The audit's §5.3 reasoning must not be reused** (refuted). Any pacing fix must
+   be re-derived against measured `PresentMode`/`FrameTime`, not the old
+   shared-DWM-cadence model.
+2. **`AllowsTearing = 0` is a concrete, unmet prerequisite** for Phase 2. It is a
+   missing `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` on the swap chain — not a
+   capability the driver lacks.
+3. **The earlier 160 Hz rejection was decided on submit-side metrics.** `FrameTime`
+   from PresentMon (P50 41.87 / P95 42.38 / MAX 47.11) agrees with REX's own
+   telemetry, so the *submit* side of that experiment is trustworthy — but whether
+   the *displayed* result improved or worsened is still **unmeasured**, because
+   this PresentMon build cannot supply it. That experiment is therefore
+   **unresolved, not rejected**.
+4. **Phase 6's capability model does not exist yet.** Today REX discovers codec
+   support by attempting hardware decode and reacting to failure. That yields no
+   diagnostics ("why is HW decode not used here?") and no up-front report.
+5. **Phase 5 is closer than assumed** — HDR output colour space is already set
+   correctly. The gap is validation and Dolby Vision/HDR10+ policy, not plumbing.
+
+---
+
 ## 8. Sources
 
 * FFmpeg send/receive API contract — https://ffmpeg.org/doxygen/trunk/group__lavc__encdec.html
