@@ -385,6 +385,7 @@ if(BUILD_TESTING)
         tests/wallpaper/test_decoder_lifetime.cpp
         tests/wallpaper/test_decoder_eof.cpp
         tests/wallpaper/test_audio_resample.cpp
+        tests/wallpaper/test_decoder_inventory.cpp
         tests/wallpaper/test_decoder_packet_contract.cpp
         tests/wallpaper/test_audio_dolby.cpp
         tests/wallpaper/test_cadence.cpp
