@@ -307,6 +307,72 @@ TEST(AudioDolbyTest, ProductionStateMachineIsNeverWorseThanLegacy) {
     }
 }
 
+TEST(AudioRealFileTest, RealWorldFileAudioDecodesCleanly) {
+    // Set REX_REAL_AUDIO_FILE to any real media file to run its audio track
+    // through the production decode path. Skipped when unset so a clean
+    // checkout stays green.
+    const char* env = std::getenv("REX_REAL_AUDIO_FILE");
+    if (!env || !*env) { GTEST_SKIP() << "set REX_REAL_AUDIO_FILE"; }
+    if (!std::filesystem::exists(env)) { GTEST_SKIP() << "file not found"; }
+
+    const auto r = DecodeFixture(env);
+    ASSERT_EQ(r.error, "") << env << ": " << r.error;
+    std::printf("%s: codec=%s %dch->stereo frames=%lld (%.1fs)\n", env,
+                r.codecName.c_str(), r.srcChannels, (long long)r.frames,
+                r.frames / 48000.0);
+    EXPECT_GT(r.frames, 0) << "decoded no audio at all from " << env;
+
+    // And the downmix must produce audible stereo from it.
+    std::vector<double> l, r2;
+    ASSERT_TRUE(DecodeToStereo(env, &l, &r2)) << "stereo conversion failed";
+    double peak = 0.0;
+    for (size_t i = r2.size() / 4; i < r2.size(); ++i) {
+        peak = std::max(peak, std::abs(r2[i]));
+    }
+    EXPECT_GT(peak, 0.01) << "right channel is silent — downmix lost the audio";
+}
+
+// ─── Output layout negotiation ───────────────────────────────────────────
+
+TEST(AudioModeTest, ModeChannelMapping) {
+    EXPECT_EQ(AudioModeChannels(AudioOutputMode::Mono), 1);
+    EXPECT_EQ(AudioModeChannels(AudioOutputMode::Stereo), 2);
+    EXPECT_EQ(AudioModeChannels(AudioOutputMode::Quad), 4);
+    EXPECT_EQ(AudioModeChannels(AudioOutputMode::Surround51), 6);
+    EXPECT_EQ(AudioModeChannels(AudioOutputMode::Auto), 0);
+    EXPECT_EQ(AudioChannelsToMode(6), AudioOutputMode::Surround51);
+    EXPECT_EQ(AudioChannelsToMode(4), AudioOutputMode::Quad);
+    EXPECT_EQ(AudioChannelsToMode(2), AudioOutputMode::Stereo);
+    EXPECT_EQ(AudioChannelsToMode(1), AudioOutputMode::Mono);
+}
+
+TEST(AudioModeTest, NeverExceedsEndpointMixFormat) {
+    // The defect this guards: asking a stereo endpoint for 6 channels made
+    // Initialize succeed while the engine period stayed stereo, and the
+    // render step then overran its buffer and faulted the runtime.
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Surround51, 6, 2), 0)
+        << "must refuse 6ch on a 2ch endpoint rather than clamping silently";
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Quad, 6, 2), 0);
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Mono, 2, 2), 1);
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Stereo, 6, 6), 2);
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Surround51, 6, 6), 6);
+}
+
+TEST(AudioModeTest, AutoMatchesSourceWithinEndpointLimits) {
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Auto, 6, 6), 6);
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Auto, 2, 6), 2);
+    // Source is 6ch but the endpoint is stereo: must not ask for 6.
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Auto, 6, 2), 0);
+    // Endpoint unknown (0): assume stereo rather than trusting the source.
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Auto, 6, 0), 0);
+}
+
+TEST(AudioModeTest, UnsupportedWidthsStepDownToLadder) {
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Stereo, 2, 8), 2);
+    // A hypothetical 8ch source asked for "auto" on an 8ch endpoint.
+    EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Auto, 8, 8), 6);
+}
+
 // ─── Downmix matrix ──────────────────────────────────────────────────────
 
 TEST(AudioDownmixTest, MatrixMatchesDolbyCoefficients) {

@@ -24,6 +24,29 @@ struct AVPacket;
 
 namespace rex::wallpaper {
 
+// ─── Audio output layout ────────────────────────────────────────────────
+//
+// The DEVICE layout is what WASAPI renders, and it is negotiated against the
+// endpoint: requesting more channels than the endpoint's mix format provides
+// makes the engine period describe a layout the endpoint never hands back, and
+// the render step then overruns its buffer (this faulted the runtime on every
+// AC-3/E-AC-3 track). Audio is therefore always mixed to the negotiated
+// layout, never to the source layout.
+enum class AudioOutputMode {
+    Auto = 0,      // match the source, capped by what the endpoint supports
+    Mono,          // 1
+    Stereo,        // 2
+    Quad,          // 4  (FL FR SL SR)
+    Surround51,    // 6  (FL FR FC LFE SL SR)
+};
+
+/// Channel count for a mode (0 for Auto, which resolves per endpoint).
+int AudioModeChannels(AudioOutputMode mode);
+/// Inverse of AudioModeChannels; unknown counts resolve to Stereo.
+AudioOutputMode AudioChannelsToMode(int channels);
+/// Human-readable name, for logs and the UI.
+const char* AudioModeName(AudioOutputMode mode);
+
 // ─── AudioPlayer ─────────────────────────────────────────────────────────
 //
 // Decodes the audio stream of a media file (its OWN AVFormatContext — never
@@ -117,6 +140,47 @@ public:
     static float GetDownmixCoefficients(int srcChannels, int dstChannels,
                                         int srcChannel, int dstChannel);
 
+    /// Selects the device channel layout. Safe from any thread; takes effect
+    /// at the next endpoint negotiation (immediately when audio is open).
+    /// If the endpoint cannot honour the request, playback falls back to the
+    /// next-best layout and DidFallbackToSmallerMode() reports it so the UI
+    /// can tell the user rather than silently ignoring the choice.
+    void SetOutputMode(AudioOutputMode mode);
+    AudioOutputMode GetRequestedMode() const {
+        return m_requestedMode.load(std::memory_order_acquire);
+    }
+    /// The layout actually in use after negotiation.
+    AudioOutputMode GetActiveMode() const {
+        return m_activeMode.load(std::memory_order_acquire);
+    }
+    /// True when GetRequestedMode() could not be honoured and a smaller
+    /// layout is in use. Cleared by the next successful negotiation.
+    bool DidFallbackToSmallerMode() const {
+        return m_modeFallback.load(std::memory_order_acquire);
+    }
+    /// Negotiated device channel count (matches the ring layout).
+    int GetDeviceChannels() const { return m_channels; }
+
+    // Output telemetry. Audio correctness cannot be judged by ear in a
+    // headless test, so the render path reports what it actually pushed to
+    // the endpoint and how often it ran dry.
+    uint64_t GetRenderedFrames() const {
+        return m_renderedFrames.load(std::memory_order_relaxed);
+    }
+    uint64_t GetDecodedFrames() const {
+        return m_decodedFrames.load(std::memory_order_relaxed);
+    }
+    uint64_t GetUnderruns() const {
+        return m_underruns.load(std::memory_order_relaxed);
+    }
+
+    /// Picks the layout to render: the widest supported one that satisfies
+    /// both the request and what the endpoint's mix format provides.
+    /// Returns 0 when the exact request is impossible (the caller then steps
+    /// down and reports the fallback). Exposed for tests.
+    static int NegotiateChannels(AudioOutputMode requested, int sourceChannels,
+                                 int endpointMixChannels);
+
     int  GetSampleRate() const { return m_sampleRate; }
     int  GetChannels()   const { return m_channels; }
     double GetPosition() const { return m_position.load(std::memory_order_acquire); }
@@ -139,6 +203,9 @@ private:
     /// (Re)open the default render endpoint. True when rendering is
     /// possible; false keeps decode running while render retries.
     bool OpenEndpoint();
+    /// Resizes the ring to `channels` and resets its positions. Internal
+    /// thread only, and only while the stream is stopped.
+    void ResizeRing(int channels);
 
     // ─── FFmpeg state ───────────────────────────────────────────────────
     AVFormatContext* m_fmtCtx    = nullptr;
@@ -149,8 +216,15 @@ private:
     bool m_eof                   = false;
     std::string m_codecName;     // for error logs (e.g. "eac3")
 int  m_sampleRate            = 48000;
-    int  m_channels            = 2;   // DEVICE layout (always stereo)
+    int  m_channels            = 2;   // DEVICE layout (negotiated)
     int  m_srcChannels         = 2;   // codec layout (6 for AC-3/E-AC-3)
+    // Requested vs negotiated layout. Atomic: SetOutputMode may be called
+    // from the UI thread while the audio thread negotiates.
+    std::atomic<AudioOutputMode> m_requestedMode{AudioOutputMode::Stereo};
+    std::atomic<AudioOutputMode> m_activeMode{AudioOutputMode::Stereo};
+    std::atomic<bool> m_modeFallback{false};
+    std::atomic<bool> m_modeChanged{false};  // set by SetOutputMode
+    int  m_endpointMixChannels = 2;          // probed per endpoint open
     int  m_bytesPerSample        = 2;
 
     // ─── WASAPI state (internal thread only) ────────────────────────────
@@ -184,6 +258,10 @@ int  m_sampleRate            = 48000;
     // P3-G4: set by RenderStep on endpoint-loss HRs; the thread loop
     // re-enumerates instead of silencing audio until reload.
     std::atomic<bool> m_endpointLost{false};
+    // Render-path telemetry (see getters).
+    std::atomic<uint64_t> m_renderedFrames{0};
+    std::atomic<uint64_t> m_decodedFrames{0};
+    std::atomic<uint64_t> m_underruns{0};
     bool m_hasAudio = false;
 
     std::thread m_thread;

@@ -293,6 +293,66 @@ void AudioPlayer::SetMute(bool mute) {
 
 // ─── Internal thread ─────────────────────────────────────────────────────
 
+int AudioModeChannels(AudioOutputMode mode) {
+    switch (mode) {
+        case AudioOutputMode::Auto:      return 0;  // resolved per endpoint
+        case AudioOutputMode::Mono:      return 1;
+        case AudioOutputMode::Stereo:    return 2;
+        case AudioOutputMode::Quad:      return 4;
+        case AudioOutputMode::Surround51:return 6;
+    }
+    return 2;
+}
+
+AudioOutputMode AudioChannelsToMode(int channels) {
+    switch (channels) {
+        case 1: return AudioOutputMode::Mono;
+        case 2: return AudioOutputMode::Stereo;
+        case 4: return AudioOutputMode::Quad;
+        case 6: return AudioOutputMode::Surround51;
+        default: return AudioOutputMode::Stereo;
+    }
+}
+
+const char* AudioModeName(AudioOutputMode mode) {
+    switch (mode) {
+        case AudioOutputMode::Auto:      return "auto";
+        case AudioOutputMode::Mono:      return "mono";
+        case AudioOutputMode::Stereo:    return "stereo";
+        case AudioOutputMode::Quad:      return "quad";
+        case AudioOutputMode::Surround51:return "5.1";
+    }
+    return "stereo";
+}
+
+// The layouts we can request, widest first. Negotiation walks this ladder
+// down until it finds one the endpoint can actually render.
+static constexpr int kChannelLadder[] = {6, 4, 2, 1};
+
+int AudioPlayer::NegotiateChannels(AudioOutputMode requested, int sourceChannels,
+                                   int endpointMixChannels) {
+    if (endpointMixChannels < 1) endpointMixChannels = 2;  // unknown: be safe
+    const int want = AudioModeChannels(requested) != 0
+                         ? AudioModeChannels(requested)
+                         : (sourceChannels > 0 ? sourceChannels : 2);
+    // Exact match on the ladder?
+    for (int ch : kChannelLadder) {
+        if (ch == want) return ch <= endpointMixChannels ? ch : 0;
+    }
+    // Unsupported request (3, 5, 8, ...): widest ladder entry that fits both
+    // the request and the endpoint.
+    for (int ch : kChannelLadder) {
+        if (ch <= want && ch <= endpointMixChannels) return ch;
+    }
+    return 1;
+}
+
+void AudioPlayer::SetOutputMode(AudioOutputMode mode) {
+    if (m_requestedMode.exchange(mode, std::memory_order_acq_rel) == mode) return;
+    // The audio thread re-negotiates the endpoint and resizes the ring.
+    m_modeChanged.store(true, std::memory_order_release);
+}
+
 bool AudioPlayer::OpenEndpoint() {
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
@@ -310,27 +370,68 @@ bool AudioPlayer::OpenEndpoint() {
     }
 
     if (SUCCEEDED(hr)) {
-        // Feed the engine's native layout as interleaved S16; AUTOCONVERTPCM
-        // makes any rate/channel count acceptable (engine resamples).
-        WAVEFORMATEX wf{};
-        wf.wFormatTag = WAVE_FORMAT_PCM;
-        wf.nChannels = static_cast<WORD>(m_channels);
-        wf.nSamplesPerSec = static_cast<DWORD>(m_sampleRate);
-        wf.wBitsPerSample = 16;
-        wf.nBlockAlign = static_cast<WORD>(m_channels * 2);
-        wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-        hr = m_client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                  AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-                                  0, 0, &wf, nullptr);
-        if (FAILED(hr)) {
-            // Fallback: common denominator 48 kHz stereo.
-            wf.nChannels = 2;
-            wf.nSamplesPerSec = 48000;
-            wf.nBlockAlign = 4;
-            wf.nAvgBytesPerSec = 48000 * 4;
+        // Ask the endpoint what it can actually render BEFORE choosing a
+        // layout. Requesting more channels than the mix format provides is
+        // what faulted the runtime on 5.1 Dolby tracks: Initialize can
+        // succeed, but the engine period still describes the endpoint's real
+        // layout, so writing framesAvail*requested channels overruns.
+        m_endpointMixChannels = 2;
+        WAVEFORMATEXTENSIBLE* mix = nullptr;
+        if (SUCCEEDED(m_client->GetMixFormat(
+                reinterpret_cast<WAVEFORMATEX**>(&mix))) && mix) {
+            const int mixCh = static_cast<int>(
+                reinterpret_cast<WAVEFORMATEX*>(mix)->nChannels);
+            if (mixCh > 0) m_endpointMixChannels = mixCh;
+            CoTaskMemFree(mix);
+        }
+
+        const AudioOutputMode requested = m_requestedMode.load(std::memory_order_acquire);
+        const int want = NegotiateChannels(requested, m_srcChannels,
+                                           m_endpointMixChannels);
+        // An exact request that the endpoint cannot honour still resolves to
+        // the widest safe layout; flag it so the UI can say so.
+        const int requestedChannels = AudioModeChannels(requested);
+        const bool exact = requestedChannels != 0 && want == requestedChannels;
+        m_modeFallback.store(requestedChannels != 0 && !exact,
+                            std::memory_order_release);
+
+        const int rate = m_sampleRate > 0 ? m_sampleRate : 48000;
+        // Try the negotiated layout, stepping down the ladder if Initialize
+        // refuses it. Mono/stereo are the last resort and always succeed in
+        // practice, so the loop always terminates with a usable layout.
+        hr = E_FAIL;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            const int ch = NegotiateChannels(
+                requested, m_srcChannels,
+                want < m_endpointMixChannels ? want : m_endpointMixChannels);
+            WAVEFORMATEX wf{};
+            wf.wFormatTag = WAVE_FORMAT_PCM;
+            wf.nChannels = static_cast<WORD>(ch);
+            wf.nSamplesPerSec = static_cast<DWORD>(rate);
+            wf.wBitsPerSample = 16;
+            wf.nBlockAlign = static_cast<WORD>(ch * 2);
+            wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
             hr = m_client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                       AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                                       0, 0, &wf, nullptr);
+            if (SUCCEEDED(hr)) { m_channels = ch; break; }
+            if (ch <= 1) break;
+            m_endpointMixChannels = want;   // force a narrower retry
+        }
+        if (SUCCEEDED(hr)) {
+            const AudioOutputMode active = AudioChannelsToMode(m_channels);
+            m_activeMode.store(active, std::memory_order_release);
+            if (m_modeFallback.load(std::memory_order_acquire)) {
+                REX_LOG_WARN(kModule,
+                             "endpoint supports {} ch; '{}' requested -> using {}",
+                             m_endpointMixChannels, AudioModeName(requested),
+                             AudioModeName(active));
+            } else {
+                REX_LOG_INFO(kModule, "endpoint layout negotiated: {}",
+                             AudioModeName(active));
+            }
+            // The ring layout must match what WASAPI will render.
+            ResizeRing(m_channels);
         }
     }
     if (SUCCEEDED(hr)) {
@@ -340,8 +441,8 @@ bool AudioPlayer::OpenEndpoint() {
         hr = m_client->GetService(IID_PPV_ARGS(&m_render));
     }
     if (SUCCEEDED(hr)) {
-        REX_LOG_INFO(kModule, "WASAPI render endpoint ready ({} frames/buffer)",
-                     m_bufferFrames);
+REX_LOG_INFO(kModule, "WASAPI render endpoint ready ({} frames/buffer, {} ch)",
+                 m_bufferFrames, m_channels);
         return true;
     }
     REX_LOG_WARN(kModule, "WASAPI unavailable (0x{:08X}); audio disabled", hr);
@@ -365,6 +466,9 @@ void AudioPlayer::ThreadLoop() {
 
     bool wasapiOk = OpenEndpoint();
     auto lastEndpointRetry = std::chrono::steady_clock::now();
+    auto lastStats = std::chrono::steady_clock::now();
+    uint64_t lastRendered = 0;
+    uint64_t decodedAtLastStats = 0;
     constexpr auto kEndpointRetryInterval = std::chrono::seconds(2);
     // The WASAPI stream must be Start()ed or the engine never pulls
     // buffers — everything looks healthy (endpoint ready, unmuted,
@@ -397,6 +501,18 @@ void AudioPlayer::ThreadLoop() {
         if (m_seekRequested.exchange(false, std::memory_order_acq_rel)) {
             DoSeek(m_seekTime.load(std::memory_order_acquire));
         }
+        // Output-mode change from the UI: drop the stream and re-negotiate.
+        // The ring is resized to whatever the endpoint actually supports.
+        if (m_modeChanged.exchange(false, std::memory_order_acq_rel)) {
+            if (streamStarted && m_client) {
+                m_client->Stop();
+                streamStarted = false;
+            }
+            m_render.Reset();
+            m_client.Reset();
+            wasapiOk = OpenEndpoint();
+            lastEndpointRetry = std::chrono::steady_clock::now();
+        }
         if (!m_playing.load(std::memory_order_acquire)) {
             if (streamStarted && m_client) {
                 m_client->Stop();
@@ -406,6 +522,25 @@ void AudioPlayer::ThreadLoop() {
             continue;
         }
         if (wasapiOk && m_client) {
+            // Objective audio health, so "is there sound?" is answerable
+            // without listening: real-time rate means frames are actually
+            // reaching the endpoint.
+            const auto nowStats = std::chrono::steady_clock::now();
+            if (nowStats - lastStats >= std::chrono::seconds(10)) {
+                const uint64_t rendered = m_renderedFrames.load(std::memory_order_relaxed);
+                const uint64_t decoded = m_decodedFrames.load(std::memory_order_relaxed);
+                const uint64_t prev = lastRendered;
+                lastRendered = rendered;
+                lastStats = nowStats;
+                const uint64_t dt = 10;
+                REX_LOG_INFO(kModule,
+                             "audio out: {} fps decoded, {} fps rendered, {} underruns, {}ch -> {}ch @ {} Hz",
+                             (decoded - decodedAtLastStats) / dt,
+                             (rendered - prev) / dt,
+                             m_underruns.load(std::memory_order_relaxed),
+                             m_srcChannels, m_channels, m_sampleRate);
+                decodedAtLastStats = decoded;
+            }
             if (!streamStarted) {
                 // Prime the ring BEFORE Start(). Starting an empty ring
                 // forces the first buffers to render silence, and any decoder
@@ -559,6 +694,19 @@ bool AudioPlayer::DecodeNextChunk() {
         if (delivered > 0) return true;
         // Packet produced no frame yet — feed the next one.
     }
+}
+
+void AudioPlayer::ResizeRing(int channels) {
+    if (channels <= 0) return;
+    std::lock_guard lock(m_ringMutex);
+    if (m_channels == channels && !m_ring.empty()) return;
+    m_channels = channels;
+    m_ringFrames = std::max<size_t>(static_cast<size_t>(m_sampleRate),
+                                    static_cast<size_t>(m_bufferFrames) * 4);
+    m_ring.assign(m_ringFrames * static_cast<size_t>(m_channels), 0);
+    m_scratch.clear();
+    m_readPos = m_writePos = m_bufferedFrames = 0;
+    m_speedError = 0.0;
 }
 
 bool AudioPlayer::PrimedForStart() {
@@ -756,6 +904,8 @@ int AudioPlayer::PushFrameToRing(AVFrame* frame) {
     }
     m_writePos = (m_writePos + static_cast<size_t>(converted)) % m_ringFrames;
     m_bufferedFrames += static_cast<size_t>(converted);
+    m_decodedFrames.fetch_add(static_cast<uint64_t>(converted),
+                              std::memory_order_relaxed);
     return converted;
 }
 
@@ -865,6 +1015,13 @@ void AudioPlayer::RenderStep() {
                     (framesAvail - have) * static_cast<size_t>(m_channels) * 2);
     }
     m_render->ReleaseBuffer(framesAvail, 0);
+    m_renderedFrames.fetch_add(framesAvail, std::memory_order_relaxed);
+    // Ring ran short of the endpoint period: the tail is zero-filled silence,
+    // which is exactly the "beep" artefact. Counted so it can be measured
+    // without needing ears.
+    if (have < framesAvail) {
+        m_underruns.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 } // namespace rex::wallpaper
