@@ -677,7 +677,7 @@ static void TelemetryThread(std::mutex& engineGuard,
                      "decRendSame=%d rendDispSame=%d | decLUID=%016llx rendLUID=%016llx | "
                      "gpuDed=%llu gpuShared=%llu gpuBudget=%llu | "
                       "decFps=%.1f rendFps=%.1f | slots=%llu ringBytes=%llu | presents=%llu | "
-                      "srcFps=%.1f convFps=%.1f schedDrops=%llu repeat=%llu queue=%llu effFps=%.1f dispHz=%d "
+                      "srcFps=%.1f convFps=%.1f schedDrops=%llu dropRate=%.1f/s repeat=%llu queue=%llu effFps=%.1f dispHz=%d "
                       "| gapP50=%.2fms gapP95=%.2fms gapP99=%.2fms gapMax=%.2fms gapJit=%.2fms "
                       "| phBegin=%.2fms phDraw=%.2fms phWork=%.2fms phWait=%.2fms "
                       "| dwell=%.0f/%.0f/%.0f/%.0f vblanks hwProfiles=%u press=%u/%.2fms\n",
@@ -695,8 +695,9 @@ static void TelemetryThread(std::mutex& engineGuard,
                       static_cast<unsigned long long>(t.ringBytes),
                       static_cast<unsigned long long>(t.presentCount),
                       t.sourceFps, t.convertFps,
-                      static_cast<unsigned long long>(t.schedulerDrops),
-                      static_cast<unsigned long long>(t.repeatedFrames),
+                       static_cast<unsigned long long>(t.schedulerDrops),
+                       t.schedulerDropsPerSec,
+                       static_cast<unsigned long long>(t.repeatedFrames),
                       static_cast<unsigned long long>(t.queueDepth),
                       t.effectiveVideoFps, t.displayHz,
                        t.presentGapP50Ms, t.presentGapP95Ms,
@@ -1266,6 +1267,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("sourceFps", json::Json(t.sourceFps));
             tel.emplace("convertFps", json::Json(t.convertFps));
             tel.emplace("schedulerDrops", json::Json(static_cast<double>(t.schedulerDrops)));
+            tel.emplace("schedulerDropsPerSec", json::Json(t.schedulerDropsPerSec));
             tel.emplace("loopWraps", json::Json(static_cast<double>(t.loopWraps)));
             json::Json::Array mons;
             for (const auto& mc : t.monitorPresents) {

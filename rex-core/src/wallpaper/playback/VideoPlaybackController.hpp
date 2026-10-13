@@ -55,6 +55,11 @@ struct VideoPlaybackTelemetry {
     uint32_t recoveryCount   = 0;
     uint64_t sendEagainStalls = 0;  // packets abandoned at send-EAGAIN
     uint32_t hwDecoderProfiles = 0;   // driver HW decoder profile count
+    // Drops per second over the telemetry window. schedulerDrops is a
+    // LIFETIME counter and reads alarming forever after a startup burst
+    // (it climbed to 694 while dropping nothing); the rate says what is
+    // happening NOW.
+    double   schedulerDropsPerSec = 0.0;
     uint32_t deviceResets    = 0;
     uint64_t ringSlotCount   = 0;
     uint64_t ringBytes       = 0;
@@ -230,6 +235,10 @@ private:
     std::atomic<uint64_t> m_framesDecoded{0};
     std::atomic<uint64_t> m_framesConsumed{0};
     std::atomic<uint64_t> m_framesDropped{0};
+    // Windowed drop-rate sampler (see GetTelemetry).
+    mutable uint64_t m_dropRateBase{0};
+    mutable std::chrono::steady_clock::time_point m_dropRateTime{};
+    mutable double m_dropRatePerSec{0.0};
     std::atomic<uint64_t> m_loopWraps{0};  // backward-PTS-jump events (loop/seek)
     using Clock = std::chrono::steady_clock;
     Clock::time_point m_fpsStartTime;

@@ -333,6 +333,25 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     t.sourceFps = m_frameRate;
     t.convertFps = secs > 0.0 ? static_cast<double>(m_convertFrameCount) / secs : 0.0;
     t.schedulerDrops = m_framesDropped.load(std::memory_order_relaxed);
+    // Fold the cumulative drop counter into a RATE, exactly like presentFps.
+    // The cumulative value keeps climbing for the life of the process, so a
+    // log line reading "schedDrops=694" looks like an escalating failure even
+    // when the scheduler has dropped nothing for minutes (measured 2026-11:
+    // the counter froze at 103 while effFps sat at 59).
+    {
+        const auto now = Clock::now();
+        const double dt = std::chrono::duration<double>(now - m_dropRateTime).count();
+        if (dt >= 0.5) {
+            if (m_dropRateTime.time_since_epoch().count() != 0) {
+                const double delta = static_cast<double>(t.schedulerDrops) -
+                                     static_cast<double>(m_dropRateBase);
+                m_dropRatePerSec = delta > 0.0 ? delta / dt : 0.0;
+            }
+            m_dropRateBase = t.schedulerDrops;
+            m_dropRateTime = now;
+        }
+        t.schedulerDropsPerSec = m_dropRatePerSec;
+    }
     t.loopWraps = m_loopWraps.load(std::memory_order_relaxed);
     t.queueDepth = m_scheduler.PendingCount();
     t.pacingMs = m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
