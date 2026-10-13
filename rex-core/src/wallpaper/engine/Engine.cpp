@@ -1113,6 +1113,7 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.convertFps     = vt.convertFps;
         out.schedulerDrops = vt.schedulerDrops;
         out.schedulerDropsPerSec = vt.schedulerDropsPerSec;
+        out.schedulerDropsPeak = vt.schedulerDropsPeak;
         out.loopWraps = vt.loopWraps;
         out.monitorPresents.clear();
         for (const auto& [id, count] : m_videoManager->GetMonitorPresentCounts()) {

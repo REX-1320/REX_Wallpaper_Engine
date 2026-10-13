@@ -60,6 +60,9 @@ struct VideoPlaybackTelemetry {
     // (it climbed to 694 while dropping nothing); the rate says what is
     // happening NOW.
     double   schedulerDropsPerSec = 0.0;
+    // Largest drop burst seen inside the current window, so a spike the
+    // average smooths away is still visible.
+    double   schedulerDropsPeak = 0.0;
     uint32_t deviceResets    = 0;
     uint64_t ringSlotCount   = 0;
     uint64_t ringBytes       = 0;
@@ -239,6 +242,7 @@ private:
     mutable uint64_t m_dropRateBase{0};
     mutable std::chrono::steady_clock::time_point m_dropRateTime{};
     mutable double m_dropRatePerSec{0.0};
+    mutable double m_dropRatePeak = 0.0;
     std::atomic<uint64_t> m_loopWraps{0};  // backward-PTS-jump events (loop/seek)
     using Clock = std::chrono::steady_clock;
     Clock::time_point m_fpsStartTime;

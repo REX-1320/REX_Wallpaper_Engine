@@ -131,7 +131,8 @@ struct EngineTelemetry {
     uint64_t schedulerDrops = 0;
     // Drops per second over the telemetry window. The cumulative value above
     // never resets and reads alarming long after the drops have stopped.
-    double   schedulerDropsPerSec = 0.0;    // skipped between decode & consume
+    double   schedulerDropsPerSec = 0.0;
+    double   schedulerDropsPeak = 0.0;    // skipped between decode & consume
     uint64_t loopWraps       = 0;    // PTS wrap/seek events (loop restart or
                                     // explicit seek): separates wrap churn
                                     // from steady-state playback

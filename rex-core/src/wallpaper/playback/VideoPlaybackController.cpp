@@ -341,16 +341,31 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     {
         const auto now = Clock::now();
         const double dt = std::chrono::duration<double>(now - m_dropRateTime).count();
-        if (dt >= 0.5) {
+        // Window must be LONGER than the telemetry sampler's interval (5 s),
+        // otherwise a burst that begins and ends between two log lines is
+        // averaged away and reported as 0.0/s — exactly the blindness this
+        // metric exists to remove (measured 2026-11: 39 and 40 drop bursts
+        // were only visible because they happened to span a fold).
+        constexpr double kDropWindowSec = 10.0;
+        if (dt >= kDropWindowSec) {
             if (m_dropRateTime.time_since_epoch().count() != 0) {
                 const double delta = static_cast<double>(t.schedulerDrops) -
                                      static_cast<double>(m_dropRateBase);
-                m_dropRatePerSec = delta > 0.0 ? delta / dt : 0.0;
+                m_dropRatePerSec = delta / dt;
+                // Biggest single jump seen inside the window, so a spike that
+                // the average smooths away is still visible.
+                if (delta > m_dropRatePeak) m_dropRatePeak = delta;
             }
             m_dropRateBase = t.schedulerDrops;
             m_dropRateTime = now;
+        } else if (m_dropRateTime.time_since_epoch().count() != 0) {
+            // Inside the window: track the peak without resetting the base.
+            const double delta = static_cast<double>(t.schedulerDrops) -
+                                 static_cast<double>(m_dropRateBase);
+            if (delta > m_dropRatePeak) m_dropRatePeak = delta;
         }
         t.schedulerDropsPerSec = m_dropRatePerSec;
+        t.schedulerDropsPeak = m_dropRatePeak;
     }
     t.loopWraps = m_loopWraps.load(std::memory_order_relaxed);
     t.queueDepth = m_scheduler.PendingCount();
