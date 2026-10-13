@@ -184,6 +184,9 @@ struct EngineTelemetry {
     double   dwellP99     = 0.0;
     // True once a full ring of samples exists.
     bool     cadenceValid = false;
+    // GPU-pressure present-rate divisor: 1 = normal, 2/4 = degraded.
+    uint32_t pressureScale = 1;
+    double   pressureWaitMeanMs = 0.0;
     // ─── Wall-cadence presentation (Phase 3) ──────────────────────────
     double   effectiveVideoFps = 0.0;  // unique video frames presented/s
                                        // (excludes cadence re-presents)

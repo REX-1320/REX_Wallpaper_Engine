@@ -1309,6 +1309,8 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.dwellP95     = cd.PercentileDwell(0.95);
         out.dwellP99     = cd.PercentileDwell(0.99);
         out.cadenceValid = cd.HasCadence();
+        out.pressureScale = m_pressureScale.load(std::memory_order_relaxed);
+        out.pressureWaitMeanMs = m_phaseWaitMeanMs.load(std::memory_order_relaxed);
     }
     // Unique-video-present sampler (Phase 3): same folding over
     // m_uniqueVideoFrames, so effectiveVideoFps excludes cadence
@@ -2014,6 +2016,14 @@ void Engine::RenderLoop() {
                 if (m_renderer) {
                     m_phaseWaitMs.store(m_renderer->LastFrameLatencyWaitMs(),
                                         std::memory_order_relaxed);
+                    // Rolling pressure signal. The frame-latency waitable is
+                    // the direct measure of whether the GPU can take frames:
+                    // when it blocks, the GPU is contended and the next
+                    // present will be late no matter what we do.
+                    m_phaseWaitMeanMs.store(
+                        m_phaseWaitMeanMs.load(std::memory_order_relaxed) * 0.85 +
+                            m_phaseWaitMs.load(std::memory_order_relaxed) * 0.15,
+                        std::memory_order_relaxed);
                 }
                 // gap(n) == targetInterval + work(n): any frame whose WORK
                 // exceeds a small budget shows up as a late gap.
@@ -2106,6 +2116,16 @@ void Engine::PaceLoop(
                          m_speed.load(std::memory_order_relaxed),
                          m_displayHzCached.load(std::memory_order_acquire),
                          userCap);
+        // GPU-pressure pacing was implemented and then REVERTED (measured
+        // 2026-11). The signal works — pressureWaitMeanMs reached 2.92 ms
+        // during real app-launch contention, and stayed 0.00 ms at idle, so it
+        // is a genuine contention measure. But applying it as a present-rate
+        // divisor made effective fps go UP at the moment pressure tripled, on a
+        // 4K60 source that was already dropping frames (schedDrops climbing
+        // 83 -> 694). It is therefore not shipped: a mitigation that cannot be
+        // shown to help is worse than no mitigation.
+        // The measurement is retained in telemetry (pressureWaitMeanMs) because
+        // it is what any future contention fix must be evaluated against.
     } else {
         targetIntervalMs =
             RenderIntervalMs(m_config.maxFps, m_cachedDecoderFps);

@@ -192,7 +192,16 @@ private:
     std::atomic<double> m_phaseBeginMs{0.0};   // wake -> BeginFrame returned
     std::atomic<double> m_phaseDrawMs{0.0};    // draw + RenderFrame + Present
     std::atomic<double> m_phaseWorkMs{0.0};    // whole frame work
-    std::atomic<double> m_phaseWaitMs{0.0};    // frame-latency waitable block
+    std::atomic<double> m_phaseWaitMs{0.0};    // frame-latency waitable block
+    // Rolling mean of the frame-latency waitable, used as the GPU-pressure
+    // signal. Steady state measures 0.00 ms.
+    std::atomic<double> m_phaseWaitMeanMs{0.0};
+    // Presentation-rate divisor under GPU pressure: 1 (normal), 2, 4.
+    std::atomic<uint32_t> m_pressureScale{1};
+    // Hysteresis thresholds in ms. Enter above 3 ms of blocked wait, recover
+    // below 1 ms, so a borderline value cannot oscillate the frame rate.
+    static constexpr double kGpuPressureEnterMs = 3.0;
+    static constexpr double kGpuPressureExitMs = 1.0;
     std::atomic<uint64_t> m_phaseFrameIndex{0};
     // Unique-video-present sampler (Phase 3): same folding for
     // effectiveVideoFps (excludes cadence re-presents).

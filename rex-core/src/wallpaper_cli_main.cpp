@@ -680,7 +680,7 @@ static void TelemetryThread(std::mutex& engineGuard,
                       "srcFps=%.1f convFps=%.1f schedDrops=%llu repeat=%llu queue=%llu effFps=%.1f dispHz=%d "
                       "| gapP50=%.2fms gapP95=%.2fms gapP99=%.2fms gapMax=%.2fms gapJit=%.2fms "
                       "| phBegin=%.2fms phDraw=%.2fms phWork=%.2fms phWait=%.2fms "
-                      "| dwell=%.0f/%.0f/%.0f/%.0f vblanks hwProfiles=%u\n",
+                      "| dwell=%.0f/%.0f/%.0f/%.0f vblanks hwProfiles=%u press=%u/%.2fms\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -705,7 +705,7 @@ static void TelemetryThread(std::mutex& engineGuard,
                        t.phaseBeginMeanMs, t.phaseDrawMeanMs,
                        t.phaseWorkLastMs, t.phaseWaitLastMs,
                        t.dwellP50, t.dwellP95, t.dwellP99, t.dwellVblanks,
-                       t.hwDecoderProfiles);
+                       t.hwDecoderProfiles, t.pressureScale, t.pressureWaitMeanMs);
         std::fclose(f);
     }
 }
