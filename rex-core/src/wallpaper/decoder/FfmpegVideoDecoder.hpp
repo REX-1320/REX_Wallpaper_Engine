@@ -243,6 +243,10 @@ private:
     std::atomic<uint64_t> m_sendEagainStalls{0};
     // Driver hardware-decoder capability, probed once at Open().
     uint32_t m_hwDecoderProfiles = 0;
+    // Consecutive DecodeFrame calls that produced nothing before any frame
+    // has ever been published. See DecodeFrame's zero-progress guard.
+    static constexpr uint32_t kZeroProgressReportAfter = 240;
+    uint32_t m_zeroProgressCalls = 0;
     // P1-8: written by the decode thread, read unlocked by diagnostics —
     // plain bools were a data race. Relaxed: flags only, no ordering.
     std::atomic<bool> m_hardware{false};

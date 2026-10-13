@@ -730,6 +730,50 @@ but the software fallback would have failed silently for AV1 content.
 
 ### P12 — Phase 6 capability probe (shipped, measured)
 
+### P14 - HIDDEN FAILURE FOUND: software AV1 decode yields zero frames
+
+Measured 2026-11 by forcing `hardwareAcceleration=false` on the Aari file:
+
+```
+decoder: codec=av1 profile=0 hwaccel=software pixelFormat=yuv420p
+opened 'Aari...mp4' 3840x2160 @24.00 fps (software decode)
+[av1] Failed to get pixel format.        (repeating)
+[av1] Your platform doesn't support hardware accelerated AV1 decoding.
+decFps=0.0  effFps=0.0     <-- ZERO frames decoded
+position=30.05s            <-- wall clock advances, nothing renders
+```
+
+The decoder **opens successfully** and reports `yuv420p`, but never emits a frame;
+`ctx->pix_fmt` stays `AV_PIX_FMT_NONE` (-1). Hardware AV1 decodes the same file
+fine, so this is invisible in normal use.
+
+**Why this matters:** the roadmap requires that "unsupported acceleration must not be
+confused with unsupported decoding" and that every supported file "plays correctly using
+the best available path or produces an explicit, actionable error". If hardware decode
+ever fails on a user's machine - older GPU, driver reset, transient `avcodec_open2`
+failure - the wallpaper would previously sit there rendering nothing, forever, with
+no error logged anywhere.
+
+**Fixed:** a zero-progress guard in `DecodeFrame`. After 240 consecutive calls with no
+frame ever published, REX logs:
+
+```
+no frame decoded after 240 attempts (codec=av1 hwaccel=software, pix_fmt=-1).
+This build cannot decode this stream in software - the wallpaper will not play.
+```
+
+Verified by re-running the forced-software soak: the error appears instead of a
+silent stall.
+
+**Deliberately not "fixed" further:** the underlying cause is that this FFmpeg build's
+AV1 decoder cannot determine a pixel format for this content (the file carries a Dolby
+Vision RPU). A plausible mitigation is forcing `libdav1d` (also present in the shipped
+binary) over the native AV1 decoder, but that has NOT been tested and would change
+decoder selection for all AV1 content. Recorded, not guessed at.
+
+---
+
+
 `ID3D11VideoDevice` was already obtained (`FfmpegVideoDecoder.cpp:87`) but never
 queried; hardware decode was selected by *attempting* `avcodec_open2` and reacting
 to failure. That produces no explanation for the user and no up-front report.

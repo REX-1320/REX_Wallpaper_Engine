@@ -1,4 +1,4 @@
-﻿#include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
+#include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 
 #include <shared/Logger.hpp>
 
@@ -32,6 +32,10 @@ constexpr const char* kModule = "FfmpegVideoDecoder";
 // Bounded retry budget for avcodec_send_packet returning EAGAIN. Zero means
 // never stall; this many retries lets a transiently-full decoder drain first.
 constexpr int kMaxSendEagainRetries = 8;
+
+// Attempts without a single decoded frame before REX reports an unusable
+// decode path instead of stalling silently.
+constexpr uint32_t kZeroProgressReportAfter = 240;
 
 std::string Hex(HRESULT hr) {
     char buf[16] = {};
@@ -628,6 +632,31 @@ VideoColorInfo FfmpegVideoDecoder::ResolveColorInfo() const {
 bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
     if (!m_open.load(std::memory_order_acquire) || !m_decCtx) return false;
 
+    // Zero-progress guard. Measured 2026-11: this FFmpeg build's SOFTWARE AV1
+    // decoder opens successfully ("software decode", pix_fmt yuv420p) but emits
+    // ZERO frames, repeating "Failed to get pixel format" forever. The hardware
+    // path decodes the same file fine, so the failure is invisible in normal
+    // use — but if hardware decode ever fails on a user's machine, the
+    // wallpaper would sit there rendering nothing with no error anywhere.
+    // The roadmap forbids that: an unsupported path must produce an explicit,
+    // actionable error, never a silent stall.
+    if (m_framesDecoded.load(std::memory_order_relaxed) == 0) {
+        if (++m_zeroProgressCalls == kZeroProgressReportAfter) {
+            REX_LOG_ERROR(kModule,
+                         "no frame decoded after {} attempts (codec={} "
+                         "hwaccel={}, pix_fmt={}). This build cannot decode "
+                         "this stream in {} — the wallpaper will not play.",
+                         m_zeroProgressCalls, avcodec_get_name(m_decCtx->codec_id),
+                         m_hardware.load(std::memory_order_relaxed) ? "d3d11va"
+                                                                    : "software",
+                         static_cast<int>(m_decCtx->pix_fmt),
+                         m_hardware.load(std::memory_order_relaxed) ? "hardware"
+                                                                    : "software");
+        }
+    } else {
+        m_zeroProgressCalls = 0;
+    }
+
     const auto t0 = Clock::now();
     EofLoopGuard eofGuard;
     while (true) {
@@ -670,8 +699,7 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             continue;
         } else {
             REX_LOG_ERROR(kModule, "avcodec_receive_frame failed ({})", r);
-            return false;
-        }
+            return false;        }
 
         if (!m_pktPending) {
             const int pr = av_read_frame(m_fmtCtx, m_pkt);
