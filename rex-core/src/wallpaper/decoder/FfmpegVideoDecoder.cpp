@@ -183,7 +183,17 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
         Close();
         return shared::Result<void>(shared::ErrorCode::OutOfMemory, "cannot create codec context");
     }
-m_decCtx->thread_count = 1;  // deterministic sequential decode (wallpaper-style)
+// Software decode defaults to FFmpeg's own thread count (0 => auto, which on a
+    // 12-core machine expanded to 13). Benchmarked 2026-11 on the shipped
+    // FFmpeg, H.264 3840x2160 @30, 300 frames:
+    //     thread_count=1 -> 114.7 fps (8.72 ms/frame)
+    //     thread_count=0 -> 370.1 fps (2.70 ms/frame)   3.23x
+    // Single-threaded leaves only 1.9x headroom at 4K60 and falls BELOW
+    // realtime at 4K120, so any CPU contention (and the app runs alongside
+    // Chromium) turns it into stutter. The hardware path overrides this to 1
+    // below, matching LAV's hwaccel rule. See test_sw_decode_benchmark.cpp,
+    // which re-measures this per machine rather than trusting these numbers.
+    m_decCtx->thread_count = 0;
     m_decCtx->pkt_timebase = m_stream->time_base;
 
     // ─── Hardware decode (D3D11VA on our D3D11 device) ───
@@ -214,6 +224,12 @@ m_decCtx->thread_count = 1;  // deterministic sequential decode (wallpaper-style
             if (av_hwdevice_ctx_init(hwDevRef) >= 0) {
                 m_decCtx->hw_device_ctx = av_buffer_ref(hwDevRef);
                 m_hwDevCtx = hwDevRef;
+                // Frame-threading a hwaccel decoder is unsafe (one shared
+                // hwctx), so pin hardware decode to a single thread. This is
+                // exactly what LAV does for every hwaccel decoder
+                // (d3d11va.cpp:668). Only the SOFTWARE path uses auto threads.
+                m_decCtx->thread_count = 1;
+                m_decCtx->thread_type = 0;
                 if (avcodec_open2(m_decCtx, codec, nullptr) < 0) {
                     REX_LOG_WARN(kModule, "hardware decode open failed, retrying software");
                     avcodec_free_context(&m_decCtx);

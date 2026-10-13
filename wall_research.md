@@ -693,6 +693,41 @@ What *is* established, and stands independent of this gap:
 * the surface is `Hardware Composed: Independent Flip` (so §5.3 was wrong);
 * `AllowsTearing=0` is a missing swap-chain flag, not a driver limitation.
 
+
+### P13 - Software-decode threading: benchmarked, then changed (Phase 5)
+
+The roadmap deferred this with *"I would defer the software-decoder thread-count
+change until it has its own benchmark."* That benchmark now exists
+(`test_sw_decode_benchmark.cpp`) and re-measures per machine rather than
+trusting baked-in numbers.
+
+Measured 2026-11, shipped FFmpeg, H.264 3840x2160 @30, 300 frames:
+
+| setting | throughput | per frame |
+|---|---|---|
+| `thread_count = 1` (previous REX behaviour) | **114.7 fps** | 8.72 ms |
+| `thread_count = 0` (auto; expanded to **13** threads) | **370.1 fps** | 2.70 ms |
+| speedup | **3.23x** | |
+
+Why the margin is the point, not just the ratio: single-threaded leaves only
+**1.9x headroom at 4K60** and drops **below realtime at 4K120**. The app runs
+alongside Chromium, so CPU contention is normal, not exceptional - at 1.9x
+headroom that turns into stutter. `thread_count = 0` is now used for the
+**software** path; the **hardware** path stays pinned to 1 with `thread_type = 0`,
+matching LAV's hwaccel rule (frame-threading a hwaccel decoder with one shared
+hwctx is unsafe).
+
+Verified after the change: Aari AV1 still selects `hwaccel=d3d11va`
+(`hardware decoder profiles reported by driver: 24`), 40 s soak clean, 640/640
+ctest.
+
+**Incidental finding:** software decode of AV1-in-MP4 fails with
+*"Failed to get pixel format"* unless `ctx->pix_fmt` is set explicitly -
+`codecpar->format` is unset for this container. The hardware path is unaffected,
+but the software fallback would have failed silently for AV1 content.
+
+---
+
 ### P12 — Phase 6 capability probe (shipped, measured)
 
 `ID3D11VideoDevice` was already obtained (`FfmpegVideoDecoder.cpp:87`) but never
