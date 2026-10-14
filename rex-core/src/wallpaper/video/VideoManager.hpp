@@ -73,6 +73,9 @@ public:
     void SetLoop(bool loop);
     void SetSpeed(float speed);
     void SetVolume(float volume);
+    /// Request an audio output layout. The endpoint may negotiate downward;
+    /// AudioPlayer reports the effective layout via its fallback flag.
+    void SetAudioOutputMode(AudioOutputMode mode);
     void SetMute(bool mute);
     shared::Result<void> Seek(double seconds);
 

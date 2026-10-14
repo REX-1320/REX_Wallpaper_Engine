@@ -1036,7 +1036,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
 
         if (cmd == "SET_FILL_MODE" || cmd == "SET_VOLUME" || cmd == "SET_SPEED" ||
             cmd == "SET_LOOP" || cmd == "SET_MUTE" || cmd == "SET_BRIGHTNESS" || cmd == "SET_CONTRAST" ||
-            cmd == "SET_SATURATION") {
+            cmd == "SET_SATURATION" || cmd == "SET_AUDIO_MODE") {
             if (!engine) {
                 WriteResponse(id, false, "runtime not initialized");
                 continue;
@@ -1064,9 +1064,15 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             } else if (cmd == "SET_CONTRAST") {
                 property = "contrast";
                 value = std::to_string(params["value"].AsFloat(0.0f));
-            } else {
+            } else if (cmd == "SET_SATURATION") {
                 property = "saturation";
                 value = std::to_string(params["value"].AsFloat(0.0f));
+            } else {
+                // SET_AUDIO_MODE: string param, NOT numeric. Accepts
+                // "auto"|"mono"|"stereo"|"quad"|"surround51"; Engine rejects
+                // anything else loudly rather than silently defaulting.
+                property = "audioMode";
+                value = params["value"].AsString();
             }
 
             auto result = engine->SetProperty(property, value);

@@ -6,6 +6,7 @@
 #include "wallpaper/engine/PowerPolicy.hpp"
 #include "wallpaper/engine/PlaybackPolicy.hpp"
 #include "wallpaper/engine/ResourcePolicy.hpp"
+#include "wallpaper/audio/AudioPlayer.hpp"
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "platform/windows/MonitorEdid.hpp"
 #include <shared/PreciseSleep.hpp>
@@ -998,7 +999,10 @@ shared::Result<void> Engine::SetProperty(const std::string& property, const std:
         rendererType = std::string(m_adapter->GetType());
     }
 
-    if (!supported) {
+    // Audio layout is a playback property, not a renderer one — the adapter
+    // gate only covers draw-side properties.
+    const bool isAudioMode = (property == "audioMode");
+    if (!supported && !isAudioMode) {
         return shared::Result<void>(shared::ErrorCode::UnsupportedFormat,
             "Property '" + property + "' is not supported by the " + rendererType + " renderer");
     }
@@ -1013,6 +1017,27 @@ shared::Result<void> Engine::SetProperty(const std::string& property, const std:
     }
     if (property == "volume") {
         return SetVolume(static_cast<float>(std::atof(value.c_str())));
+    }
+    if (property == "audioMode") {
+        // Native negotiation already exists in AudioPlayer (ladder fallback +
+        // user-notification flag). This exposes it through the protocol so the
+        // UI can offer mono/stereo/quad/5.1 instead of leaving the endpoint on
+        // whatever Auto happened to pick.
+        auto mode = ParseAudioOutputMode(value);
+        if (!mode) {
+            return shared::Result<void>(shared::ErrorCode::InvalidArgument,
+                "Unknown audio mode: " + value +
+                " (expected auto|mono|stereo|quad|surround51)");
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_currentScene.audioMode = value;
+        }
+        if (m_videoManager) {
+            m_videoManager->SetAudioOutputMode(*mode);
+        }
+        REX_LOG_INFO("Engine", "Audio output mode set to {}", value);
+        return shared::Result<void>();
     }
     if (property == "mute") {
         return SetMute(value == "true" || value == "1");

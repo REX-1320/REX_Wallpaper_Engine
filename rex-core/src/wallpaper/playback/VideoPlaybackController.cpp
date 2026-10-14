@@ -235,6 +235,15 @@ void VideoPlaybackController::SetVolume(float volume) {
     }
 }
 
+void VideoPlaybackController::SetAudioOutputMode(AudioOutputMode mode) {
+    std::lock_guard lock(m_decodeMutex);
+    if (m_audio) {
+        // Takes effect on the next endpoint (re)open; AudioPlayer keeps the
+        // request and renegotiates rather than tearing down a playing stream.
+        m_audio->SetOutputMode(mode);
+    }
+}
+
 void VideoPlaybackController::SetMute(bool mute) {
     std::lock_guard lock(m_decodeMutex);
     if (m_audio) {

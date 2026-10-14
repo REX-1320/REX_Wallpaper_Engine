@@ -68,6 +68,11 @@ struct SceneInfo {
     float   contrast   = 1.0f;
     float   saturation = 1.0f;
     FillMode fillMode = FillMode::Fill;
+    // Requested audio output layout: "auto" (match source, capped by the
+    // endpoint), "mono", "stereo", "quad", "surround51". The endpoint may
+    // negotiate downward; the effective layout is reported back as the
+    // user-notification flag on AudioPlayer.
+    std::string audioMode = "auto";
 };
 
 // ─── MonitorInfo ───────────────────────────────────────────────────────────

@@ -335,6 +335,22 @@ const char* AudioModeName(AudioOutputMode mode) {
     return "stereo";
 }
 
+std::optional<AudioOutputMode> ParseAudioOutputMode(std::string_view value) {
+    std::string lower;
+    lower.reserve(value.size());
+    for (char c : value) lower.push_back(static_cast<char>(::tolower(c)));
+    if (lower == "auto" || lower == "default") return AudioOutputMode::Auto;
+    if (lower == "mono") return AudioOutputMode::Mono;
+    if (lower == "stereo") return AudioOutputMode::Stereo;
+    if (lower == "quad") return AudioOutputMode::Quad;
+    // Accept both the protocol spelling and the display spelling.
+    if (lower == "surround51" || lower == "5.1" || lower == "5_1" ||
+        lower == "surround5.1") {
+        return AudioOutputMode::Surround51;
+    }
+    return std::nullopt;
+}
+
 // The layouts we can request, widest first. Negotiation walks this ladder
 // down until it finds one the endpoint can actually render.
 static constexpr int kChannelLadder[] = {6, 4, 2, 1};

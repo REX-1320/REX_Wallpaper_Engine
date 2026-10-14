@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -42,6 +43,10 @@ enum class AudioOutputMode {
 
 /// Channel count for a mode (0 for Auto, which resolves per endpoint).
 int AudioModeChannels(AudioOutputMode mode);
+/// Parse "auto"|"mono"|"stereo"|"quad"|"surround51" (case-insensitive).
+/// Returns nullopt for anything else so callers can reject loudly rather
+/// than silently falling back to a mode the user did not pick.
+std::optional<AudioOutputMode> ParseAudioOutputMode(std::string_view value);
 /// Inverse of AudioModeChannels; unknown counts resolve to Stereo.
 AudioOutputMode AudioChannelsToMode(int channels);
 /// Human-readable name, for logs and the UI.

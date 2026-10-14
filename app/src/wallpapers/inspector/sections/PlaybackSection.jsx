@@ -5,6 +5,7 @@ import PropertyToggle from '@/components/properties/PropertyToggle'
 import PropertySlider from '@/components/properties/PropertySlider'
 import PropertyTimeline from '@/components/properties/PropertyTimeline'
 import PropertyButton from '@/components/properties/PropertyButton'
+import PropertyDropdown from '@/components/properties/PropertyDropdown'
 import { parseDuration } from '../../registry'
 import { updateWallpaperProperty } from '../../store'
 
@@ -41,6 +42,18 @@ export default function PlaybackSection({ wallpaper }) {
         onChange={set('resumePrevious')}
       />
       <PropertySlider label="Volume" value={playback.volume} onChange={set('volume')} min={0} max={100} suffix="%" />
+      <PropertyDropdown
+        label="Output"
+        value={playback.audioMode ?? 'auto'}
+        onChange={set('audioMode')}
+        options={[
+          { value: 'auto', label: 'Auto' },
+          { value: 'mono', label: 'Mono' },
+          { value: 'stereo', label: 'Stereo' },
+          { value: 'quad', label: 'Quad' },
+          { value: 'surround51', label: '5.1' },
+        ]}
+      />
       <PropertySlider
         label="Playback Speed"
         value={playback.speed}

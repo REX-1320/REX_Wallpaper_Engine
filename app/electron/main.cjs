@@ -156,7 +156,7 @@ async function getCapabilities() {
 
 async function sendIfSupported(cmd, params, applied, skipped) {
   const caps = await getCapabilities()
-  const property = { SET_FILL_MODE: 'fillMode', SET_VOLUME: 'volume', SET_SPEED: 'speed', SET_LOOP: 'loop', SET_MUTE: 'mute' }[cmd]
+  const property = { SET_FILL_MODE: 'fillMode', SET_VOLUME: 'volume', SET_SPEED: 'speed', SET_LOOP: 'loop', SET_MUTE: 'mute', SET_AUDIO_MODE: 'audioMode' }[cmd]
   if (!property || !caps.properties.includes(property)) {
     skipped.push(cmd)
     return
@@ -369,8 +369,8 @@ app.whenReady().then(() => {
     }
   })
 
-  ipcMain.handle('wallpaper:video', async (event, { path: filePath, mode, fps, loop, muted, volume, speed } = {}) => {
-    logLine('wallpaper:video', JSON.stringify({ path: filePath, mode, fps, loop, muted, volume, speed }))
+  ipcMain.handle('wallpaper:video', async (event, { path: filePath, mode, fps, loop, muted, volume, speed, audioMode } = {}) => {
+    logLine('wallpaper:video', JSON.stringify({ path: filePath, mode, fps, loop, muted, volume, speed, audioMode }))
 
     if (typeof filePath !== 'string' || !filePath) {
       lastApplied = null
@@ -400,7 +400,7 @@ app.whenReady().then(() => {
       await runtime.send('PLAY', {})
       lastApplied = {
         kind: 'video',
-        params: { path: filePath, mode, loop, muted, volume, speed, fps },
+        params: { path: filePath, mode, loop, muted, volume, speed, fps, audioMode },
       }
       startup.saveLastApplied(app.getPath('userData'), lastApplied)
       if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
@@ -425,6 +425,7 @@ app.whenReady().then(() => {
     if (speed != null) await sendIfSupported('SET_SPEED', { value: speed }, applied, skipped)
     if (volume != null) await sendIfSupported('SET_VOLUME', { value: volume }, applied, skipped)
     if (muted != null) await sendIfSupported('SET_MUTE', { value: !!muted }, applied, skipped)
+    if (audioMode != null) await sendIfSupported('SET_AUDIO_MODE', { value: audioMode }, applied, skipped)
     return { ok: true, applied, skipped }
   })
 

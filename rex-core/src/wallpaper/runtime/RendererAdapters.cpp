@@ -78,6 +78,7 @@ public:
         m_supported.insert("brightness");
         m_supported.insert("contrast");
         m_supported.insert("saturation");
+        m_supported.insert("audioMode");
     }
 };
 

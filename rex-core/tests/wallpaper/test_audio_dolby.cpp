@@ -346,6 +346,30 @@ TEST(AudioModeTest, ModeChannelMapping) {
     EXPECT_EQ(AudioChannelsToMode(1), AudioOutputMode::Mono);
 }
 
+// The protocol/UI spelling must parse, and anything unknown must be REJECTED
+// rather than silently falling back to a mode the user did not pick (the
+// roadmap forbids unsupported paths failing quietly).
+TEST(AudioModeTest, ParseAudioOutputModeAcceptsProtocolSpellings) {
+    EXPECT_EQ(ParseAudioOutputMode("auto"), AudioOutputMode::Auto);
+    EXPECT_EQ(ParseAudioOutputMode("default"), AudioOutputMode::Auto);
+    EXPECT_EQ(ParseAudioOutputMode("mono"), AudioOutputMode::Mono);
+    EXPECT_EQ(ParseAudioOutputMode("stereo"), AudioOutputMode::Stereo);
+    EXPECT_EQ(ParseAudioOutputMode("quad"), AudioOutputMode::Quad);
+    EXPECT_EQ(ParseAudioOutputMode("surround51"), AudioOutputMode::Surround51);
+    // Display spelling and case-insensitivity.
+    EXPECT_EQ(ParseAudioOutputMode("5.1"), AudioOutputMode::Surround51);
+    EXPECT_EQ(ParseAudioOutputMode("SURROUND51"), AudioOutputMode::Surround51);
+    EXPECT_EQ(ParseAudioOutputMode("Stereo"), AudioOutputMode::Stereo);
+}
+
+TEST(AudioModeTest, ParseAudioOutputModeRejectsUnknown) {
+    EXPECT_FALSE(ParseAudioOutputMode("").has_value());
+    EXPECT_FALSE(ParseAudioOutputMode("7.1").has_value());
+    EXPECT_FALSE(ParseAudioOutputMode("surround").has_value());
+    EXPECT_FALSE(ParseAudioOutputMode("2").has_value());
+    EXPECT_FALSE(ParseAudioOutputMode("bogus").has_value());
+}
+
 TEST(AudioModeTest, NeverExceedsEndpointMixFormat) {
     // The defect this guards: asking a stereo endpoint for 6 channels made
     // Initialize succeed while the engine period stayed stereo, and the

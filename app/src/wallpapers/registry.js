@@ -204,6 +204,7 @@ const DEFAULT_PLAYBACK = {
   mute: false,
   volume: 100,
   speed: 1,
+  audioMode: 'auto',
   startPosition: 0,
   randomStart: false,
   resumePrevious: true,

@@ -102,6 +102,9 @@ public:
     void SetLoop(bool loop);
     void SetSpeed(float speed);
     void SetVolume(float volume);
+    /// Request an audio output layout (auto/mono/stereo/quad/5.1). The
+    /// endpoint negotiates downward when it cannot honour the request.
+    void SetAudioOutputMode(AudioOutputMode mode);
     void SetMute(bool mute);
     /// Mute state snapshot (P1-8: under m_decodeMutex like all member
     /// access). Proves the single-audio-owner policy per monitor video.

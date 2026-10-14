@@ -224,6 +224,13 @@ void VideoManager::SetVolume(float volume) {
     if (m_controller) m_controller->SetVolume(volume);
 }
 
+void VideoManager::SetAudioOutputMode(AudioOutputMode mode) {
+    if (m_controller) m_controller->SetAudioOutputMode(mode);
+    for (auto& entry : m_monitorEntries) {
+        if (entry.monitorController) entry.monitorController->SetAudioOutputMode(mode);
+    }
+}
+
 void VideoManager::SetMute(bool mute) {
     if (m_controller) m_controller->SetMute(mute);
 }
