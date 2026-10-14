@@ -1,7 +1,7 @@
 # REX — Everything
 
 > One-file reference: what REX is, what is in the repo, **what is already DONE**, what is WIP, and where the docs live.
-> Last updated: **2026-10-14** · test suite: **643/643 ctest green**
+> Last updated: **2026-10-14** · test suite: **645/645 ctest green**
 > Detailed per-feature status: [`#project_status.md`](#project_status.md) · Remaining work: [`TODO.md`](TODO.md)
 
 ---
@@ -205,6 +205,7 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
   - **(3) One 384 ms CPU stall** (miles 120 fps) → 401 ms DisplayLatency. Single sighting, 0/9 recurrence; parked as a one-off OS/driver event.
   - **Falsified and retired (do not re-investigate):** 7/7/6 vblank cadence retiming — Aari at 120 Hz has exactly 5.0 vblanks/frame yet still measures AE p95 32.5, so cadence ratio is not the cause; AV1-inherent (30 fps H.264/HEVC judder equally); keyframe cost (keyframes <1 ms); per-region refresh differences (architecturally impossible — single fullscreen quad at `D3D12Renderer.cpp:1272`, video/static mutually exclusive at `:1194-1208`; the multi-layer compositor and per-layer scheduler are compiled but never instantiated).
   - Also shipped: `dropRate` (10 s window) + `dropPeak` (largest burst) telemetry, validated on a real 13-drop burst the 10 s average had smoothed to `0.0/s` (`6835c0e`); `ColorPipeline` test suite (colour-description consistency + P010-for-HDR pool rule, `6682a31`). **643/643 ctest green.**
+- **Output channel modes shipped end-to-end (2026-10-14, `8e13cd9`):** the native `AudioPlayer` negotiation (channel ladder, `GetMixFormat` probe, fallback flag) existed but nothing could reach it. Added `ParseAudioOutputMode` (accepts `auto|mono|stereo|quad|surround51` and `5.1`, case-insensitive; **rejects unknown values with an explicit error rather than defaulting silently** — the roadmap forbids unsupported paths failing quietly), routed it through `Engine::SetProperty("audioMode")` → `VideoManager` (primary + every per-monitor controller) → `VideoPlaybackController` → `AudioPlayer::SetOutputMode`, added `SceneInfo::audioMode`, the `SET_AUDIO_MODE` protocol command (string param), Electron capability mapping, `desktop.js` caps/opts, a `DEFAULT_PLAYBACK.audioMode`, and an inspector **Output** dropdown. Verified live over the IPC wire: `quad`/`surround51`/`mono` accepted, `7.1` and `""` rejected with `Unknown audio mode: … (expected auto|mono|stereo|quad|surround51)`. 4 new tests; **645/645 ctest**, oxlint 0 errors, tsc clean, vite build 1.11 s.
 - **Image-cover fix, pending live re-test (2026-10-09):** image LOAD skipped UnloadScene unless Running/Paused, so after a stall (Error) the video backend survived and recovery reloaded it over the new image (~1s later, user-verified). Fix: unconditional UnloadScene on the image path + disarm recovery/backoff inside UnloadScene (idempotent, race-safe). Re-test needed: video to image, 10s watch.
 
 - **TODO titles normalized (2026-10-08):** all 53 checkbox items lacking a bold title head (roadmap/feature sections + one done item) now start with a concise **Title**, matching the house style of the bug-backlog entries
