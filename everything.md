@@ -1,7 +1,7 @@
 # REX — Everything
 
 > One-file reference: what REX is, what is in the repo, **what is already DONE**, what is WIP, and where the docs live.
-> Last updated: **2026-10-15** · test suite: **656/656 ctest green**
+> Last updated: **2026-10-15** · test suite: **689/689 ctest green** · stage research: **`research.md`** (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision — four read-only tracks with DONE/FOUNDATION/GAP verdicts, file:line evidence, live-pass checklists)
 > Detailed per-feature status: [`#project_status.md`](#project_status.md) · Remaining work: [`TODO.md`](TODO.md)
 
 ---
