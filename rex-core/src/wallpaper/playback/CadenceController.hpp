@@ -54,10 +54,55 @@ public:
     struct DecodeAheadPolicy {
         double lowWaterMs  = 100.0;
         double highWaterMs = 200.0;
-        double maxBurst    = 2.0;   // decode-ahead ceiling, 2x source rate
+        // Controlled A/B (2026-10-15, 4 runs/arm, drops+repeats as deltas over
+        // a 15 s window, system load held under 20%):
+        //   Aari  24fps  OFF AE_p95 34.04 / drops 0.1/s / effFps 23.4 / under 3-8
+        //                  ON  AE_p95  3.83 / drops 0.0/s / effFps 24.0 / under 0
+        //   obanai 60fps OFF AE_p95  2.74 / drops 0.1/s / effFps 59.1 / under 24-30
+        //                  ON  AE_p95  0.61 / drops 0.9/s / effFps 60.0 / under 0
+        // Timing gains are real and are NOT bought with dropped frames on Aari.
+        //
+        // HELD OFF DESPITE THAT, because the reserve triggers a USER-VISIBLE
+        // defect the timing metrics cannot see: with future frames buffered,
+        // FrameScheduler::Tick selects the NEWEST due frame (FrameScheduler.cpp
+        // :51) and its catch-up fallback returns the newest published frame
+        // regardless of PTS (:64-77), so displayed CONTENT advances in jumps
+        // while the playhead advances 1x — the wallpaper reads as playing at
+        // ~2x. Position still reports 1.000x and effFps still reports the
+        // source rate, so no existing telemetry detects it.
+        //
+        // Correct fix: make the scheduler consume the frame closest to the
+        // playhead (oldest due) and stop the catch-up fallback from firing
+        // merely because the ring holds future frames. Do not re-enable the
+        // burst before that lands.
+        double maxBurst    = 1.0;   // 1.0 = burst held off (see above)
     };
 
-    /// Interval between decodes, in ms, given the current reserve depth.
+    /// The reserve is capped by the shared pool: ~7 usable frames, so the
+    /// achievable duration SHRINKS as the source rate rises (291 ms at 24 fps,
+    /// 117 ms at 60 fps, 58 ms at 120 fps). A fixed 100 ms low-water mark is
+    /// therefore unreachable at >=60 fps, which made the decoder burst to the
+    /// pool cap, park, and burst again every cycle - a measured throughput
+    /// regression (schedDrops 204, effFps 52.5 on 60 fps content).
+    ///
+    /// Scale the marks to what is actually reachable, leaving headroom above
+    /// the low-water so a refill does not immediately hit the pool cap.
+    static constexpr int kUsableReserveSlots = 7;   // 8-slot pool, one in flight
+
+    static DecodeAheadPolicy PolicyFor(double sourceFps,
+                                      double slotCapSlots = kUsableReserveSlots) {
+        DecodeAheadPolicy p;
+        const double capMs = ReserveMs(static_cast<int>(slotCapSlots), sourceFps);
+        if (capMs <= 0.0) return p;   // unknown rate: keep the nominal marks
+        // Aim at 60% of the reachable ceiling, and never exceed the nominal
+        // 100 ms low-water so low-rate content is unaffected.
+        p.lowWaterMs  = std::min(100.0, capMs * 0.35);
+        p.highWaterMs = std::min(200.0, capMs * 0.60);
+        if (p.highWaterMs <= p.lowWaterMs) p.highWaterMs = p.lowWaterMs * 1.5;
+        return p;
+    }
+
+    /// Interval between decodes, in milliseconds, given the current reserve depth.
     /// Below the low-water mark the decoder bursts; otherwise it paces at the
     /// source rate. Pure so it is unit-testable without a device.
     static double DecodeIntervalMs(double sourceIntervalMs, double reserveMs,

@@ -188,6 +188,12 @@ struct EngineTelemetry {
     // these MUST split between 6 and 7 — that split IS the judder, measured at
     // the panel rather than inferred from submit timing.
     double   dwellVblanks = 0.0;
+    // Phase B2 diagnostic: DXGI vblank lattice pitch measured from
+    // (dSyncQPCTime / dSyncRefreshCount), plus the last SyncRefreshCount.
+    // DIAGNOSTIC ONLY - the pacing servo steers on RATE, not phase.
+    double   syncPeriodMs = 0.0;
+    uint32_t syncRefreshCount = 0;
+    bool     syncPeriodValid = false;
     double   dwellP50     = 0.0;
     double   dwellP95     = 0.0;
     double   dwellP99     = 0.0;
@@ -214,7 +220,8 @@ struct EngineTelemetry {
 
     // ─── Wall-cadence presentation (Phase 3) ──────────────────────────
     double   effectiveVideoFps = 0.0;  // unique video frames presented/s
-                                       // (excludes cadence re-presents)    double   playbackSpeed  = 1.0;  // content rate: decoderFps / sourceFps
+                                       // (excludes cadence re-presents)
+    double   playbackSpeed  = 1.0;  // content rate: decoderFps / sourceFps
                                     // (1.0 = realtime; < 1 = decode-bound)
     int      videoWidth      = 0;
     int      videoHeight     = 0;

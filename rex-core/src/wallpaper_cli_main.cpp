@@ -681,7 +681,9 @@ static void TelemetryThread(std::mutex& engineGuard,
                       "| gapP50=%.2fms gapP95=%.2fms gapP99=%.2fms gapMax=%.2fms gapJit=%.2fms "
                       "| phBegin=%.2fms phDraw=%.2fms phWork=%.2fms phWait=%.2fms "
                       "| dwell=%.0f/%.0f/%.0f/%.0f vblanks hwProfiles=%u press=%u/%.2fms"
-                      " | reserve=%.0fms ahead=%.2fx under=%llu\n",
+                       " | reserve=%.0fms ahead=%.2fx under=%llu"
+                       " | servo=%d corr=%.3fms err=%.3fms int=%.3fms"
+                       " | lattice=%.3fms@%u%s\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -709,7 +711,12 @@ static void TelemetryThread(std::mutex& engineGuard,
                        t.dwellP50, t.dwellP95, t.dwellP99, t.dwellVblanks,
                        t.hwDecoderProfiles, t.pressureScale, t.pressureWaitMeanMs,
                        t.reserveMs, t.decodeAheadRate,
-                       static_cast<unsigned long long>(t.reserveUnderruns));
+                       static_cast<unsigned long long>(t.reserveUnderruns),
+                       t.pacingServoActive ? 1 : 0,
+                       t.pacingServoCorrMs, t.pacingServoErrorMs,
+                       t.pacingServoIntegralMs,
+                       t.syncPeriodMs, t.syncRefreshCount,
+                       t.syncPeriodValid ? "" : "(unavailable)");
         std::fclose(f);
     }
 }

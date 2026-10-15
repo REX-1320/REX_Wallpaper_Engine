@@ -225,6 +225,7 @@ bool SwapChain::SampleDisplayCadence(DisplayCadenceStats::Sample& out) {
             m_lastCompositionMode.store(
                 static_cast<int>(mst.CompositionMode), std::memory_order_relaxed);
             out.presentRefreshCount = m_cadenceLastDelta;
+            out.syncRefreshCount = mst.SyncRefreshCount;
             out.syncQpc = mst.SyncQPCTime.QuadPart;
             out.valid = true;
             m_cadence.Add(out);
@@ -259,6 +260,7 @@ bool SwapChain::SampleDisplayCadence(DisplayCadenceStats::Sample& out) {
         return false;
     }
     out.presentRefreshCount = m_cadenceLastDelta;
+    out.syncRefreshCount = st.SyncRefreshCount;
     out.syncQpc = st.SyncQPCTime.QuadPart;
     out.valid = true;
     m_cadence.Add(out);

@@ -4,6 +4,7 @@
 #include <shared/PreciseSleep.hpp>
 
 #include <chrono>
+#include <cstdlib>
 
 namespace rex::wallpaper {
 
@@ -47,6 +48,28 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     m_duration  = m_decoder->GetDuration();
     m_frameRate = m_decoder->GetFrameRate();
     m_frameIntervalMs = m_frameRate > 0.0 ? 1000.0 / m_frameRate : 33.333;
+    // Scale the reserve marks to what the 8-slot pool can actually hold at this
+    // source rate. A fixed 100 ms mark is unreachable at >=60 fps and made the
+    // decoder thrash burst->park->burst (measured: schedDrops 204, effFps 52.5).
+    m_decodeAheadPolicy = CadenceController::PolicyFor(m_frameRate);
+
+    // Feature flag / rollback switch. Decode-ahead is OFF by default: it
+    // measurably helps low-fps GPU-stalled content but a deep ring makes the
+    // scheduler count still-buffered frames as drops. Set REX_DECODE_AHEAD to
+    // an explicit burst multiplier (e.g. "2") to enable, "0"/unset to disable.
+    // Measured A/B belongs in wall_research.md; nothing should re-enable this
+    // without that comparison.
+    if (const char* flag = std::getenv("REX_DECODE_AHEAD")) {
+        const double burst = std::atof(flag);
+        if (burst > 1.0) {
+            m_decodeAheadPolicy.maxBurst = burst;
+            REX_LOG_INFO(kModule,
+                         "decode-ahead ENABLED (burst={:.1f}x, lowWater={:.0f}ms, "
+                         "highWater={:.0f}ms) via REX_DECODE_AHEAD",
+                         burst, m_decodeAheadPolicy.lowWaterMs,
+                         m_decodeAheadPolicy.highWaterMs);
+        }
+    }
     m_width  = m_decoder->GetWidth();
     m_height = m_decoder->GetHeight();
 

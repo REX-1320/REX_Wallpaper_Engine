@@ -107,6 +107,22 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
     m_config = config;
     m_sessionId = shared::UUID::Generate();
 
+    // Pacing servo rollback switch (Phase B2). Default on; REX_PACING_SERVO=0
+    // restores the previous open-loop grid exactly, which is the documented
+    // rollback for this phase.
+    wchar_t servoEnv[8] = {};
+    if (::GetEnvironmentVariableW(L"REX_PACING_SERVO", servoEnv,
+                                  static_cast<DWORD>(std::size(servoEnv))) > 0 &&
+        servoEnv[0] == L'0') {
+        m_pacingServoEnabled = false;
+        REX_LOG_INFO("Engine", "Pacing servo DISABLED (REX_PACING_SERVO=0)");
+    } else {
+        REX_LOG_INFO("Engine", "Pacing servo enabled");
+    }
+    m_pacingServo.Reset();
+    m_pacingPrevValid = false;
+    m_pacingServoActive.store(false, std::memory_order_relaxed);
+
     if (m_config.enableHardwareAcceleration) {
         REX_LOG_INFO("Engine", "Hardware acceleration enabled");
     } else {
@@ -275,6 +291,12 @@ shared::Result<void> Engine::ReinitializeRenderer() {
     // It must NOT be held across the caller: HandleDeviceLoss reloads the
     // scene afterwards and LoadScene/Play take m_mutex themselves.
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Device loss restarts the pacing grid; do not let the servo integrate
+    // across the discontinuity.
+    m_pacingServo.Reset();
+    m_pacingPrevValid = false;
+    m_pacingServoActive.store(false, std::memory_order_relaxed);
 
     // Destroy old renderer (and the video backend that borrowed its device)
     if (m_videoManager) {
@@ -585,6 +607,12 @@ shared::Result<void> Engine::UnloadScene() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     REX_LOG_INFO("Engine", "Unloading scene");
+
+    // The pacing grid is about to change discontinuously; carrying the servo
+    // across a scene change would feed it one bogus interval sample.
+    m_pacingServo.Reset();
+    m_pacingPrevValid = false;
+    m_pacingServoActive.store(false, std::memory_order_relaxed);
 
     m_scenesReleased.fetch_add(1, std::memory_order_relaxed);
 
@@ -1339,9 +1367,23 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.dwellP95     = cd.PercentileDwell(0.95);
         out.dwellP99     = cd.PercentileDwell(0.99);
         out.cadenceValid = cd.HasCadence();
+        // Phase B2 DIAGNOSTIC ONLY - not a control input. syncQpc is the DXGI
+        // presentation scheduler's own vblank lattice anchor; EstimatedPeriod
+        // is the measured lattice pitch from (dSyncQPCTime /
+        // dSyncRefreshCount). DWM is the wrong clock for this independent-flip
+        // surface (measured 138.6 Hz on a 160 Hz panel), so this is the only
+        // in-process non-DWM reference available. Publishing it is what finally
+        // lets startup phase be MEASURED rather than inferred.
+        out.syncPeriodMs   = cd.EstimatedPeriodMicros() / 1000.0;
+        out.syncRefreshCount = cd.LastSyncRefreshCount();
+        out.syncPeriodValid = cd.PeriodSamples() > 0;
         out.pressureScale = m_pressureScale.load(std::memory_order_relaxed);
         out.pressureWaitMeanMs = m_phaseWaitMeanMs.load(std::memory_order_relaxed);
     }
+    out.pacingServoCorrMs = m_pacingCorrMs.load(std::memory_order_relaxed);
+    out.pacingServoErrorMs = m_pacingErrorMs.load(std::memory_order_relaxed);
+    out.pacingServoIntegralMs = m_pacingIntegralMs.load(std::memory_order_relaxed);
+    out.pacingServoActive = m_pacingServoActive.load(std::memory_order_relaxed);
     // Unique-video-present sampler (Phase 3): same folding over
     // m_uniqueVideoFrames, so effectiveVideoFps excludes cadence
     // re-presents. Shares the present-rate window.
