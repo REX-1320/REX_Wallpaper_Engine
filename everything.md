@@ -258,7 +258,7 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 
 | Priority | Item | State |
 |---|---|---|
-| P0 | Scheduler live A/B on the 2x file | NEW arm passes on marvel (content 0.94–1.03, effFps 25.7, wrap survives); OLD arm pending |
+| P0 | Scheduler live A/B on the 2x file | ✅ CLOSED: NEW clean 60 s (content ≤1.05, wrap survives); OLD shows 1.20 + crashes at burst-2 |
 | P0 | Content-rate check (displayed-PTS vs wall) | ✅ DONE `86959f1`+`97ca4fa`: `content=` text + `contentRate` JSON, 12/12 tests, live-validated |
 | P0 | `decodeMsP50/P95/P99` into text telemetry | ✅ DONE `86959f1`: `decP50/decP95/decP99` in text line |
 | P0 | Source rate from measured timestamps | ✅ DONE `7250c9b`: marvel 60→25.69 fps (1222f/47.55s), 7 tests — the load-bearing 2x root cause |
