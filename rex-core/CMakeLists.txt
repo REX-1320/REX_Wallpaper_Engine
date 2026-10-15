@@ -386,6 +386,7 @@ if(BUILD_TESTING)
         tests/wallpaper/test_decoder_eof.cpp
         tests/wallpaper/test_audio_resample.cpp
         tests/wallpaper/test_color_pipeline.cpp
+        tests/wallpaper/test_color_range_probe.cpp
         tests/wallpaper/test_codec_matrix.cpp
         tests/wallpaper/test_sw_decode_benchmark.cpp
         tests/wallpaper/test_display_cadence.cpp
