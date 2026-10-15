@@ -1,11 +1,32 @@
 #include "wallpaper/playback/FrameScheduler.hpp"
 
+#include <shared/Logger.hpp>
+
+#include <cstdlib>
+#include <limits>
+
 namespace rex::wallpaper {
+
+namespace {
+constexpr const char* kModule = "FrameScheduler";
+// Diagnostics for the freeze/oscillation investigation (P0-1). Starve logs
+// are the interesting ones; push logs give the decode-PTS timeline.
+inline bool SchedDebug() {
+    static const bool v = std::getenv("REX_SCHED_DEBUG") != nullptr;
+    return v;
+}
+}  // namespace
 
 void FrameScheduler::Push(const VideoFrame& frame) {
     const uint64_t wc = m_writeCount.load(std::memory_order_relaxed);
     m_slots[wc % kNumSlots] = frame;
     m_writeCount.store(wc + 1, std::memory_order_release);
+    if (SchedDebug()) {
+        static uint64_t s_pushLog = 0;
+        if ((s_pushLog++ % 600) == 0) {
+            REX_LOG_INFO(kModule, "push wc={} pts={:.3f}", wc + 1, frame.pts);
+        }
+    }
 }
 
 const VideoFrame* FrameScheduler::Tick(double targetPts) {
@@ -56,9 +77,18 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
     uint64_t selected = 0;
     double selectedPts = 0.0;
     bool haveSelection = false;
+    uint64_t validCount = 0;
+    double minValid = std::numeric_limits<double>::infinity();
+    double maxValid = -std::numeric_limits<double>::infinity();
     for (uint64_t w = start; w <= wc; ++w) {
         const VideoFrame& f = m_slots[(w - 1) % kNumSlots];
-        if (!f.valid || f.pts > limit) {
+        if (!f.valid) {
+            continue;
+        }
+        ++validCount;
+        if (f.pts < minValid) minValid = f.pts;
+        if (f.pts > maxValid) maxValid = f.pts;
+        if (f.pts > limit) {
             continue;
         }
         if (!haveSelection || f.pts >= selectedPts) {
@@ -81,6 +111,20 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
         // VideoPlaybackController's IsBackwardJump -> Clear(), which re-
         // baselines the ring; starving here is the correct, safe outcome.
         m_starvedTicks.fetch_add(1, std::memory_order_relaxed);
+        if (SchedDebug()) {
+            static uint64_t s_starveLog = 0;
+            const uint64_t n = ++s_starveLog;
+            if (n <= 8 || (n % 512) == 0) {
+                REX_LOG_WARN(kModule,
+                             "starve#{} target={:.3f} limit={:.3f} wc={} lc={} "
+                             "pending={} valid={} ptsRange=[{:.3f}..{:.3f}] "
+                             "lastShown={:.3f}",
+                             n, targetPts, limit, wc, lc,
+                             static_cast<uint64_t>(wc - lc), validCount,
+                             validCount ? minValid : 0.0,
+                             validCount ? maxValid : 0.0, m_lastPresentedPts);
+            }
+        }
         return nullptr;
     }
     // Late-frame policy: several frames can already be overdue (decode fell
