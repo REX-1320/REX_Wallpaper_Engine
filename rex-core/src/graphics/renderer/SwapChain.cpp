@@ -169,8 +169,35 @@ HRESULT SwapChain::Present(UINT syncInterval, UINT flags) {
 bool SwapChain::SampleDisplayCadence(DisplayCadenceStats::Sample& out) {
     if (!m_swapChain) return false;
     // No frame spans 64+ refreshes; anything larger is a non-converged stat
-    // block, not a measurement (wall_research.md P11).
+    // block, not a measurement.
+    //
+    // This bound applies to the PER-FRAME DELTA, not to the raw counter:
+    // DXGI_FRAME_STATISTICS::PresentRefreshCount is a *running total* of
+    // v-blanks since the swap chain was created, so it exceeds 64 within
+    // 400 ms at 160 Hz. Gating the raw value (as this function previously did)
+    // closed the gate permanently on every machine, which is why the cadence
+    // sampler never produced a sample.
     constexpr UINT kMaxPlausibleRefreshes = 64;
+
+    // Convert a cumulative PresentRefreshCount into v-blanks since the last
+    // sample. Returns false until the baseline is established (or must be
+    // re-established after a DISJOINT event).
+    const auto toDelta = [this](UINT cumulative) -> bool {
+        if (!m_cadenceBaseValid) {
+            m_cadenceBasePresent = cumulative;
+            m_cadenceBaseValid = true;
+            return false;
+        }
+        if (cumulative < m_cadenceBasePresent) {
+            // Counter went backwards: treat as a discontinuity, re-baseline.
+            m_cadenceBasePresent = cumulative;
+            return false;
+        }
+        const UINT delta = cumulative - m_cadenceBasePresent;
+        m_cadenceBasePresent = cumulative;
+        m_cadenceLastDelta = delta;
+        return true;
+    };
 
     // Route 1: IDXGISwapChainMedia. Purpose-built for media apps, and it also
     // exposes CompositionMode (COMPOSED vs OVERLAY) and ApprovedPresentDuration,
@@ -191,13 +218,13 @@ bool SwapChain::SampleDisplayCadence(DisplayCadenceStats::Sample& out) {
                          static_cast<int>(mst.CompositionMode),
                          mst.ApprovedPresentDuration);
         }
-        if (SUCCEEDED(hr) && mst.PresentCount > 0 &&
-            mst.PresentCount == mst.SyncRefreshCount &&
-            mst.PresentRefreshCount > 0 &&
-            mst.PresentRefreshCount <= kMaxPlausibleRefreshes) {
+        if (SUCCEEDED(hr) && mst.PresentCount > 0 && mst.PresentRefreshCount > 0 &&
+            toDelta(mst.PresentRefreshCount) &&
+            m_cadenceLastDelta > 0 &&
+            m_cadenceLastDelta <= kMaxPlausibleRefreshes) {
             m_lastCompositionMode.store(
                 static_cast<int>(mst.CompositionMode), std::memory_order_relaxed);
-            out.presentRefreshCount = mst.PresentRefreshCount;
+            out.presentRefreshCount = m_cadenceLastDelta;
             out.syncQpc = mst.SyncQPCTime.QuadPart;
             out.valid = true;
             m_cadence.Add(out);
@@ -205,23 +232,36 @@ bool SwapChain::SampleDisplayCadence(DisplayCadenceStats::Sample& out) {
         }
     }
 
-    // Route 2: base IDXGISwapChain::GetFrameStatistics. Kept behind the same
-    // validity gate — measured on this swap chain it reports
-    // PresentRefreshCount = 2087421 with PresentCount = 2, i.e. the queue has
-    // not drained and the refresh counts are meaningless (wall_research.md
-    // P11). A nonsense metric is worse than an absent one, so reject it.
+    // Route 2: base IDXGISwapChain::GetFrameStatistics.
+    //
+    // PresentCount is images-reached-monitor; SyncRefreshCount and
+    // PresentRefreshCount are v-blank counters. They are different units and
+    // are NOT expected to be equal — requiring PresentCount ==
+    // SyncRefreshCount was a unit conflation that rejected every sample.
+    // Convergence is expressed by PresentRefreshCount == SyncRefreshCount (no
+    // v-blank elapsed since the last present/scheduler pair), which does not
+    // need to be true for a valid per-frame dwell reading.
     DXGI_FRAME_STATISTICS st{};
-    if (FAILED(m_swapChain->GetFrameStatistics(&st))) return false;
-    if (st.PresentCount == 0) return false;
-    if (st.PresentCount != st.SyncRefreshCount) return false;
-    if (st.PresentRefreshCount == 0 ||
-        st.PresentRefreshCount > kMaxPlausibleRefreshes) {
+    const HRESULT hr = m_swapChain->GetFrameStatistics(&st);
+    if (hr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT) {
+        // Documented as recoverable ("an event, for example a power cycle,
+        // interrupted the gathering of presentation statistics"). Re-baseline
+        // instead of abandoning the stream until the swap chain is recreated.
+        m_cadenceBaseValid = false;
         return false;
     }
-    out.presentRefreshCount = st.PresentRefreshCount;
+    if (FAILED(hr)) return false;
+    if (st.PresentCount == 0) return false;
+    if (st.PresentRefreshCount == 0) return false;
+    if (!toDelta(st.PresentRefreshCount)) return false;
+    if (m_cadenceLastDelta == 0 ||
+        m_cadenceLastDelta > kMaxPlausibleRefreshes) {
+        return false;
+    }
+    out.presentRefreshCount = m_cadenceLastDelta;
     out.syncQpc = st.SyncQPCTime.QuadPart;
     out.valid = true;
-m_cadence.Add(out);
+    m_cadence.Add(out);
     return true;
 }
 

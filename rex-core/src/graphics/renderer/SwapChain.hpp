@@ -131,6 +131,12 @@ private:
     DXGI_FORMAT m_format = DXGI_FORMAT_R8G8B8A8_UNORM;
     bool    m_isHdr = false;
     DisplayCadenceStats m_cadence{};
+    // DXGI reports PresentRefreshCount as a running total since swap-chain
+    // creation; these hold the baseline so SampleDisplayCadence can publish a
+    // true per-frame dwell delta (and re-baseline after a DISJOINT event).
+    UINT   m_cadenceBasePresent = 0;
+    UINT   m_cadenceLastDelta   = 0;
+    bool   m_cadenceBaseValid   = false;
     std::atomic<int> m_lastCompositionMode{-1};  // -1 unknown, 0 COMPOSED, 1 OVERLAY
     float   m_displayMaxNits = 0.0f;
     float   m_displayMinNits = 0.0f;
