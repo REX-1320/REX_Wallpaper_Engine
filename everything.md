@@ -1,7 +1,7 @@
 # REX — Everything
 
 > One-file reference: what REX is, what is in the repo, **what is already DONE**, what is WIP, and where the docs live.
-> Last updated: **2026-10-15** · test suite: **689/689 ctest green** · stage research: **`research.md`** (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision — four read-only tracks with DONE/FOUNDATION/GAP verdicts, file:line evidence, live-pass checklists)
+> Last updated: **2026-10-16** · test suite: **708/708 ctest green** · stage research: **`research.md`** (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision — four read-only tracks with DONE/FOUNDATION/GAP verdicts, file:line evidence, live-pass checklists)
 > Detailed per-feature status: [`#project_status.md`](#project_status.md) · Remaining work: [`TODO.md`](TODO.md)
 
 ---
@@ -220,6 +220,7 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
   - **Tooling note:** PresentMon 2.x `FrameTime` maps to **`MsBetweenAppStart`**, *not* `MsBetweenDisplayChange` (the widely-copied mapping is wrong and was retracted by Intel); `--v1_metrics` is **not** a workaround — in 2.6 it omits `FrameTime`/`AnimationError`/`CPUBusy` entirely.
  the native `AudioPlayer` negotiation (channel ladder, `GetMixFormat` probe, fallback flag) existed but nothing could reach it. Added `ParseAudioOutputMode` (accepts `auto|mono|stereo|quad|surround51` and `5.1`, case-insensitive; **rejects unknown values with an explicit error rather than defaulting silently** — the roadmap forbids unsupported paths failing quietly), routed it through `Engine::SetProperty("audioMode")` → `VideoManager` (primary + every per-monitor controller) → `VideoPlaybackController` → `AudioPlayer::SetOutputMode`, added `SceneInfo::audioMode`, the `SET_AUDIO_MODE` protocol command (string param), Electron capability mapping, `desktop.js` caps/opts, a `DEFAULT_PLAYBACK.audioMode`, and an inspector **Output** dropdown. Verified live over the IPC wire: `quad`/`surround51`/`mono` accepted, `7.1` and `""` rejected with `Unknown audio mode: … (expected auto|mono|stereo|quad|surround51)`. 4 new tests; **645/645 ctest**, oxlint 0 errors, tsc clean, vite build 1.11 s.
 - **Image-cover fix, pending live re-test (2026-10-09):** image LOAD skipped UnloadScene unless Running/Paused, so after a stall (Error) the video backend survived and recovery reloaded it over the new image (~1s later, user-verified). Fix: unconditional UnloadScene on the image path + disarm recovery/backoff inside UnloadScene (idempotent, race-safe). Re-test needed: video to image, 10s watch.
+- **marvel 2x root-caused + fixed: wrong source rate, not (only) the scheduler (2026-10-16):** `marvel-spiderman-miles-morales.1920x1080.mp4` declares `r_frame_rate=60/1` but carries **1222 video samples / 47.554 s = 25.69 fps** (mp4 stsz/mvhd parsed; audio 2048×1024/44100 s cross-confirms). Before: decode paced 2.3x too fast → ring full of future frames → 37 s permanent starve under the fixed scheduler (`effFps=0`, queue=8) / ~2.4x content under the old fallback. After `ResolveFrameRate()` (pure, prefers `nb_frames/duration`, 7 tests, WARN trail): 60 s of steady **25.7 fps at `content=0.94–1.03`**, queue 0–1, drops frozen at startup-only, loop wrap survives with a 1-sample dip. Supporting work: content-rate meter with max-watermark semantics (12/12 tests — first version summed signed deltas and read 0.01 on perfect 1x because pushes arrive in decode order with B-frame jitter), `decP50/decP95/decP99` in the text telemetry, opt-in `REX_SCHED_DEBUG` starve/push logging + decodeframe packet/frame counters (`pkgs/call=1.00 recv/call=1.00` proved the decoder never skips). New open item: behind-phase racing (`content=2.41x` at burst=2 — newest-due presents at decode speed when the ring is entirely overdue; unreachable at production burst-OFF + correct rate). **708/708 ctest.**
 
 - **TODO titles normalized (2026-10-08):** all 53 checkbox items lacking a bold title head (roadmap/feature sections + one done item) now start with a concise **Title**, matching the house style of the bug-backlog entries
 - **HPOWERNOTIFY handle bug found+fixed (2026-10-08):** UnregisterPowerSettingNotification takes the registration handle, not the window - the HWND misuse AVed in powrprof.dll at every shutdown/release and broke all 25 init-path tests plus runtime exit code. WER faulting-module pointed straight at it. Fixed with a stored HPOWERNOTIFY (+ unregister-before-destroy on the Reacquire path); suites back to 36/36 + 165 green
@@ -257,9 +258,11 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 
 | Priority | Item | State |
 |---|---|---|
-| P0 | Scheduler live A/B on the 2x file | Fix committed `e5bfdf0`, 689/689 — needs live proof |
-| P0 | Content-rate check (displayed-PTS vs wall) | Missing — the blind spot that hid the 2x bug |
-| P0 | `decodeMsP50/P95/P99` into text telemetry | Exists in JSON only — pure plumbing |
+| P0 | Scheduler live A/B on the 2x file | NEW arm passes on marvel (content 0.94–1.03, effFps 25.7, wrap survives); OLD arm pending |
+| P0 | Content-rate check (displayed-PTS vs wall) | ✅ DONE `86959f1`+`97ca4fa`: `content=` text + `contentRate` JSON, 12/12 tests, live-validated |
+| P0 | `decodeMsP50/P95/P99` into text telemetry | ✅ DONE `86959f1`: `decP50/decP95/decP99` in text line |
+| P0 | Source rate from measured timestamps | ✅ DONE `7250c9b`: marvel 60→25.69 fps (1222f/47.55s), 7 tests — the load-bearing 2x root cause |
+| P0 | Behind-phase racing (newest-due at decode speed) | NEW finding 2026-10-16: `content=2.41x` at burst=2 — needs playhead-paced consumption + backpressure |
 | P0 | Reserve-aware backpressure (retry) | Two attempts regressed — needs P0-3 numbers first |
 | P1 | WorkerW hide-on-UNLOAD | Open — shares the `Clear()` contract with the scheduler fix |
 | P1 | Supervisor + app-state/library wiring | Code exists — needs live crash/exit verification |
@@ -271,7 +274,7 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 | P3 | FPS counter, audio benchmark + sync, flake watch | Small, open |
 | P4 | Web/Scene/Shader/AV types, SDK, marketplace | Deferred per scope banner |
 
-Global rules: validate every metric before trusting it; load <20%, SDR-only, deltas not lifetimes, 5–10 runs; one change per commit, 689/689 gate; don't touch colour code, `app/src/widgets/`, or the 8-slot pool; feature-flag rollbacks.
+Global rules: validate every metric before trusting it; load <20%, SDR-only, deltas not lifetimes, 5–10 runs; one change per commit, 708/708 gate; don't touch colour code, `app/src/widgets/`, or the 8-slot pool; feature-flag rollbacks.
 
 ## In progress / WIP 🟡
 
