@@ -73,56 +73,61 @@ public:
         if (!s.valid) return;
         const size_t idx = m_index % kRingSize;
         m_dwell[idx].store(s.presentRefreshCount, std::memory_order_relaxed);
-        // Track the lattice anchor every valid sample, independent of whether
-        // a gap could be computed.
+
+        // Track the lattice anchor on every valid sample.
         m_lastSyncRefresh.store(s.syncRefreshCount, std::memory_order_relaxed);
         m_lastSyncQpc.store(s.syncQpc, std::memory_order_relaxed);
-        const bool havePrev = m_hasPrev.load(std::memory_order_relaxed);
-        const bool forward = s.syncQpc > m_prevQpc.load(std::memory_order_relaxed);
-        if (havePrev && forward) {
-            const auto deltaQpc = s.syncQpc - m_prevQpc.load(std::memory_order_relaxed);
-            const int64_t deltaK = static_cast<int64_t>(s.syncRefreshCount) -
-                                   static_cast<int64_t>(m_prevRefresh.load(std::memory_order_relaxed));
-            m_gapMicros[idx].store(static_cast<double>(deltaQpc), std::memory_order_relaxed);
-            m_valid[idx].store(true, std::memory_order_relaxed);
-            m_hasGap.store(true, std::memory_order_relaxed);
-            // Refresh-period estimate: only meaningful when the vblank counter
-            // advanced by a useful amount (a single vblank amplifies jitter).
-            if (deltaK >= kMinRefreshDelta && deltaQpc > 0) {
-                // Accumulate raw ticks and counts separately, then divide ONCE.
-                // Averaging per-sample ratios weights a 4-vblank sample the same
-                // as a 400-vblank one, which skews the estimate badly when the
-                // delta size varies (it does, at 60 fps on a 160 Hz panel).
-                m_periodQpcSum.store(
-                    m_periodQpcSum.load(std::memory_order_relaxed) + deltaQpc,
-                    std::memory_order_relaxed);
-                m_periodKSum.store(
-                    m_periodKSum.load(std::memory_order_relaxed) + deltaK,
-                    std::memory_order_relaxed);
-                m_periodCount.store(m_periodCount.load(std::memory_order_relaxed) + 1,
-                                    std::memory_order_relaxed);
+
+        // A gap needs the PREVIOUS sample as baseline, and that baseline must
+        // advance on every forward sample - otherwise it stays anchored at the
+        // first sample and gaps grow without bound.
+        if (m_hasPrev.load(std::memory_order_relaxed)) {
+            const int64_t prevQpc = m_prevQpc.load(std::memory_order_relaxed);
+            const int64_t prevRefresh =
+                static_cast<int64_t>(m_prevRefresh.load(std::memory_order_relaxed));
+            const int64_t deltaQpc = s.syncQpc - prevQpc;
+            const int64_t deltaK =
+                static_cast<int64_t>(s.syncRefreshCount) - prevRefresh;
+
+            if (deltaQpc > 0) {
+                // Forward and usable: record the gap and mark the slot valid.
+                m_gapMicros[idx].store(static_cast<double>(deltaQpc),
+                                       std::memory_order_relaxed);
+                m_valid[idx].store(true, std::memory_order_relaxed);
+                m_hasGap.store(true, std::memory_order_relaxed);
+
+                // Refresh-period estimate, accumulated as raw ticks and counts
+                // then divided ONCE. Averaging per-sample ratios weights a
+                // 4-vblank sample the same as a 400-vblank one, which skews the
+                // estimate badly when the delta size varies.
+                if (deltaK >= kMinRefreshDelta) {
+                    m_periodQpcSum.store(
+                        m_periodQpcSum.load(std::memory_order_relaxed) + deltaQpc,
+                        std::memory_order_relaxed);
+                    m_periodKSum.store(
+                        m_periodKSum.load(std::memory_order_relaxed) + deltaK,
+                        std::memory_order_relaxed);
+                    m_periodCount.store(
+                        m_periodCount.load(std::memory_order_relaxed) + 1,
+                        std::memory_order_relaxed);
+                }
+            } else {
+                // Backwards or duplicate timestamp (mode change, resize,
+                // re-baseline): no gap, and the slot is not valid so it cannot
+                // be read as a 0.0 gap by the shared validity flag.
+                m_valid[idx].store(false, std::memory_order_relaxed);
             }
         } else {
+            // First sample: establish the baseline, no gap yet.
             m_valid[idx].store(false, std::memory_order_relaxed);
-            // Only advance the baseline on a FORWARD sample. Advancing it
-            // unconditionally on a backwards one poisons the next gap by
-            // spanning the whole excursion.
-            if (forward || !havePrev) {
-                m_prevQpc.store(s.syncQpc, std::memory_order_relaxed);
-                m_prevRefresh.store(s.syncRefreshCount, std::memory_order_relaxed);
-                m_hasPrev.store(true, std::memory_order_relaxed);
-            } else {
-                // Discontinuous (mode change): re-baseline.
-                m_prevQpc.store(s.syncQpc, std::memory_order_relaxed);
-                m_prevRefresh.store(s.syncRefreshCount, std::memory_order_relaxed);
-                m_hasPrev.store(true, std::memory_order_relaxed);
-            }
         }
-        if (!havePrev) {
-            m_prevQpc.store(s.syncQpc, std::memory_order_relaxed);
-            m_prevRefresh.store(s.syncRefreshCount, std::memory_order_relaxed);
-            m_hasPrev.store(true, std::memory_order_relaxed);
-        }
+
+        // Always advance the baseline on a forward sample, and re-baseline on a
+        // backward one. Either way this must happen on EVERY call.
+        m_prevQpc.store(s.syncQpc, std::memory_order_relaxed);
+        m_prevRefresh.store(s.syncRefreshCount, std::memory_order_relaxed);
+        m_hasPrev.store(true, std::memory_order_relaxed);
+
         m_index = idx + 1;
         m_count.store(m_count.load(std::memory_order_relaxed) + 1,
                       std::memory_order_relaxed);

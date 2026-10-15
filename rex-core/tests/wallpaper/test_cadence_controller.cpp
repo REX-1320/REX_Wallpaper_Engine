@@ -66,15 +66,24 @@ TEST(DecodeAheadPolicy, PoolSlotCapMakesTwoHundredMsUnreachableAtHighFps) {
     EXPECT_LT(CadenceController::ReserveMs(7, 120.0), 200.0);  // ~58 ms, capped
 }
 
-TEST(DecodeAheadPolicy, BurstsBelowLowWaterAndReturnsToSourceRate) {
-    CadenceController::DecodeAheadPolicy p;
+TEST(DecodeAheadPolicy, BurstsBelowLowWaterOnlyWhenBurstEnabled) {
     const double src = 1000.0 / 24.0;  // 24 fps
-    // Empty reserve -> burst at the ceiling.
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 0.0, p), src / 2.0, 0.001);
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 50.0, p), src / 2.0, 0.001);
-    // At or above the low-water mark -> plain source rate.
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 100.0, p), src, 0.001);
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 250.0, p), src, 0.001);
+
+    // Burst DISABLED (the shipped default while the scheduler work settles):
+    // the decoder paces at the source rate regardless of reserve depth.
+    CadenceController::DecodeAheadPolicy off;
+    EXPECT_DOUBLE_EQ(off.maxBurst, 1.0);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 0.0, off), src, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 50.0, off), src, 0.001);
+
+    // Burst ENABLED: below the low-water mark it doubles up.
+    CadenceController::DecodeAheadPolicy on;
+    on.maxBurst = 2.0;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 0.0, on), src / 2.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 50.0, on), src / 2.0, 0.001);
+    // At or above the low-water mark it returns to the source rate.
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 100.0, on), src, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 250.0, on), src, 0.001);
 }
 
 TEST(DecodeAheadPolicy, BurstCeilingIsRespected) {

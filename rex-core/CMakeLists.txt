@@ -392,6 +392,8 @@ if(BUILD_TESTING)
         tests/wallpaper/test_display_cadence.cpp
         tests/wallpaper/test_smoothness_budget.cpp
         tests/wallpaper/test_pool_slot_lease.cpp
+        tests/wallpaper/test_frame_scheduler_selection.cpp
+        tests/wallpaper/test_phase_servo.cpp
         tests/wallpaper/test_decoder_inventory.cpp
         tests/wallpaper/test_decoder_packet_contract.cpp
         tests/wallpaper/test_audio_dolby.cpp

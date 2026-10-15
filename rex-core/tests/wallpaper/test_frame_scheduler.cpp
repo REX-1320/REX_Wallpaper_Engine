@@ -285,12 +285,21 @@ TEST(FrameSchedulerTest, FS15_FullRingOfFutureFallsBackToNewest) {
         f.pts = 100.0 + i * 0.016;
         scheduler.Push(f);
     }
-    const VideoFrame* result = scheduler.Tick(5.0);
-    ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->frameIndex, 8u);
-    EXPECT_EQ(scheduler.GetDroppedCount(), 7ULL);
+    // All eight frames are in the future of playhead 5.0 (earliest is 100.0).
+    //
+    // The old contract fell back to "newest published" here and presented
+    // frame 8. That is exactly the defect this milestone fixes: a full ring of
+    // future frames is the NORMAL state with a decode-ahead reserve, and
+    // displaying one makes the content run ahead of the playhead (the ~2x
+    // speed symptom). The frame is retained instead.
+    EXPECT_EQ(scheduler.Tick(5.0), nullptr)
+        << "a full ring of FUTURE frames must not be presented";
+    EXPECT_EQ(scheduler.GetDroppedCount(), 0ULL)
+        << "retaining the current frame is not a drop";
+    EXPECT_EQ(scheduler.PendingCount(), 8u)
+        << "future frames must be retained for later presentation";
     EXPECT_EQ(scheduler.Tick(5.0), nullptr);
-    EXPECT_EQ(scheduler.GetDroppedCount(), 7ULL);
+    EXPECT_EQ(scheduler.GetDroppedCount(), 0ULL);
 }
 
 

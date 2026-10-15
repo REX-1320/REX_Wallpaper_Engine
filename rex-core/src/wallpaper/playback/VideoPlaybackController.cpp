@@ -216,6 +216,7 @@ void VideoPlaybackController::Stop() {
         if (m_open.load(std::memory_order_acquire) && m_decoder) {
             m_decoder->Seek(0.0);
             m_scheduler.Clear();
+            m_scheduler.ResetPresentationClock();
             m_lastPublishedPts = 0.0;
             ++m_decodeGeneration;
             m_position.store(0.0, std::memory_order_release);
@@ -300,6 +301,7 @@ shared::Result<void> VideoPlaybackController::Seek(double seconds) {
     // P1-5: drop the pre-seek frame so the renderer never presents it;
     // the first post-seek frame re-arms the discontinuity detector.
     m_scheduler.Clear();
+    m_scheduler.ResetPresentationClock();
     m_lastPublishedPts = seconds;
     return shared::Result<void>();
 }
@@ -454,6 +456,15 @@ void VideoPlaybackController::DecoderThread() {
             continue;
         }
 
+        // NOTE (frozen 2026-10-15): a reserve-aware pre-check that skipped
+        // decoding when reserve >= high water lived here and was REMOVED. It
+        // deadlocked whenever consumption stalled for any reason (stop/restart,
+        // slow playhead in tests): a full ring of future frames kept the skip
+        // firing, so no new frame was ever published and nothing ever became
+        // due. Decode pacing below already handles reserve depth without
+        // refusing to decode; the ring-full backstop further down covers the
+        // pathological case.
+
         VideoFrame frame;
         bool ok = false;
         bool looping = true;
@@ -487,6 +498,7 @@ void VideoPlaybackController::DecoderThread() {
                     // (keyframe lands before the target) is harmless.
                     if (IsBackwardJump(m_lastPublishedPts, frame.pts)) {
                         m_scheduler.Clear();
+                        m_scheduler.ResetPresentationClock();
                         m_loopWraps.fetch_add(1, std::memory_order_relaxed);
                     }
                     m_lastPublishedPts = frame.pts;
@@ -544,23 +556,25 @@ void VideoPlaybackController::DecoderThread() {
             m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
 
         // Phase D: pace by RESERVE DEPTH rather than a flat source-rate
-        // interval. Below the low-water mark the decoder bursts (up to 2x) to
-        // rebuild the reserve; at or above it, it returns to the source rate so
-        // the reserve is held, not drained.
-        const int pending = m_scheduler.PendingCount();
-        const double reserveMs = CadenceController::ReserveMs(pending, m_frameRate);
-        m_reserveMs.store(reserveMs, std::memory_order_relaxed);
+        // interval. Below the low-water mark the decoder bursts (when enabled)
+        // to rebuild the reserve; at or above it, source rate.
         const double intervalMs = CadenceController::DecodeIntervalMs(
-            sourceIntervalMs, reserveMs, m_decodeAheadPolicy);
+            sourceIntervalMs, m_reserveMs.load(std::memory_order_relaxed),
+            m_decodeAheadPolicy);
 
         rex::shared::PreciseSleepUntil(
             t0 + std::chrono::duration<double, std::milli>(intervalMs));
-        // Queue-depth backstop: after a hitch the decoder bursts; park
-        // when the ring is nearly full instead of churning overwrites.
+        // Ring-full backstop. This is now a SAFETY net, not the primary
+        // throttle — the reserve-aware check at the top of the loop handles the
+        // normal "reserve is healthy" case. It only catches the pathological
+        // one: we decoded into an already-full ring, which means the playhead
+        // is not consuming and the next write would be an overwrite of
+        // unread content.
+        //
         // High-res wait: plain sleep_for(2 ms) quantizes to ~15 ms on the
         // default quantum and throttles steady decode to ~66 fps (proven
         // live at 2x demand) — the same quantum bug as pacing.
-        if (m_scheduler.PendingCount() >= FrameScheduler::kNumSlots - 1) {
+        if (m_scheduler.PendingCount() >= FrameScheduler::kNumSlots) {
             rex::shared::PreciseSleepUntil(
                 Clock::now() + std::chrono::milliseconds(2));
         }

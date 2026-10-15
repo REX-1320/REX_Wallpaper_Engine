@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace rex::wallpaper {
 
@@ -72,6 +73,21 @@ public:
 
     size_t GetNumSlots() const { return kNumSlots; }
 
+    /// Re-seed the monotonic presentation clock after a seek, loop wrap or
+    /// recovery. MUST accompany Clear() on those events: PTS restarts near
+    /// zero after a wrap, so without this the monotonic guard in Tick would
+    /// reject every post-wrap frame and the wallpaper would freeze.
+    void ResetPresentationClock() {
+        m_lastPresentedPts = -std::numeric_limits<double>::infinity();
+    }
+
+    /// Ticks where nothing was due and the previous frame was retained. With a
+    /// decode-ahead reserve this is the NORMAL steady state (the reserve holds
+    /// frames ahead of the playhead), so it is a health metric, not an error.
+    uint64_t StarvedTicks() const {
+        return m_starvedTicks.load(std::memory_order_relaxed);
+    }
+
     /// Published-but-unconsumed frame count now (Phase 1 queue depth).
     /// Clamped to the ring size: anything older was overwritten unseen.
     size_t PendingCount() const {
@@ -95,6 +111,12 @@ private:
     // many starved Ticks observe the same stale gap. Reset by Clear
     // alongside the consumed write.
     std::atomic<uint64_t> m_countedThrough{0};
+    // PTS of the most recently presented frame (consumer-only). Enforces
+    // monotonic presentation: a frame older than this is never presented.
+    // Seeded to -inf by ResetPresentationClock after seek / loop wrap.
+    double m_lastPresentedPts{-std::numeric_limits<double>::infinity()};
+    // Ticks that found nothing due (frame retained). Normal with a reserve.
+    std::atomic<uint64_t> m_starvedTicks{0};
 };
 
 } // namespace rex::wallpaper
