@@ -251,6 +251,28 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 
 ---
 
+## Forward plan — by priority (2026-10-15)
+
+> Full version with WHAT/WHY/precautions/architecture per item: `TODO.md` § "🎯 Forward plan". Condensed here.
+
+| Priority | Item | State |
+|---|---|---|
+| P0 | Scheduler live A/B on the 2x file | Fix committed `e5bfdf0`, 689/689 — needs live proof |
+| P0 | Content-rate check (displayed-PTS vs wall) | Missing — the blind spot that hid the 2x bug |
+| P0 | `decodeMsP50/P95/P99` into text telemetry | Exists in JSON only — pure plumbing |
+| P0 | Reserve-aware backpressure (retry) | Two attempts regressed — needs P0-3 numbers first |
+| P1 | WorkerW hide-on-UNLOAD | Open — shares the `Clear()` contract with the scheduler fix |
+| P1 | Supervisor + app-state/library wiring | Code exists — needs live crash/exit verification |
+| P1 | Gallery persistence live pass | Headless-proven — needs in-app verification |
+| P2 | Capability-aware decode fallback | Design agreed — probe → HW → SW → explicit error |
+| P2 | SW AV1-HDR `-40`, poison-file guards | Log-spam fixed; decode itself open; park exists |
+| P2 | HDR/vendor matrix | SDR-only so far — **no colour code without an HDR reference** |
+| P3 | Unified playback policy, monitor profiles | Scattered pieces, no single owner |
+| P3 | FPS counter, audio benchmark + sync, flake watch | Small, open |
+| P4 | Web/Scene/Shader/AV types, SDK, marketplace | Deferred per scope banner |
+
+Global rules: validate every metric before trusting it; load <20%, SDR-only, deltas not lifetimes, 5–10 runs; one change per commit, 689/689 gate; don't touch colour code, `app/src/widgets/`, or the 8-slot pool; feature-flag rollbacks.
+
 ## In progress / WIP 🟡
 
 | Item | Notes |
