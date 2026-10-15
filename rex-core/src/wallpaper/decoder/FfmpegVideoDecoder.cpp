@@ -575,16 +575,6 @@ VideoColorInfo FfmpegVideoDecoder::ResolveColorInfo() const {
             break;
     }
 
-    // Range default matters more than it looks. The shader only undoes the
-    // 16-235 studio swing when it is told the content is LIMITED
-    // (D3D12Renderer.cpp:216); told "full" it treats 16-235 content as-is,
-    // which crushes blacks and lifts midtones — the washed-out look.
-    //
-    // AVCOL_RANGE_UNSPECIFIED therefore defaults to LIMITED, not full.
-    // Measured across the local library: 19 of 55 files declare no range at
-    // all and are overwhelmingly limited-range H.264/HEVC, which is the
-    // format convention; JPEG/full is the minority (PNG-style sources, and
-    // anything that explicitly tags AVCOL_RANGE_JPEG).
     info.fullRange = (rng == AVCOL_RANGE_JPEG);
 
     // HDR static metadata: frame side data wins over stream-level
