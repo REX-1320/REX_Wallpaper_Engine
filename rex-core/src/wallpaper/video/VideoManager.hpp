@@ -95,6 +95,17 @@ public:
     // The D3D12 command queue must Wait on this fence with the frame's
     // fenceValue before sampling a pool slot.
     ID3D12Fence* GetSharedFence() const { return m_fence12.Get(); }
+
+    /// Render thread reports the frameIndex it has finished consuming, so the
+    /// decode thread can safely recycle that frame's pool slot (Phase D).
+    void NotifyFrameConsumed(int64_t frameIndex) {
+        if (m_controller) m_controller->NotifyFrameConsumed(frameIndex);
+        for (auto& entry : m_monitorEntries) {
+            if (entry.monitorController) {
+                entry.monitorController->NotifyFrameConsumed(frameIndex);
+            }
+        }
+    }
     HANDLE GetSlotHandle(UINT slot) const {
         return m_controller ? m_controller->GetSlotHandle(slot) : nullptr;
     }

@@ -105,6 +105,11 @@ public:
     /// Request an audio output layout (auto/mono/stereo/quad/5.1). The
     /// endpoint negotiates downward when it cannot honour the request.
     void SetAudioOutputMode(AudioOutputMode mode);
+    /// Render thread finished consuming frameIndex — releases its pool slot
+    /// lease in the decoder (Phase D slot-lifetime prerequisite).
+    void NotifyFrameConsumed(int64_t frameIndex) {
+        if (m_decoder) m_decoder->NotifyFrameConsumed(frameIndex);
+    }
     void SetMute(bool mute);
     /// Mute state snapshot (P1-8: under m_decodeMutex like all member
     /// access). Proves the single-audio-owner policy per monitor video.

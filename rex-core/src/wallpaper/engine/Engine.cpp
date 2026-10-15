@@ -2016,6 +2016,15 @@ void Engine::RenderLoop() {
             m_renderer->RenderFrame();
             m_renderer->EndFrame();
 
+            // Slot lease release (Phase D prerequisite): the command list that
+            // referenced the decoded pool slot is now recorded and submitted,
+            // so the decode thread may reuse that slot. The renderer's
+            // GPU-side fence wait already guarantees it has finished READING
+            // before this point; this only transfers ownership back.
+            if (pending && m_videoManager) {
+                m_videoManager->NotifyFrameConsumed(pending->frameIndex);
+            }
+
             // R2: whatever just presented is now on screen — disarm the
             // dirty flag for every scene type, not just video. Without
             // this, static scenes re-present at full loop rate forever.

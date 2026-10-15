@@ -290,12 +290,45 @@ private:
     UINT m_poolW = 0;
     UINT m_poolH = 0;
     UINT m_poolNext = 0;
+    // Slot leasing (Phase D prerequisite). A slot must not be reused until the
+    // render thread is provably done reading it. The fence only gives GPU
+    // ORDERING, not lifetime: after a slot is overwritten, a consumer that
+    // already waited on the old fenceValue sees it satisfied and would sample
+    // NEW pixels under the OLD VideoFrame identity.
+    //
+    // So each slot records the decode-order frameIndex it currently holds, and
+    // allocation picks the OLDEST slot whose contents are behind the render
+    // thread's consumed watermark by at least kSlotReuseMargin frames.
+    int64_t m_slotFrameIndex[kPoolSize]{};
+    // Highest frameIndex the render thread has finished consuming. Written by
+    // the render side (see NotifyFrameConsumed), read by the decode thread.
+    std::atomic<int64_t> m_consumedFrameIndex{-1};
+    // Keep a slot at least this many frames behind the consumed watermark
+    // before reusing it. 3 of 8 slots is conservative and still leaves 5 for
+    // the pipeline; it also bounds worst-case staleness if the renderer falls
+    // behind (e.g. during a long present stall).
+    static constexpr int64_t kSlotReuseMargin = 3;
     // Pool generation key: exact texture format (path + HDR in one).
     // Rebuilt one-time per resolution/format, regardless of HW/SW path.
     DXGI_FORMAT m_poolFormat = DXGI_FORMAT_UNKNOWN;
     bool m_hdrContent = false; // current stream carries PQ/HLG transfer
     UINT64 m_fenceValue = 0;
     UINT64 m_frameIndex = 0;
+
+public:
+    /// Render thread reports the frameIndex it has finished consuming. The
+    /// decode thread uses it to decide which pool slots are safe to reuse.
+    void NotifyFrameConsumed(int64_t frameIndex) {
+        m_consumedFrameIndex.store(frameIndex, std::memory_order_release);
+    }
+
+private:
+    /// Choose the pool slot to write next: the oldest slot that is far enough
+    /// behind the consumed watermark to be safely reusable. Falls back to the
+    /// strict oldest when nothing satisfies the margin (renderer far behind),
+    /// which is the same best-effort behaviour as before but still prefers the
+    /// stalest slot instead of blind round-robin.
+    UINT PickPoolSlot() const;
     std::atomic<bool> m_open{false};
 
     // ─── Colorimetry (last resolved from a decoded frame) ───────────────

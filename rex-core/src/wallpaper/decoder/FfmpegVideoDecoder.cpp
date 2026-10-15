@@ -29,6 +29,53 @@ namespace {
 
 constexpr const char* kModule = "FfmpegVideoDecoder";
 
+// ─── Slot leasing (Phase D prerequisite) ───────────────────────────────────
+//
+// The decode thread must not overwrite a pool slot the render thread is still
+// reading. DXGI-style fences give ORDERING (a consumer waiting on fenceValue N
+// is ordered after the producer's signal N) but not LIFETIME: once the producer
+// overwrites the slot and signals N+1, a consumer that already waited on N sees
+// its wait satisfied and samples the NEW pixels while still believing it holds
+// frame N.
+//
+// That was latent while decode paced at the source rate (the renderer consumed
+// a slot within a frame or two). Decode-ahead widens that window a lot, so the
+// allocator below prefers the slot furthest behind the consumed watermark.
+//
+// This is pure integer bookkeeping with no device dependency, so it is unit
+// tested directly (see test_pool_slot_lease.cpp).
+/// Oldest slot that is at least `margin` frames behind `consumed`.
+/// Falls back to the strict oldest slot when no slot qualifies (the renderer
+/// has fallen further behind than the margin allows), which degrades to
+/// "reuse the stalest content" rather than "reuse whatever round-robin lands
+/// on" - strictly better than the previous blind rotation, and still bounded
+/// by the consumer's own fence wait for correctness.
+UINT PickSlotOldestSafe(const int64_t* slotFrameIndex, UINT slots,
+                        int64_t consumed, int64_t margin, bool haveConsumed) {
+    // Fallback: the strict oldest slot, always a valid choice.
+    UINT fallback = 0;
+    int64_t fallbackIndex = slotFrameIndex[0];
+    for (UINT i = 1; i < slots; ++i) {
+        const int64_t idx = slotFrameIndex[i];
+        if (idx < fallbackIndex) { fallbackIndex = idx; fallback = i; }
+    }
+    if (!haveConsumed) return fallback;
+
+    // Preferred: the oldest slot at least `margin` frames behind the render
+    // thread. Found by scan rather than seeded at slot 0, because slot 0 may
+    // itself be ineligible - seeding would return it unchecked.
+    UINT best = UINT_MAX;
+    int64_t bestIndex = INT64_MAX;
+    for (UINT i = 0; i < slots; ++i) {
+        const int64_t idx = slotFrameIndex[i];
+        if (idx <= consumed - margin && idx < bestIndex) {
+            bestIndex = idx;
+            best = i;
+        }
+    }
+    return best != UINT_MAX ? best : fallback;
+}
+
 // Bounded retry budget for avcodec_send_packet returning EAGAIN. Zero means
 // never stall; this many retries lets a transiently-full decoder drain first.
 constexpr int kMaxSendEagainRetries = 8;
@@ -367,6 +414,7 @@ void FfmpegVideoDecoder::Close() {
     m_poolW = 0;
     m_poolH = 0;
     m_poolNext = 0;
+    for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
     m_poolFormat = DXGI_FORMAT_UNKNOWN;
     m_hdrContent = false;
     m_fenceValue = 0;
@@ -810,6 +858,13 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
     }
 }
 
+UINT FfmpegVideoDecoder::PickPoolSlot() const {
+    const int64_t consumed = m_consumedFrameIndex.load(std::memory_order_acquire);
+    const bool haveConsumed = consumed >= 0;
+    return PickSlotOldestSafe(m_slotFrameIndex, kPoolSize, consumed,
+                              kSlotReuseMargin, haveConsumed);
+}
+
 HANDLE FfmpegVideoDecoder::GetSlotHandle(UINT slot) const {
     if (!m_open.load(std::memory_order_acquire) || slot >= m_poolHandles.size()) {
         return nullptr;
@@ -889,6 +944,7 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
     m_poolW = width;
     m_poolH = height;
     m_poolNext = 0;
+    for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
     m_poolFormat = format;
 
     const char* fmtName = "unknown";
@@ -1015,8 +1071,8 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
         return false;
     }
 
-    const UINT slot = m_poolNext;
-    m_poolNext = (m_poolNext + 1) % kPoolSize;
+    const UINT slot = PickPoolSlot();
+    m_slotFrameIndex[slot] = static_cast<int64_t>(m_frameIndex);
 
     // GPU-resident path: copy decoder surface directly into pool.
     // SDR: NV12 → NV12 pool, shader does BT.709 YUV→RGB.
