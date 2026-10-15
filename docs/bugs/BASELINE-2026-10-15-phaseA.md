@@ -174,8 +174,47 @@ Per the milestone's "measure, do not assume" rule, this needs one confirming run
 * The servo has **two** correctable error terms now: phase offset **and** the
   +0.3 ms per-frame rate bias (Finding 1).
 
-## Reproduction
+## Finding 5 — `DwmGetCompositionTimingInfo` is the WRONG clock here (blocker resolved)
+
+Finding 4 raised a blocker for Phase B2: if the surface independent-flips, the
+DWM composition cadence may not be the clock REX is actually locked to. **Resolved
+by direct measurement** with a standalone probe (no engine change) that samples
+`DwmGetCompositionTimingInfo(nullptr, …)` and converts the `qpc*` fields
+(`QPC_TIME = ULONGLONG`, `dwmapi.h:160`) through `QueryPerformanceFrequency`.
+
+**Panel (ground truth):** 3840×2160 @ **160 Hz** ⇒ 6.2500 ms.
+
+| condition | `qpcRefreshPeriod` | implied rate | `qpcVBlank` vs `qpcCompose` |
+|---|---|---|---|
+| idle | 6.2495–6.2511 ms **and** 7.1820–7.2158 ms (oscillates) | 160 Hz ↔ 138.6 Hz | identical |
+| **REX playing obanai** | **7.2158 ms, constant, 24/24 samples** | **138.585 Hz** | **identical, 24/24** |
+
+`rateRefresh = 10000000/72158` confirms the 7.2158 ms figure.
+
+**Conclusion:** while REX runs, DWM reports a **138.585 Hz** composition cadence
+against a **160 Hz** panel — a **15.45 % period error** (`7.2158 / 6.25 = 1.1545`),
+and `qpcVBlank == qpcCompose` exactly every sample, i.e. **DWM runs no distinct
+composition pass for this surface** — exactly what Finding 4's Independent-Flip
+result predicts.
+
+A phase servo locked to this clock would drift by 15.45 % of elapsed time
+(~15.5 ms per second). **`DwmGetCompositionTimingInfo` must NOT be used.**
+
+⇒ **Phase B2 must use the DXGI presentation scheduler instead**: per-swapchain
+`SyncRefreshCount` + `SyncQPCTime` from `IDXGISwapChain::GetFrameStatistics`, which
+is (a) already implemented and now working after `9437032` (verified `dwell=1/2/3/3`),
+(b) references *exactly* the scheduler that quantises our `Present(1,0)`,
+(c) is HDR-independent, non-blocking and safe every frame, and
+(d) gives both the period (`ΔQPC / Δrefresh`) and the phase (`SyncQPCTime` mod period)
+from one call.
+
+**This overturns the `DwmGetCompositionTimingInfo` recommendation** recorded in
+`TODO.md` before this measurement. The API research was correct about the *contract*
+(hwnd must be NULL, non-blocking, HDR-independent); it was wrong about which clock
+governs this surface on this hardware.
+
 
 Harness: `%LOCALAPPDATA%\Temp\opencode\rex-baseline.ps1` (not committed — Phase A is
 "no code change"). Raw CSVs + per-run telemetry deltas under
 `%LOCALAPPDATA%\Temp\opencode\baseline\{obanai,aari}\`.
+DWM clock probe: `%LOCALAPPDATA%\Temp\opencode\probe_dwm.cpp` (also not committed).
