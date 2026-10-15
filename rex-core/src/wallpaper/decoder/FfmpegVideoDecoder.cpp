@@ -16,6 +16,7 @@ extern "C" {
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -223,6 +224,25 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     if (m_stream->r_frame_rate.den > 0) {
         m_frameRate = static_cast<double>(m_stream->r_frame_rate.num) /
                       m_stream->r_frame_rate.den;
+    }
+    {
+        // P0-1: trust measured timestamps over the container-declared rate
+        // (see ResolveFrameRate: a 60 fps declaration over 25.69 fps
+        // timestamps paces decode 2.3x too fast and no scheduler can play
+        // the resulting future-filled ring correctly).
+        bool usedCount = false;
+        const double declared = m_frameRate;
+        m_frameRate = ResolveFrameRate(m_stream->nb_frames, m_duration,
+                                       declared, &usedCount);
+        if (usedCount &&
+            (declared <= 0.0 || declared / m_frameRate < 0.95 ||
+             declared / m_frameRate > 1.05)) {
+            REX_LOG_WARN(kModule,
+                         "frame rate {:.2f} fps from {} frames / {:.2f} s, "
+                         "not the declared {:.2f} fps",
+                         m_frameRate, m_stream->nb_frames, m_duration,
+                         declared);
+        }
     }
     if (m_frameRate <= 0.0) {
         m_frameRate = 30.0;
@@ -570,6 +590,22 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
         m_frameRate = static_cast<double>(m_stream->r_frame_rate.num) /
                       m_stream->r_frame_rate.den;
     }
+    {
+        // P0-1: same measured-rate preference as Open (see ResolveFrameRate).
+        bool usedCount = false;
+        const double declared = m_frameRate;
+        m_frameRate = ResolveFrameRate(m_stream->nb_frames, m_duration,
+                                       declared, &usedCount);
+        if (usedCount &&
+            (declared <= 0.0 || declared / m_frameRate < 0.95 ||
+             declared / m_frameRate > 1.05)) {
+            REX_LOG_WARN(kModule,
+                         "frame rate {:.2f} fps from {} frames / {:.2f} s, "
+                         "not the declared {:.2f} fps",
+                         m_frameRate, m_stream->nb_frames, m_duration,
+                         declared);
+        }
+    }
     if (m_frameRate <= 0.0) {
         m_frameRate = 30.0;
     }
@@ -713,9 +749,19 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
 
     const auto t0 = Clock::now();
     EofLoopGuard eofGuard;
+    ++m_dbgCalls;
+    if ((m_dbgCalls % 600) == 0 && std::getenv("REX_SCHED_DEBUG")) {
+        REX_LOG_INFO(kModule,
+                     "decodeframe calls={} videoPkgs={} receives={} "
+                     "(pkgs/call={:.2f} recv/call={:.2f})",
+                     m_dbgCalls, m_dbgPackets, m_dbgReceives,
+                     static_cast<double>(m_dbgPackets) / m_dbgCalls,
+                     static_cast<double>(m_dbgReceives) / m_dbgCalls);
+    }
     while (true) {
         const int r = avcodec_receive_frame(m_decCtx, m_frame);
         if (r == 0) {
+            ++m_dbgReceives;
             // Resolve colorimetry of this frame (frame side data may change
             // mid-stream). Drives pool format, VP color spaces and the
             // renderer's shader constants.
@@ -806,6 +852,7 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
         m_pktPending = false;
         if (s == 0) {
             m_sendFailStreak = 0;
+            ++m_dbgPackets;  // video packet accepted (decode-thread owned)
             // Only clear the "unusable path" latch once a frame has actually
             // been decoded. A decoder that accepts packets but emits nothing
             // would otherwise re-announce on every accepted packet.

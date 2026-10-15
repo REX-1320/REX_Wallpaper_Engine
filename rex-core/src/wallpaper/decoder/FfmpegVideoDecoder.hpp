@@ -120,6 +120,37 @@ inline bool ShouldRetrySendPacket(int retryCount, int maxBudget) {
     return retryCount < maxBudget;
 }
 
+// ─── Source frame-rate resolution (pure, unit-testable) ────────────────
+//
+// The container-declared rate (r_frame_rate) can disagree with the actual
+// timestamps. Measured 2026-10-15: marvel-spiderman-miles-morales.1920x1080
+// declares r_frame_rate=60/1 but its mp4 stsz holds 1222 video samples over
+// 47.554 s = 25.69 fps. Every downstream consumer (decode pacing,
+// CadenceController::PresentationTarget, reserve watermarks, the
+// scheduler's due-windows) trusts this number, so a 2.3x-overstated rate
+// makes decode run 2.3x too fast and fills the ring with future frames that
+// no scheduler can play correctly (permanent starve under the fixed
+// scheduler's retain policy; ~2.4x content under newest-published fallback).
+//
+// The measured count (nb_frames / container duration) is the true average
+// rate for finite files, so prefer it whenever the container provides both.
+// Fall back to the declared rate, then to 30. Bounds [1, 480] reject
+// estimated/garbage counts; duration <= 1 s is too short to measure from.
+// usedCount reports whether the count (true) or the fallback (false) won.
+inline double ResolveFrameRate(int64_t nbFrames, double durationSec,
+                               double declaredFps,
+                               bool* usedCount = nullptr) {
+    if (nbFrames > 0 && durationSec > 1.0) {
+        const double measured = static_cast<double>(nbFrames) / durationSec;
+        if (measured >= 1.0 && measured <= 480.0) {
+            if (usedCount) *usedCount = true;
+            return measured;
+        }
+    }
+    if (usedCount) *usedCount = false;
+    return declaredFps > 0.0 ? declaredFps : 30.0;
+}
+
 // ─── FfmpegVideoDecoder ─────────────────────────────────────────────────
 //
 // FFmpeg decode (D3D11VA hardware, libswscale software fallback) that
@@ -347,6 +378,13 @@ private:
     std::array<float, kTimingRingSize> m_vpMsRing{};
     size_t m_decodeMsCount = 0;   // decode-thread owned
     size_t m_vpMsCount     = 0;   // decode-thread owned
+
+    // P0-1 diagnostics: packets in vs frames out per DecodeFrame call
+    // (decode-thread owned; logged env-gated every 600th call). Discriminates
+    // "decoder fed 2.4 packets per output frame" from "output reordered".
+    uint64_t m_dbgCalls = 0;
+    uint64_t m_dbgPackets = 0;  // video packets accepted by send_packet
+    uint64_t m_dbgReceives = 0;  // receive_frame successes
 };
 
 } // namespace rex::wallpaper
