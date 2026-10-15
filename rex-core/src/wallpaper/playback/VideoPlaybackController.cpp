@@ -525,8 +525,19 @@ void VideoPlaybackController::DecoderThread() {
                     // Clear is idempotent, so an explicit-Seek double-clear
                     // (keyframe lands before the target) is harmless.
                     if (IsBackwardJump(m_lastPublishedPts, frame.pts)) {
+                        REX_LOG_WARN(kModule,
+                                     "backward-jump: lastPts={:.3f} "
+                                     "framePts={:.3f} -> scheduler Clear",
+                                     m_lastPublishedPts, frame.pts);
                         m_scheduler.Clear();
                         m_scheduler.ResetPresentationClock();
+                        {
+                            // P0-2: the content clock's watermark belongs to
+                            // the old epoch - reseed it with the new stream,
+                            // or the wrap reads as a rate excursion.
+                            std::lock_guard clk(m_contentMutex);
+                            m_contentMeter.Reset();
+                        }
                         m_loopWraps.fetch_add(1, std::memory_order_relaxed);
                     }
                     m_lastPublishedPts = frame.pts;
