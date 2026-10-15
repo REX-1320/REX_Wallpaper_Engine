@@ -59,6 +59,7 @@ cbuffer ColorConstants : register(b0) {
     float3 extra;   // x = inputFormat (0=NV12, 1=RGBA16, 2=P010)
                     // y = debugMode  (0=normal, 1=Y-only, 2=UV-only)
                     // z = staticRGBA (1 = static RGBA texture, skip YUV decode)
+    float4 extra2;  // x = SDR diffuse white nits (~100, BT.2408)
 };
 
 cbuffer AudioConstants : register(b2) {
@@ -278,10 +279,17 @@ float4 main(VSOutput input) : SV_TARGET {
             // back and cap at the display peak.
             lin = min(rgb * min(norm, peak), peak);
         } else {
-            // SDR input: rgb is linear with 1.0 == SDR white, which maps to
-            // paper white (cb[7]). The mastering display max (cb[9]) has no
-            // meaning for SDR content -- it falls back to a 1000 nit default.
-            lin = rgb * adj.w;
+            // SDR input on an HDR output. rgb is linear with 1.0 == SDR
+            // diffuse white, which is defined as 100 nits by ITU-R BT.2408 —
+            // NOT the HDR reference/paper white (adj.w, 203 nits).
+            //
+            // Scaling by adj.w here lifted SDR white to 203 nits, ~2x too
+            // bright, which reads as washed-out/milky SDR on an HDR panel.
+            // Map SDR white to its own nits (extra2.x) so grade and contrast
+            // survive; only the tone-map TARGET (disp.x, display peak) applies
+            // above it.
+            const float sdrWhiteNits = extra2.x > 1.0 ? extra2.x : 100.0;
+            lin = rgb * sdrWhiteNits;
         }
         return float4(LinearToPq((mode.y > 0.5 || extra.x > 1.5) ? lin : mul(lin, BT709_TO_BT2020)), 1.0);
     }
@@ -1246,7 +1254,7 @@ void D3D12Renderer::RenderFrame() {
 
         // Color constants: decode/transfer, adjustments, HDR metadata.
         m_isStaticTexture = m_hasTexture && !videoActive;
-        float cb[15] = {};
+        float cb[16] = {};
         BuildColorConstants(cb, m_isHdrOutput);
         m_commandList->SetGraphicsRoot32BitConstants(1, 15, cb, 0);
 
@@ -1776,7 +1784,7 @@ bool D3D12Renderer::CreatePipelineStateWithPs(
 
 // ─── Color Pipeline ──────────────────────────────────────────────────────
 
-void D3D12Renderer::BuildColorConstants(float cb[15], bool hdrOutput) const {
+void D3D12Renderer::BuildColorConstants(float cb[16], bool hdrOutput) const {
     const VideoColorInfo& ci = m_activeColorInfo;
 
     // mode: matrix | transfer | fullRange | isHdrOutput
@@ -1803,6 +1811,11 @@ void D3D12Renderer::BuildColorConstants(float cb[15], bool hdrOutput) const {
     cb[12] = m_inputFormat;
     cb[13] = m_debugMode;
     cb[14] = m_isStaticTexture ? 1.0f : 0.0f;  // 1 = static RGBA texture
+
+    // extra2: SDR diffuse white (nits). ITU-R BT.2408 defines SDR diffuse
+    // white as 100 nits; HDR reference/paper white (adj.w, 203 nits) is a
+    // different anchor and must not be used to scale SDR content.
+    cb[15] = m_sdrWhiteNits;
 }
 
 // ─── Audio Spectrum ──────────────────────────────────────────────────────

@@ -247,6 +247,14 @@ private:
     // has ever been published. See DecodeFrame's zero-progress guard.
     static constexpr uint32_t kZeroProgressReportAfter = 240;
     uint32_t m_zeroProgressCalls = 0;
+    // Consecutive avcodec_send_packet failures. Resets on the first success;
+    // at kSendFailReportAfter the decoder is treated as unusable and the
+    // error is logged once instead of once per packet.
+    uint32_t m_sendFailStreak = 0;
+    // True once the streak escalation has been logged; a looping wallpaper
+    // re-seeks and restarts the streak, so this prevents re-announcing the
+    // same unusable-decoder error on every loop until a send succeeds.
+    bool m_sendFailReported = false;
     // P1-8: written by the decode thread, read unlocked by diagnostics —
     // plain bools were a data race. Relaxed: flags only, no ordering.
     std::atomic<bool> m_hardware{false};

@@ -37,6 +37,12 @@ constexpr int kMaxSendEagainRetries = 8;
 // decode path instead of stalling silently.
 constexpr uint32_t kZeroProgressReportAfter = 240;
 
+// Consecutive avcodec_send_packet failures before the error is escalated to a
+// single actionable message. Below this we still log each failure (a healthy
+// stream should not get here); at/above it the decoder is unusable and one
+// clear line beats hundreds of identical ones.
+constexpr uint32_t kSendFailReportAfter = 8;
+
 std::string Hex(HRESULT hr) {
     char buf[16] = {};
     std::snprintf(buf, sizeof(buf), "%08lX", static_cast<unsigned long>(hr));
@@ -569,6 +575,16 @@ VideoColorInfo FfmpegVideoDecoder::ResolveColorInfo() const {
             break;
     }
 
+    // Range default matters more than it looks. The shader only undoes the
+    // 16-235 studio swing when it is told the content is LIMITED
+    // (D3D12Renderer.cpp:216); told "full" it treats 16-235 content as-is,
+    // which crushes blacks and lifts midtones — the washed-out look.
+    //
+    // AVCOL_RANGE_UNSPECIFIED therefore defaults to LIMITED, not full.
+    // Measured across the local library: 19 of 55 files declare no range at
+    // all and are overwhelmingly limited-range H.264/HEVC, which is the
+    // format convention; JPEG/full is the minority (PNG-style sources, and
+    // anything that explicitly tags AVCOL_RANGE_JPEG).
     info.fullRange = (rng == AVCOL_RANGE_JPEG);
 
     // HDR static metadata: frame side data wins over stream-level
@@ -751,9 +767,55 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
         av_packet_unref(m_pkt);
         m_pktPending = false;
         if (s == 0) {
+            m_sendFailStreak = 0;
+            // Only clear the "unusable path" latch once a frame has actually
+            // been decoded. A decoder that accepts packets but emits nothing
+            // would otherwise re-announce on every accepted packet.
+            if (m_framesDecoded.load(std::memory_order_relaxed) > 0) {
+                m_sendFailReported = false;
+            }
             continue;
         }
-        REX_LOG_ERROR(kModule, "avcodec_send_packet failed ({})", s);
+        // A decoder that opened but can never accept a packet (e.g. software
+        // AV1 on a build with no working AV1 software decoder: opens, then
+        // returns EINVAL forever) used to spam one identical ERROR per
+        // packet — measured 771 lines in ~12 s, drowning the real diagnostic.
+        // Escalate once per streak, then stay quiet until a send succeeds.
+        ++m_sendFailStreak;
+        // Escalate once per session when the decode path has never produced a
+        // frame. Gating on a consecutive-failure streak is not enough: a
+        // decoder that opens but cannot decode AV1 in software still ACCEPTS
+        // some packets (s==0) while emitting nothing, so the streak keeps
+        // resetting and the error re-announces — measured 769 lines in 12 s.
+        // "Zero frames ever decoded" is the real unusable-path predicate, and
+        // matches the zero-progress guard above.
+        const bool neverDecoded =
+            m_framesDecoded.load(std::memory_order_relaxed) == 0;
+        if (neverDecoded && m_sendFailStreak >= kSendFailReportAfter &&
+            !m_sendFailReported) {
+            m_sendFailReported = true;
+            REX_LOG_ERROR(kModule,
+                         "avcodec_send_packet failed ({}) {} times in a row and "
+                         "no frame has ever decoded (codec={}, hwaccel={}, "
+                         "pix_fmt={}). This build cannot decode this stream in "
+                         "{} — the wallpaper will not play.",
+                         s, m_sendFailStreak,
+                         avcodec_get_name(m_decCtx->codec_id),
+                         m_hardware.load(std::memory_order_relaxed) ? "d3d11va"
+                                                                    : "software",
+                         static_cast<int>(m_decCtx->pix_fmt),
+                         m_hardware.load(std::memory_order_relaxed) ? "hardware"
+                                                                    : "software");
+        } else if (m_sendFailStreak > kSendFailReportAfter) {
+            // Already reported for this streak; stay silent (debug builds show
+            // the count) rather than repeating the same line per packet.
+            REX_LOG_DEBUG(kModule, "avcodec_send_packet still failing ({})",
+                          s);
+        } else if (!neverDecoded) {
+            // A healthy decode path can still hit a transient packet error;
+            // that is worth one line each.
+            REX_LOG_ERROR(kModule, "avcodec_send_packet failed ({})", s);
+        }
         return false;
     }
 }

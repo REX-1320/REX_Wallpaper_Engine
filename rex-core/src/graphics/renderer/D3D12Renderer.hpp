@@ -195,7 +195,7 @@ private:
     // ─── Color pipeline ─────────────────────────────────────────────────
     /// Fills the root-constant payload (b0) from the active frame's
     /// colorimetry plus display settings.
-    void BuildColorConstants(float cb[15], bool hdrOutput) const;
+    void BuildColorConstants(float cb[16], bool hdrOutput) const;
 
     // ─── Texture Upload ────────────────────────────────────────────────
     bool UploadTextureToGPU(const TextureData& data);
@@ -305,7 +305,11 @@ private:
     float m_brightness = 1.0f;
     float m_contrast   = 1.0f;
     float m_saturation = 1.0f;
-    float m_paperWhiteNits = 203.0f;  // SDR reference white on HDR displays
+    float m_paperWhiteNits = 203.0f;  // HDR reference white on HDR displays
+    // SDR diffuse white (ITU-R BT.2408: 100 nits). Distinct from HDR
+    // reference/paper white above — scaling SDR content by 203 lifted it ~2x
+    // and read as washed-out on an HDR panel.
+    float m_sdrWhiteNits = 100.0f;
 
     // ─── Dimensions & state ───────────────────────────────────────────
     int   m_width = 0;
