@@ -310,6 +310,12 @@ const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
         m_framesConsumed.fetch_add(1, std::memory_order_relaxed);
         m_framesDropped.store(m_scheduler.GetDroppedCount(),
                               std::memory_order_relaxed);
+    } else if (m_playing.load(std::memory_order_relaxed) &&
+               m_scheduler.PendingCount() == 0) {
+        // Phase D underrun: playing, but the reserve held nothing at all, so
+        // the render loop must repeat the last frame. Counted separately from
+        // ordinary pacing repeats so reserve effectiveness is measurable.
+        m_reserveUnderruns.fetch_add(1, std::memory_order_relaxed);
     }
     return frame;
 }
@@ -379,6 +385,13 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     t.loopWraps = m_loopWraps.load(std::memory_order_relaxed);
     t.queueDepth = m_scheduler.PendingCount();
     t.pacingMs = m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
+    // Phase D: report the MEASURED reserve and the actual decode-ahead rate,
+    // not the nominal 200 ms / 2x targets. The pool caps the achievable
+    // depth, and reporting the target would overstate it at high source rates.
+    t.reserveMs = m_reserveMs.load(std::memory_order_relaxed);
+    t.decodeAheadRate = (m_frameRate > 0.0 && t.decoderFps > 0.0)
+                            ? t.decoderFps / m_frameRate : 1.0;
+    t.reserveUnderruns = m_reserveUnderruns.load(std::memory_order_relaxed);
     // Content rate (Phase 3): decode throughput over source rate.
     // 1.0 = realtime; below means decode-bound (repeats fill the gap).
     t.playbackSpeed = m_frameRate > 0.0
@@ -504,8 +517,19 @@ void VideoPlaybackController::DecoderThread() {
         // live 2026-10-07: pacingMs 16.67 + decodeMsP50 0.5 ms yet
         // decoderFps stuck at 33.0). The high-res waitable timer is
         // immune to the quantum.
-        const double intervalMs =
+        const double sourceIntervalMs =
             m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
+
+        // Phase D: pace by RESERVE DEPTH rather than a flat source-rate
+        // interval. Below the low-water mark the decoder bursts (up to 2x) to
+        // rebuild the reserve; at or above it, it returns to the source rate so
+        // the reserve is held, not drained.
+        const int pending = m_scheduler.PendingCount();
+        const double reserveMs = CadenceController::ReserveMs(pending, m_frameRate);
+        m_reserveMs.store(reserveMs, std::memory_order_relaxed);
+        const double intervalMs = CadenceController::DecodeIntervalMs(
+            sourceIntervalMs, reserveMs, m_decodeAheadPolicy);
+
         rex::shared::PreciseSleepUntil(
             t0 + std::chrono::duration<double, std::milli>(intervalMs));
         // Queue-depth backstop: after a hitch the decoder bursts; park

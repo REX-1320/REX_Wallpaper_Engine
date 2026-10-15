@@ -1150,6 +1150,9 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.queueDepth     = vt.queueDepth;
         out.occlusionParked = m_occlusion.IsParked();
         out.pacingMs       = vt.pacingMs;
+        out.reserveMs          = vt.reserveMs;
+        out.decodeAheadRate    = vt.decodeAheadRate;
+        out.reserveUnderruns   = vt.reserveUnderruns;
         out.playbackSpeed  = vt.playbackSpeed;
         out.repeatedFrames =
             m_repeatedVideoFrames.load(std::memory_order_relaxed);
@@ -2166,9 +2169,41 @@ void Engine::PaceLoop(
         targetIntervalMs =
             RenderIntervalMs(m_config.maxFps, m_cachedDecoderFps);
     }
+    // ─── Pacing servo (Phase B2) ───────────────────────────────────────
+    //
+    // Closes the loop on the measured +0.30-0.33 ms per-frame pacing bias.
+    // The input is the ACHIEVED interval minus the nominal one, not the
+    // v-blank phase: in `deadline = frameStart + interval + corr` the next
+    // frame starts at the deadline, so phase and rate are the same knob and
+    // steering phase would just trade the rate away (measured: centring phase
+    // at 160 Hz costs -2.44% at 24 fps and -5.88% at 60 fps). See
+    // PhaseServo.hpp and docs/bugs/BASELINE-2026-10-15-phaseA.md.
+    double servoCorrMs = 0.0;
+    if (m_pacingServoEnabled) {
+        const auto actual = std::chrono::duration<double, std::milli>(
+            frameStart - m_pacingPrevFrameStart).count();
+        if (m_pacingPrevValid && actual > 0.0) {
+            servoCorrMs = m_pacingServo.Step(actual - targetIntervalMs,
+                                              targetIntervalMs);
+        }
+        m_pacingPrevFrameStart = frameStart;
+        m_pacingPrevValid = true;
+        m_pacingCorrMs.store(servoCorrMs, std::memory_order_relaxed);
+        m_pacingErrorMs.store(m_pacingServo.FilteredErrorMs(),
+                              std::memory_order_relaxed);
+        m_pacingIntegralMs.store(m_pacingServo.IntegralMs(),
+                                 std::memory_order_relaxed);
+        m_pacingServoActive.store(m_pacingServo.Primed(),
+                                  std::memory_order_relaxed);
+    }
+    // NOTE: `corr` is added to this frame's deadline and is NOT cumulative —
+    // frameStart is re-measured every frame, so a persistent error yields a
+    // persistent bounded offset instead of a ramp. Clamped to +/-10% of the
+    // interval inside PacingServo.
     const auto deadline = frameStart +
         std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(
-            std::chrono::duration<double, std::milli>(targetIntervalMs));
+            std::chrono::duration<double, std::milli>(
+                targetIntervalMs + servoCorrMs));
     rex::shared::PreciseSleepUntil(deadline);
 }
 

@@ -196,10 +196,25 @@ struct EngineTelemetry {
     // GPU-pressure present-rate divisor: 1 = normal, 2/4 = degraded.
     uint32_t pressureScale = 1;
     double   pressureWaitMeanMs = 0.0;
+    // Phase D decode-ahead reserve: MEASURED depth of already-decoded,
+    // not-yet-presented video (pool-capped - often below the 200 ms target),
+    // the actual decode rate relative to source, and reserve underruns.
+    double   reserveMs = 0.0;
+    double   decodeAheadRate = 1.0;
+    uint64_t reserveUnderruns = 0;
+    // ─── Pacing servo (Phase B2) ───────────────────────────────────────
+    // Closed-loop cancellation of the measured +0.30-0.33 ms per-frame pacing
+    // bias (docs/bugs/BASELINE-2026-10-15-phaseA.md). All zero and
+    // pacingServoActive=false when the servo is disabled or not yet primed, so
+    // "no data" is distinguishable from "correcting nothing".
+    double   pacingServoCorrMs    = 0.0;  ///< last correction applied, ms
+    double   pacingServoErrorMs   = 0.0;  ///< low-passed interval error, ms
+    double   pacingServoIntegralMs = 0.0; ///< leaky-integrator state, ms
+    bool     pacingServoActive    = false;
+
     // ─── Wall-cadence presentation (Phase 3) ──────────────────────────
     double   effectiveVideoFps = 0.0;  // unique video frames presented/s
-                                       // (excludes cadence re-presents)
-    double   playbackSpeed  = 1.0;  // content rate: decoderFps / sourceFps
+                                       // (excludes cadence re-presents)    double   playbackSpeed  = 1.0;  // content rate: decoderFps / sourceFps
                                     // (1.0 = realtime; < 1 = decode-bound)
     int      videoWidth      = 0;
     int      videoHeight     = 0;

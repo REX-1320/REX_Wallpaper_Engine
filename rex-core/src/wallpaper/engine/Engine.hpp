@@ -17,6 +17,7 @@
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "wallpaper/video/VideoManager.hpp"
 #include "wallpaper/engine/OcclusionPolicy.hpp"
+#include "wallpaper/engine/PhaseServo.hpp"
 #include "wallpaper/audio/AudioCapture.hpp"
 #include "modules/Settings/interfaces/ISettingsService.hpp"
 #include <rex/wallpaper/IRendererAdapter.hpp>
@@ -203,6 +204,22 @@ private:
     static constexpr double kGpuPressureEnterMs = 3.0;
     static constexpr double kGpuPressureExitMs = 1.0;
     std::atomic<uint64_t> m_phaseFrameIndex{0};
+
+    // ─── Pacing servo (Phase B2) ───────────────────────────────────────
+    // Render-thread only. Cancels the measured +0.30-0.33 ms per-frame pacing
+    // bias that costs 2.00% of rate at 60 fps and 0.97% at 24 fps
+    // (docs/bugs/BASELINE-2026-10-15-phaseA.md). Rollback: REX_PACING_SERVO=0.
+    PacingServo m_pacingServo{};
+    bool m_pacingServoEnabled = true;
+    // Previous frame's start, for the achieved-interval measurement that drives
+    // the servo. Render-thread only.
+    std::chrono::high_resolution_clock::time_point m_pacingPrevFrameStart{};
+    bool m_pacingPrevValid = false;
+    std::atomic<double> m_pacingCorrMs{0.0};
+    std::atomic<double> m_pacingErrorMs{0.0};
+    std::atomic<double> m_pacingIntegralMs{0.0};
+    std::atomic<bool> m_pacingServoActive{false};
+
     // Unique-video-present sampler (Phase 3): same folding for
     // effectiveVideoFps (excludes cadence re-presents).
     mutable uint64_t m_uniqueRateBase{0};

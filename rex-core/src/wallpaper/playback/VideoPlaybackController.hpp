@@ -2,6 +2,7 @@
 
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 #include "wallpaper/playback/FrameScheduler.hpp"
+#include "wallpaper/playback/CadenceController.hpp"
 #include "wallpaper/audio/AudioPlayer.hpp"
 
 #include <shared/Result.hpp>
@@ -49,6 +50,13 @@ struct VideoPlaybackTelemetry {
     double   playbackSpeed  = 1.0;  // content rate (Phase 3): decoderFps /
                                     // sourceFps; 1.0 = realtime
     double   uploadLatencyMs = 0.0;
+    // Phase D decode-ahead reserve. reserveMs is the MEASURED depth of
+    // already-decoded, not-yet-presented video - it is hard-capped by the
+    // shared 8-slot pool, so it is frequently below the 200 ms nominal target
+    // at high source rates. Report the measurement, never the target.
+    double   reserveMs        = 0.0;
+    double   decodeAheadRate  = 1.0;  // decoder rate / source rate
+    uint64_t reserveUnderruns = 0;    // times the reserve hit empty
     // P13 per-stage percentiles (see DecoderDiagnostics).
     double   decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
     double   vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;
@@ -223,6 +231,13 @@ private:
     std::atomic<bool> m_paused{false};
     std::atomic<bool> m_looping{true};
     std::atomic<float> m_speed{1.0f};
+    // Phase D: measured reserve depth (ms) and the decode-ahead policy in force.
+    std::atomic<double> m_reserveMs{0.0};
+    // Counts frames that had to be REPEATED because the reserve was empty and
+    // no new decode had landed - i.e. a genuine reserve underrun, distinct
+    // from ordinary pacing repeats.
+    std::atomic<uint64_t> m_reserveUnderruns{0};
+    CadenceController::DecodeAheadPolicy m_decodeAheadPolicy{};
     std::atomic<double> m_position{0.0};
 
     double m_duration  = 0.0;
