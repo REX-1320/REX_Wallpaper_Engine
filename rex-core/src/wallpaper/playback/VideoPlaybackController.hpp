@@ -3,6 +3,7 @@
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 #include "wallpaper/playback/FrameScheduler.hpp"
 #include "wallpaper/playback/CadenceController.hpp"
+#include "wallpaper/playback/ContentRateMeter.hpp"
 #include "wallpaper/audio/AudioPlayer.hpp"
 
 #include <shared/Result.hpp>
@@ -71,6 +72,12 @@ struct VideoPlaybackTelemetry {
     // Largest drop burst seen inside the current window, so a spike the
     // average smooths away is still visible.
     double   schedulerDropsPeak = 0.0;
+    // P0-2 content-rate check: seconds of CONTENT advanced per second of
+    // wall clock, from presented PTS over a 10 s window (1.0 = realtime).
+    // Position and playbackSpeed read healthy even when displayed content
+    // runs at the wrong rate (the 2x defect); this metric comes from the
+    // content itself and cannot lie that way. 0.0 until the first window.
+    double   contentRate = 0.0;
     uint32_t deviceResets    = 0;
     uint64_t ringSlotCount   = 0;
     uint64_t ringBytes       = 0;
@@ -266,6 +273,12 @@ private:
     mutable std::chrono::steady_clock::time_point m_dropRateTime{};
     mutable double m_dropRatePerSec{0.0};
     mutable double m_dropRatePeak = 0.0;
+    // P0-2 content-rate meter: fed by Tick() on the render thread, folded by
+    // GetTelemetry() on the 5 s sampler thread. Own leaf mutex - never held
+    // while acquiring another lock (Stop/Seek take it only inside their own
+    // critical sections).
+    mutable std::mutex m_contentMutex;
+    mutable ContentRateMeter m_contentMeter;
     std::atomic<uint64_t> m_loopWraps{0};  // backward-PTS-jump events (loop/seek)
     using Clock = std::chrono::steady_clock;
     Clock::time_point m_fpsStartTime;

@@ -254,6 +254,13 @@ struct EngineTelemetry {
     // (min(decoderFps, maxFps)), NOT the display refresh rate.
     uint64_t presentCount = 0;
 
+    // P0-2 content-rate check: presented-PTS advance per wall second over a
+    // 10 s window (1.0 = realtime). position/playbackSpeed/effectiveVideoFps
+    // all read healthy while content runs at the wrong speed (2026-10-15:
+    // displayed 2x while reporting 1.000x); this one is derived from the
+    // content itself. 0.0 until the first window elapses (or no video).
+    double contentRate = 0.0;
+
     // P13 per-stage decode-pipeline percentiles (ms, last 128 frames).
     double decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
     double vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;

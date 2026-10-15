@@ -683,7 +683,8 @@ static void TelemetryThread(std::mutex& engineGuard,
                       "| dwell=%.0f/%.0f/%.0f/%.0f vblanks hwProfiles=%u press=%u/%.2fms"
                        " | reserve=%.0fms ahead=%.2fx under=%llu"
                        " | servo=%d corr=%.3fms err=%.3fms int=%.3fms"
-                       " | lattice=%.3fms@%u%s\n",
+                       " | lattice=%.3fms@%u%s"
+                       " | decP50=%.2fms decP95=%.2fms decP99=%.2fms content=%.2fx\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -715,8 +716,14 @@ static void TelemetryThread(std::mutex& engineGuard,
                        t.pacingServoActive ? 1 : 0,
                        t.pacingServoCorrMs, t.pacingServoErrorMs,
                        t.pacingServoIntegralMs,
-                       t.syncPeriodMs, t.syncRefreshCount,
-                       t.syncPeriodValid ? "" : "(unavailable)");
+                        t.syncPeriodMs, t.syncRefreshCount,
+                        t.syncPeriodValid ? "" : "(unavailable)",
+                        // P0-3: decode percentiles (JSON-only before this;
+                        // the text log is where investigations read them).
+                        t.decodeMsP50, t.decodeMsP95, t.decodeMsP99,
+                        // P0-2: content-rate — the only metric that catches
+                        // content running at the wrong speed.
+                        t.contentRate);
         std::fclose(f);
     }
 }
@@ -1310,6 +1317,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("pacingMs", json::Json(t.pacingMs));
             tel.emplace("effectiveVideoFps", json::Json(t.effectiveVideoFps));
             tel.emplace("playbackSpeed", json::Json(t.playbackSpeed));
+            tel.emplace("contentRate", json::Json(t.contentRate));
             tel.emplace("displayHz", json::Json(t.displayHz));
             tel.emplace("decodeMsP50", json::Json(t.decodeMsP50));
             tel.emplace("decodeMsP95", json::Json(t.decodeMsP95));

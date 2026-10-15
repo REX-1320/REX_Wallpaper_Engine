@@ -11,6 +11,11 @@ namespace rex::wallpaper {
 namespace {
 constexpr const char* kModule = "VideoPlaybackController";
 using ms = std::chrono::duration<double, std::milli>;
+double NowSec() {
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 } // namespace
 
 VideoPlaybackController::VideoPlaybackController() {
@@ -48,6 +53,11 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     m_duration  = m_decoder->GetDuration();
     m_frameRate = m_decoder->GetFrameRate();
     m_frameIntervalMs = m_frameRate > 0.0 ? 1000.0 / m_frameRate : 33.333;
+    {
+        // P0-2: a reopen must not inherit the previous file's content clock.
+        std::lock_guard clk(m_contentMutex);
+        m_contentMeter.Reset();
+    }
     // Scale the reserve marks to what the 8-slot pool can actually hold at this
     // source rate. A fixed 100 ms mark is unreachable at >=60 fps and made the
     // decoder thrash burst->park->burst (measured: schedDrops 204, effFps 52.5).
@@ -220,6 +230,8 @@ void VideoPlaybackController::Stop() {
             m_lastPublishedPts = 0.0;
             ++m_decodeGeneration;
             m_position.store(0.0, std::memory_order_release);
+            std::lock_guard clk(m_contentMutex);  // P0-2: no 0-jump artifact
+            m_contentMeter.Reset();
         }
         audio = m_audio;
     }
@@ -303,6 +315,11 @@ shared::Result<void> VideoPlaybackController::Seek(double seconds) {
     m_scheduler.Clear();
     m_scheduler.ResetPresentationClock();
     m_lastPublishedPts = seconds;
+    {
+        // P0-2: the PTS jump across the seek must not read as a rate spike.
+        std::lock_guard clk(m_contentMutex);
+        m_contentMeter.Reset();
+    }
     return shared::Result<void>();
 }
 
@@ -335,6 +352,11 @@ const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
         m_framesConsumed.fetch_add(1, std::memory_order_relaxed);
         m_framesDropped.store(m_scheduler.GetDroppedCount(),
                               std::memory_order_relaxed);
+        {
+            // P0-2: feed the content clock from what was actually presented.
+            std::lock_guard clk(m_contentMutex);
+            m_contentMeter.OnPresented(frame->pts, m_duration, NowSec());
+        }
     } else if (m_playing.load(std::memory_order_relaxed) &&
                m_scheduler.PendingCount() == 0) {
         // Phase D underrun: playing, but the reserve held nothing at all, so
@@ -410,6 +432,12 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     t.loopWraps = m_loopWraps.load(std::memory_order_relaxed);
     t.queueDepth = m_scheduler.PendingCount();
     t.pacingMs = m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
+    // P0-2: fold the presented-PTS content clock (10 s window). Reports the
+    // LAST measured rate inside a window - never a partial-window guess.
+    {
+        std::lock_guard clk(m_contentMutex);
+        t.contentRate = m_contentMeter.Fold(NowSec());
+    }
     // Phase D: report the MEASURED reserve and the actual decode-ahead rate,
     // not the nominal 200 ms / 2x targets. The pool caps the achievable
     // depth, and reporting the target would overstate it at high source rates.
