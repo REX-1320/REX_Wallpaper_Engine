@@ -684,8 +684,7 @@ static void TelemetryThread(std::mutex& engineGuard,
                        " | reserve=%.0fms ahead=%.2fx under=%llu"
                        " | servo=%d corr=%.3fms err=%.3fms int=%.3fms"
                        " | lattice=%.3fms@%u%s"
-                       " | decP50=%.2fms decP95=%.2fms decP99=%.2fms content=%.2fx"
-                       " | unusable=%d\n",
+                       " | decP50=%.2fms decP95=%.2fms decP99=%.2fms content=%.2fx\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -724,10 +723,7 @@ static void TelemetryThread(std::mutex& engineGuard,
                         t.decodeMsP50, t.decodeMsP95, t.decodeMsP99,
                         // P0-2: content-rate — the only metric that catches
                         // content running at the wrong speed.
-                        t.contentRate,
-                        // P2-1: unusable-path latch for the supervisor's
-                        // poison-file park.
-                        t.decodePathUnusable ? 1 : 0);
+                        t.contentRate);
         std::fclose(f);
     }
 }
@@ -1322,8 +1318,6 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("effectiveVideoFps", json::Json(t.effectiveVideoFps));
             tel.emplace("playbackSpeed", json::Json(t.playbackSpeed));
             tel.emplace("contentRate", json::Json(t.contentRate));
-            tel.emplace("decodePathUnusable",
-                        json::Json(t.decodePathUnusable ? 1.0 : 0.0));
             tel.emplace("displayHz", json::Json(t.displayHz));
             tel.emplace("decodeMsP50", json::Json(t.decodeMsP50));
             tel.emplace("decodeMsP95", json::Json(t.decodeMsP95));

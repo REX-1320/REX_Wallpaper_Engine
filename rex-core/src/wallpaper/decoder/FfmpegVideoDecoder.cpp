@@ -279,37 +279,7 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                      "— skipping hardware decode, using software path");
     }
     m_hardware = false;
-    // P2-1: skip a doomed hardware attempt when the driver exposes no
-    // profile for this codec (e.g. AV1 on pre-RDNA3 AMD) instead of
-    // discovering it from avcodec_open2's failure.
-    bool tryHardware = useHardware && m_hwDecoderProfiles > 0;
-    std::string hwNote = "not attempted";
-    if (useHardware && m_hwDecoderProfiles == 0) {
-        hwNote = "not attempted (driver reports 0 profiles)";
-    }
-    if (tryHardware) {
-        constexpr UINT kMaxProfiles = 64;
-        GUID profiles[kMaxProfiles];
-        UINT n = m_hwDecoderProfiles < kMaxProfiles ? m_hwDecoderProfiles
-                                                    : kMaxProfiles;
-        for (UINT i = 0; i < n; ++i) {
-            if (FAILED(m_videoDevice->GetVideoDecoderProfile(i,
-                                                             &profiles[i]))) {
-                n = i;
-                break;
-            }
-        }
-        if (CheckHwProfileSupport(m_stream->codecpar->codec_id, profiles,
-                                  n) == HwProfileSupport::Unsupported) {
-            hwNote = std::string("skipped (driver exposes ") +
-                     std::to_string(m_hwDecoderProfiles) +
-                     " profiles but none for " +
-                     avcodec_get_name(m_stream->codecpar->codec_id) + ")";
-            REX_LOG_WARN(kModule, "{} - using software path", hwNote);
-            tryHardware = false;
-        }
-    }
-    if (tryHardware) {
+    if (useHardware && m_hwDecoderProfiles > 0) {
         AVBufferRef* hwDevRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
         if (hwDevRef) {
             AVHWDeviceContext* hwDev =
@@ -340,25 +310,9 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                 if (avcodec_open2(m_decCtx, codec, nullptr) < 0) {
                     REX_LOG_WARN(kModule, "hardware decode open failed, retrying software");
                     avcodec_free_context(&m_decCtx);
+                    m_decCtx = nullptr;
                     av_buffer_unref(&m_hwDevCtx);
                     m_hwDevCtx = nullptr;
-                    // P2-1: the failed hardware open consumed the codec
-                    // context — rebuild a clean one for the software attempt.
-                    // Without this the fallback below dereferences a null
-                    // context (avcodec_free_context nulls the pointer).
-                    m_decCtx = avcodec_alloc_context3(codec);
-                    if (!m_decCtx ||
-                        avcodec_parameters_to_context(
-                            m_decCtx, m_stream->codecpar) < 0) {
-                        Close();
-                        return shared::Result<void>(
-                            shared::ErrorCode::OutOfMemory,
-                            "cannot recreate codec context for software "
-                            "fallback");
-                    }
-                    m_decCtx->thread_count = 0;
-                    m_decCtx->pkt_timebase = m_stream->time_base;
-                    hwNote = "attempted, open failed";
                 } else {
                     m_hardware = true;
                 }
@@ -375,12 +329,8 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     if (!m_hardware) {
         if (avcodec_open2(m_decCtx, codec, nullptr) < 0) {
             Close();
-            return shared::Result<void>(
-                shared::ErrorCode::UnsupportedFormat,
-                "software decoder open failed for " +
-                    std::string(codec->name) + " (" + std::string(path) +
-                    "); hardware path " + hwNote +
-                    " - transcode to H.264/HEVC or update the GPU driver");
+            return shared::Result<void>(shared::ErrorCode::UnsupportedFormat,
+                                        "software decoder open failed");
         }
         m_sws = sws_getContext(m_width, m_height,
                                static_cast<AVPixelFormat>(m_stream->codecpar->format),
@@ -468,7 +418,6 @@ void FfmpegVideoDecoder::Close() {
     m_pktPending = false;
     m_hardware = false;
     m_eof = false;
-    m_unusableCode.store(0, std::memory_order_relaxed);  // P2-1: fresh Open = fresh verdict
     m_duration = 0.0;
     m_frameRate = 30.0;
     m_width = 0;
@@ -793,16 +742,6 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
                          static_cast<int>(m_decCtx->pix_fmt),
                          m_hardware.load(std::memory_order_relaxed) ? "hardware"
                                                                     : "software");
-            // P2-1: latch the unusable path so telemetry (and through it the
-            // supervisor's poison-file park) sees it instead of stalling
-            // silently forever. Write-once per Open; Close() clears it.
-            if (DecodePathUnusable(0, m_zeroProgressCalls,
-                                   kZeroProgressReportAfter)) {
-                m_unusableCode.store(1, std::memory_order_relaxed);
-                REX_LOG_ERROR(kModule,
-                             "decode path latched unusable (code=1, zero "
-                             "progress) — supervisor should park this file");
-            }
         }
     } else {
         m_zeroProgressCalls = 0;
@@ -952,9 +891,6 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
                          static_cast<int>(m_decCtx->pix_fmt),
                          m_hardware.load(std::memory_order_relaxed) ? "hardware"
                                                                     : "software");
-            // P2-1: latch the unusable path (code=2, send-fail streak on a
-            // never-decoded path). Telemetry carries it to the supervisor.
-            m_unusableCode.store(2, std::memory_order_relaxed);
         } else if (m_sendFailStreak > kSendFailReportAfter) {
             // Already reported for this streak; stay silent (debug builds show
             // the count) rather than repeating the same line per packet.
@@ -1012,7 +948,6 @@ DecoderDiagnostics FfmpegVideoDecoder::GetDiagnostics() const {
     d.hardwareAccelerated = m_hardware;
     d.eof = m_eof;
     d.sendEagainStalls = m_sendEagainStalls.load(std::memory_order_relaxed);
-    d.pathUnusable = m_unusableCode.load(std::memory_order_relaxed) != 0;
     d.hwDecoderProfiles = m_hwDecoderProfiles;
     d.decodeMsP50 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.50);
     d.decodeMsP95 = PercentileOfRing(m_decodeMsRing.data(), m_decodeMsCount, 0.95);
