@@ -170,6 +170,22 @@ TEST(DecodeAheadPolicy, CatchUpBurstAppliesOnlyBehindPlayhead) {
                 8.333 * 4.0, 0.001);  // parks above high water, unchanged
 }
 
+TEST(DecodeAheadPolicy, CatchUpHasOneFrameHysteresis) {
+    // Deficits within one source frame are pacing noise: hold 1x instead of
+    // bursting, or the burst/overshoot/skip cycle churns forever (measured
+    // 4.4 drops/s steady-state on 4K60). Deeper deficits rescue-burst.
+    CadenceController::DecodeAheadPolicy cu;
+    cu.catchUpBurst = 2.0;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, -8.332, cu),
+                8.333, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, -8.334, cu),
+                8.333 / 2.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -16.0, cu),
+                16.667, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -17.0, cu),
+                16.667 / 2.0, 0.001);
+}
+
 TEST(DecodeAheadPolicy, NanReserveIsSourceRate) {
     // A torn/racy lead sample must degrade to plain source-rate pacing,
     // never to burst (overspeed) or park (stall).

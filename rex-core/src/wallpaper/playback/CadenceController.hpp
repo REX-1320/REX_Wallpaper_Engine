@@ -136,8 +136,14 @@ public:
         if (reserveMs < 0.0) {
             // Behind the playhead: catch up. Uses catchUpBurst, NOT maxBurst,
             // so refill behavior is untouched when this is 1.0 (default).
+            // Hysteresis (2026-10-16): deficits within one source frame are
+            // pacing noise — bursting on them limit-cycles (burst overshoots
+            // ahead, newest-due skips, behind again: measured 4.4 drops/s +
+            // 4.3 repeats/s steady-state on 4K60 with effFps 56.5 vs 59.9).
+            // Hold 1x inside one frame; rescue-burst only when deeper behind.
             const double cu = p.catchUpBurst > 1.0 ? p.catchUpBurst : 1.0;
-            return sourceIntervalMs / cu;
+            if (reserveMs < -sourceIntervalMs) return sourceIntervalMs / cu;
+            return sourceIntervalMs;
         }
         if (reserveMs < p.lowWaterMs) {
             return sourceIntervalMs / burst;
