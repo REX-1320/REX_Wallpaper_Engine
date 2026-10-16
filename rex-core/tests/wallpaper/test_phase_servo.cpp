@@ -23,7 +23,7 @@
 
 #include <gtest/gtest.h>
 
-#include "wallpaper/engine/PhaseServo.hpp"
+#include <shared/PacingServo.hpp>
 
 using rex::wallpaper::PacingServo;
 
