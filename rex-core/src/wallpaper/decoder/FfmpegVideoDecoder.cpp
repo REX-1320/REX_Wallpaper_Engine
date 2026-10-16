@@ -16,6 +16,7 @@ extern "C" {
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -833,8 +834,16 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
                      static_cast<double>(m_dbgPackets) / m_dbgCalls,
                      static_cast<double>(m_dbgReceives) / m_dbgCalls);
     }
+    // Per-frame stage accumulators (diagnostic): demux + send + receive time
+    // across the whole call, attributed to the frame it eventually produces.
+    long long stageDemuxUs = 0, stageSendUs = 0, stageRecvUs = 0;
     while (true) {
+        const auto tRecv0 = Clock::now();
         const int r = avcodec_receive_frame(m_decCtx, m_frame);
+        stageRecvUs +=
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() -
+                                                                  tRecv0)
+                .count();
         if (r == 0) {
             ++m_dbgReceives;
             // Resolve colorimetry of this frame (frame side data may change
@@ -843,8 +852,34 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             m_colorInfo = ResolveColorInfo();
             m_hdrContent = m_colorInfo.transfer != VideoColorInfo::Transfer::SDR;
             outFrame.colorInfo = m_colorInfo;
+            const auto tConv0 = Clock::now();
             const bool ok = ConvertAndSignal(outFrame);
-            const double decodeMs = ms(Clock::now() - t0).count();
+            const auto tConv1 = Clock::now();
+            const auto tNow = Clock::now();
+            // Per-frame stage sample (diagnostic ring, REX_PERFRAME_CSV=1
+            // dumps it). Arrival = wall gap since the previous produced
+            // frame; queueDepth is stamped by the controller (-1 = unknown).
+            DecodeStage st{};
+            st.seq = m_stageSeq++;
+            st.frameIndex = static_cast<int64_t>(m_frameIndex);
+            st.demuxUs = stageDemuxUs;
+            st.sendUs = stageSendUs;
+            st.recvUs = stageRecvUs;
+            st.convUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(tConv1 -
+                                                                      tConv0)
+                    .count();
+            st.arrivalUs =
+                m_haveLastProduce
+                    ? std::chrono::duration_cast<std::chrono::microseconds>(
+                          tNow - m_lastProduce)
+                          .count()
+                    : 0;
+            st.queueDepth = -1;
+            m_lastProduce = tNow;
+            m_haveLastProduce = true;
+            m_stageRing.Push(st);
+            const double decodeMs = ms(tNow - t0).count();
             m_lastDecodeMs.store(decodeMs, std::memory_order_relaxed);
             m_decodeMsSum.fetch_add(decodeMs, std::memory_order_relaxed);
             // P13 ring sample (decode = receive_frame â†’ pool publish).
@@ -877,7 +912,12 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             return false;        }
 
         if (!m_pktPending) {
+            const auto tDemux0 = Clock::now();
             const int pr = av_read_frame(m_fmtCtx, m_pkt);
+            stageDemuxUs +=
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    Clock::now() - tDemux0)
+                    .count();
             if (pr == AVERROR_EXIT) {
                 // Interrupted by RequestStop()/Close() — prompt shutdown,
                 // not an error (stays silent to avoid log spam per close).
@@ -900,7 +940,12 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             }
             m_pktPending = true;
         }
+        const auto tSend0 = Clock::now();
         int s = avcodec_send_packet(m_decCtx, m_pkt);
+        stageSendUs +=
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() -
+                                                                  tSend0)
+                .count();
         if (s == AVERROR(EAGAIN)) {
             // The decoder did NOT accept the packet, so it is still ours and
             // must NOT be unreffed — doing so punches a permanent hole in the
@@ -1035,6 +1080,38 @@ DecoderDiagnostics FfmpegVideoDecoder::GetDiagnostics() const {
     d.vpMsP95     = PercentileOfRing(m_vpMsRing.data(),     m_vpMsCount,     0.95);
     d.vpMsP99     = PercentileOfRing(m_vpMsRing.data(),     m_vpMsCount,     0.99);
     return d;
+}
+
+void FfmpegVideoDecoder::StampStageQueueDepth(int64_t depth) {
+    DecodeStage* back = m_stageRing.Back();
+    if (back) back->queueDepth = depth;
+}
+
+std::vector<DecodeStage> FfmpegVideoDecoder::SnapshotStages() const {
+    return m_stageRing.Snapshot();
+}
+
+size_t FfmpegVideoDecoder::DumpDecodeStages() const {
+    if (!std::getenv("REX_PERFRAME_CSV")) return 0;
+    const std::vector<DecodeStage> rows = m_stageRing.Snapshot();
+    wchar_t tmp[MAX_PATH] = {};
+    if (GetTempPathW(MAX_PATH, tmp) == 0) return 0;
+    std::wstring path(tmp);
+    path += L"REX\\perframe_decode.csv";
+    FILE* f = nullptr;
+    // Plain narrow mode: "ccs=UTF-8" would switch the stream wide-oriented
+    // and every narrow fputs below would fail silently (measured: BOM-only
+    // file). Content is pure ASCII; no BOM needed.
+    if (_wfopen_s(&f, path.c_str(), L"w") != 0 || !f) return 0;
+    fputs(DecodeStageCsvHeader(), f);
+    fputc('\n', f);
+    for (const auto& s : rows) {
+        const std::string row = DecodeStageCsvRow(s);
+        fputs(row.c_str(), f);
+        fputc('\n', f);
+    }
+    fclose(f);
+    return rows.size();
 }
 
 // P0-3 / R3+R4: the pool is keyed by (size, exact format), not by

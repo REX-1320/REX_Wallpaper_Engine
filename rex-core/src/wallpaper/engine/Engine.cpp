@@ -12,6 +12,7 @@
 #include <shared/PreciseSleep.hpp>
 #include <iostream>
 #include <chrono>
+#include <cstdio>
 #include <algorithm>
 #include <cstdlib>
 #include <psapi.h>
@@ -2061,6 +2062,7 @@ void Engine::RenderLoop() {
             }
 
             m_renderer->RenderFrame();
+            const auto renderEnd = high_resolution_clock::now();
             m_renderer->EndFrame();
 
             // Slot lease release (Phase D prerequisite): the command list that
@@ -2081,6 +2083,9 @@ void Engine::RenderLoop() {
             // Attribute every over-budget frame to a phase. A late frame is
             // invisible in presentFps, so the breakdown is the only way to
             // tell a slow Present from a slow draw from a long sleep.
+            // targetMs/gapMs are hoisted: the per-present stage sample below
+            // needs them after their blocks close.
+            double targetMs = 0.0;
             {
                 const double totalMs =
                     duration<double, std::milli>(frameEnd - frameStart).count();
@@ -2109,15 +2114,18 @@ void Engine::RenderLoop() {
                         std::memory_order_relaxed);
                 }
                 // gap(n) == targetInterval + work(n): any frame whose WORK
-                // exceeds a small budget shows up as a late gap.
+                // exceeds a small budget shows up as a late gap. The target
+                // is computed for every pass (not just late ones) because
+                // the per-present stage sample below needs it for the
+                // deadline flag.
+                targetMs =
+                    1000.0 / CadenceController::PresentationTarget(
+                                 m_videoManager && m_videoManager->IsOpen()
+                                     ? m_videoManager->GetFrameRate() : 0.0,
+                                 m_speed.load(std::memory_order_relaxed),
+                                 m_displayHzCached.load(std::memory_order_acquire),
+                                 m_config.maxFps);
                 if (totalMs > 12.0) {
-                    const double targetMs =
-                        1000.0 / CadenceController::PresentationTarget(
-                                     m_videoManager && m_videoManager->IsOpen()
-                                         ? m_videoManager->GetFrameRate() : 0.0,
-                                     m_speed.load(std::memory_order_relaxed),
-                                     m_displayHzCached.load(std::memory_order_acquire),
-                                     m_config.maxFps);
                     REX_LOG_WARN("Engine",
                                  "late frame: total={:.2f}ms target={:.2f}ms "
                                  "begin+wake={:.2f}ms draw+present={:.2f}ms "
@@ -2131,9 +2139,11 @@ void Engine::RenderLoop() {
             Update(deltaMs / 1000.0);
 
             m_presentCount.fetch_add(1, std::memory_order_relaxed);
+            double gapMs = 0.0;
             {
                 const auto gap = std::chrono::duration<double, std::milli>(
                     frameEnd - m_lastPresentAt).count();
+                gapMs = gap;
                 if (m_lastPresentAt.time_since_epoch().count() != 0 &&
                     gap > 0.0 && gap < 1000.0) {
                     const size_t idx =
@@ -2143,6 +2153,48 @@ void Engine::RenderLoop() {
                     m_presentIntervalIndex = idx + 1;
                 }
                 m_lastPresentAt = frameEnd;
+            }
+            // Per-present stage sample (diagnostic ring): begin-wait (GPU
+            // pressure), draw-submit CPU, end-frame CPU (incl. the Present()
+            // call, which blocks on vsync), submit-side gap vs the content
+            // target, DXGI dwell, and whether this pass showed a new video
+            // frame or a cached re-present. Dumped to perframe_present.csv
+            // when REX_PERFRAME_CSV=1 (5 s throttle).
+            {
+                using namespace std::chrono;
+                PresentStage ps{};
+                ps.seq = m_stageSeq++;
+                ps.frameCount = static_cast<uint64_t>(m_frameCount);
+                const double waitMs =
+                    m_renderer ? m_renderer->LastFrameLatencyWaitMs() : 0.0;
+                ps.beginWaitMs_x1000 =
+                    static_cast<int64_t>(waitMs * 1000.0 + 0.5);
+                ps.drawMs_x1000 = static_cast<int64_t>(
+                    duration<double, std::milli>(renderEnd - beginFrameEnd)
+                        .count() *
+                    1000.0);
+                ps.endMs_x1000 = static_cast<int64_t>(
+                    duration<double, std::milli>(frameEnd - renderEnd).count() *
+                    1000.0);
+                ps.gapMs_x1000 = static_cast<int64_t>(gapMs * 1000.0);
+                ps.targetMs_x1000 =
+                    static_cast<int64_t>(targetMs * 1000.0 + 0.5);
+                ps.dwell = m_renderer
+                               ? static_cast<int>(m_renderer->LastDwell() + 0.5)
+                               : 0;
+                ps.presentedNew = pending ? 1 : 0;
+                ps.deadlineMiss =
+                    (gapMs > 0.0 && targetMs > 0.0 && gapMs > 1.5 * targetMs)
+                        ? 1
+                        : 0;
+                m_stageRing.Push(ps);
+                const auto nowDump = steady_clock::now();
+                if (nowDump - m_lastStageDump > seconds(5)) {
+                    m_lastStageDump = nowDump;
+                    if (std::getenv("REX_PERFRAME_CSV")) {
+                        DumpPresentStages();
+                    }
+                }
             }
             if (m_occlusion.IsParked()) {
                 // Parked probe: the one cached-frame present per pass is
@@ -2158,6 +2210,27 @@ void Engine::RenderLoop() {
     }
 
     REX_LOG_INFO("Engine", "Render loop ended");
+}
+
+void Engine::DumpPresentStages() const {
+    const std::vector<PresentStage> rows = m_stageRing.Snapshot();
+    wchar_t tmp[MAX_PATH] = {};
+    if (GetTempPathW(MAX_PATH, tmp) == 0) return;
+    std::wstring path(tmp);
+    path += L"REX\\perframe_present.csv";
+    FILE* f = nullptr;
+    // Plain narrow mode: "ccs=UTF-8" would switch the stream wide-oriented
+    // and every narrow fputs below would fail silently (measured: BOM-only
+    // file). Content is pure ASCII; no BOM needed.
+    if (_wfopen_s(&f, path.c_str(), L"w") != 0 || !f) return;
+    fputs(PresentStageCsvHeader(), f);
+    fputc('\n', f);
+    for (const auto& s : rows) {
+        const std::string row = PresentStageCsvRow(s);
+        fputs(row.c_str(), f);
+        fputc('\n', f);
+    }
+    fclose(f);
 }
 
 // ─── P16 content-aware pacing ──────────────────────────────────────────────

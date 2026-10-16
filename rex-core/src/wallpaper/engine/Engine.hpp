@@ -18,6 +18,7 @@
 #include "wallpaper/video/VideoManager.hpp"
 #include "wallpaper/engine/OcclusionPolicy.hpp"
 #include "wallpaper/engine/PhaseServo.hpp"
+#include "wallpaper/playback/StageTimer.hpp"
 #include "wallpaper/audio/AudioCapture.hpp"
 #include "modules/Settings/interfaces/ISettingsService.hpp"
 #include <rex/wallpaper/IRendererAdapter.hpp>
@@ -81,6 +82,9 @@ private:
     void Update(double deltaTime);
     void SetState(EngineState state);
     void RenderLoop();
+    /// Write the present stage ring to %TEMP%\REX\perframe_present.csv
+    /// (overwrite). Render-thread only; caller checks REX_PERFRAME_CSV.
+    void DumpPresentStages() const;
     /// P16: sleep until the next expected frame (decoder cadence clamped
     /// by maxFps, floor ~15Hz so pause/resume/unload stay responsive).
     void PaceLoop(std::chrono::high_resolution_clock::time_point frameStart,
@@ -193,7 +197,15 @@ private:
     std::atomic<double> m_phaseBeginMs{0.0};   // wake -> BeginFrame returned
     std::atomic<double> m_phaseDrawMs{0.0};    // draw + RenderFrame + Present
     std::atomic<double> m_phaseWorkMs{0.0};    // whole frame work
-    std::atomic<double> m_phaseWaitMs{0.0};    // frame-latency waitable block
+    std::atomic<double> m_phaseWaitMs{0.0};    // frame-latency waitable block
+
+    // Per-present stage ring (StageTimer.hpp): begin-wait / draw-submit /
+    // end-frame(present) split per loop pass for offline deadline analysis.
+    // Render-thread owned; dumped to perframe_present.csv when
+    // REX_PERFRAME_CSV=1 (see RenderLoop).
+    StageRing<PresentStage, 256> m_stageRing;
+    uint64_t m_stageSeq = 0;
+    std::chrono::steady_clock::time_point m_lastStageDump{};
     // Rolling mean of the frame-latency waitable, used as the GPU-pressure
     // signal. Steady state measures 0.00 ms.
     std::atomic<double> m_phaseWaitMeanMs{0.0};

@@ -566,6 +566,12 @@ void VideoPlaybackController::DecoderThread() {
                     m_convertFrameCount++;
                     m_framesDecoded.fetch_add(1, std::memory_order_relaxed);
                     m_position.store(frame.pts, std::memory_order_release);
+                    // Stage sample stamp (diagnostic): scheduler depth at the
+                    // moment this frame was published.
+                    if (decoder) {
+                        decoder->StampStageQueueDepth(
+                            static_cast<int64_t>(m_scheduler.PendingCount()));
+                    }
                     {
                         std::lock_guard lastLock(m_lastFrameMutex);
                         m_lastFrame.slot = frame.slot;
@@ -646,6 +652,25 @@ void VideoPlaybackController::DecoderThread() {
         if (m_scheduler.PendingCount() >= FrameScheduler::kNumSlots) {
             rex::shared::PreciseSleepUntil(
                 Clock::now() + std::chrono::milliseconds(2));
+        }
+        // Per-frame stage CSV (diagnostic): one dump per 5 s of decode-loop
+        // time, only when REX_PERFRAME_CSV=1 (DumpDecodeStages re-checks the
+        // flag and no-ops otherwise). Ring snapshot tolerates the decode
+        // thread pushing concurrently (same discipline as P13 rings).
+        {
+            const auto nowDump = Clock::now();
+            if (nowDump - m_lastStageDump > std::chrono::seconds(5)) {
+                m_lastStageDump = nowDump;
+                auto dec = m_decoder;
+                if (dec) {
+                    const size_t rows = dec->DumpDecodeStages();
+                    if (rows > 0) {
+                        REX_LOG_INFO(kModule,
+                                     "per-frame stages dumped ({} rows)",
+                                     rows);
+                    }
+                }
+            }
         }
     }
 }

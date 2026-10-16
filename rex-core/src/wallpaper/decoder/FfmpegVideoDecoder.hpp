@@ -1,5 +1,7 @@
 #pragma once
 
+#include "wallpaper/playback/StageTimer.hpp"
+
 #include <shared/Result.hpp>
 
 #include <windows.h>
@@ -8,6 +10,7 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -371,6 +374,20 @@ class FfmpegVideoDecoder {
 
     DecoderDiagnostics GetDiagnostics() const;
 
+    /// Stamp the scheduler queue depth onto the most recently pushed stage
+    /// sample (-1 = unknown). Called by the controller right after a
+    /// successful DecodeFrame, same thread — best-effort diagnostic only.
+    void StampStageQueueDepth(int64_t depth);
+
+    /// Snapshot the decode stage ring (oldest-first). Tolerates a concurrent
+    /// decode-thread Push the same way GetDiagnostics tolerates the P13
+    /// rings (torn samples possible, never a crash).
+    std::vector<DecodeStage> SnapshotStages() const;
+
+    /// Write the stage ring to %TEMP%\REX\perframe_decode.csv (overwrite).
+    /// No-op unless REX_PERFRAME_CSV=1. Returns rows written.
+    size_t DumpDecodeStages() const;
+
 private:
     bool SeekInternal(double seconds);
     VideoColorInfo ResolveColorInfo() const;
@@ -507,6 +524,16 @@ private:
     std::array<float, kTimingRingSize> m_vpMsRing{};
     size_t m_decodeMsCount = 0;   // decode-thread owned
     size_t m_vpMsCount     = 0;   // decode-thread owned
+
+    // Per-frame stage ring (StageTimer.hpp): demux/send/recv/convert split
+    // per produced frame. Same single-writer discipline as the P13 rings;
+    // DumpDecodeStages() snapshots it to perframe_decode.csv when
+    // REX_PERFRAME_CSV=1. queueDepth is stamped by the controller after
+    // DecodeFrame returns (-1 = unknown).
+    StageRing<DecodeStage, 256> m_stageRing;  // decode-thread owned
+    uint64_t m_stageSeq = 0;                  // decode-thread owned
+    std::chrono::steady_clock::time_point m_lastProduce{};  // decode-thread
+    bool m_haveLastProduce = false;                         // owned
 
     // P0-1 diagnostics: packets in vs frames out per DecodeFrame call
     // (decode-thread owned; logged env-gated every 600th call). Discriminates

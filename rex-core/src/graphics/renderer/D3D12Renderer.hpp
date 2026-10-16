@@ -153,6 +153,10 @@ public:
     double LastFrameLatencyWaitMs() const {
         return m_lastFrameLatencyWaitMs.load(std::memory_order_relaxed);
     }
+    /// DXGI present-refresh count of the last present (dwell in vblanks).
+    double LastDwell() const {
+        return m_lastDwell.load(std::memory_order_relaxed);
+    }
     /// Display-cadence statistics sampled from DXGI after each present.
     const graphics::DisplayCadenceStats& DisplayCadence() const {
         return m_swapChain.CadenceStats();

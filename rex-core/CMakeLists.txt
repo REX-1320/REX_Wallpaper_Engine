@@ -382,6 +382,7 @@ if(BUILD_TESTING)
         tests/wallpaper/test_decoder_pool.cpp
         tests/wallpaper/test_frame_context.cpp
         tests/wallpaper/test_cadence_controller.cpp
+        tests/wallpaper/test_stage_timer.cpp
         tests/wallpaper/test_decoder_lifetime.cpp
         tests/wallpaper/test_decoder_eof.cpp
         tests/wallpaper/test_audio_resample.cpp

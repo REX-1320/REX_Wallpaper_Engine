@@ -250,6 +250,10 @@ private:
     std::atomic<uint64_t> m_reserveUnderruns{0};
     CadenceController::DecodeAheadPolicy m_decodeAheadPolicy{};
     std::atomic<double> m_position{0.0};
+    // Per-frame stage CSV throttle (diagnostic): last dump time, decode-
+    // thread owned. Dumps only when REX_PERFRAME_CSV=1 (see DecoderThread).
+    // (Full type: the Clock alias is declared further below.)
+    std::chrono::steady_clock::time_point m_lastStageDump{};
 
     double m_duration  = 0.0;
     double m_frameRate = 30.0;
