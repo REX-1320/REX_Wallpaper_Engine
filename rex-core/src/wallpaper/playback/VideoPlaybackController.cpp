@@ -123,6 +123,11 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     m_framesDecoded.store(0, std::memory_order_relaxed);
     m_framesConsumed.store(0, std::memory_order_relaxed);
     m_framesDropped.store(0, std::memory_order_relaxed);
+    // Fresh stream: drop any unpublished frames from the previous file and
+    // disarm the burst gate — the playhead starts WITH the content, so pace
+    // 1x until the first consume (see DecoderThread pacing).
+    m_scheduler.Clear();
+    m_scheduler.ResetPresentationClock();
 
     // ── Prewarm (items 5+6): decode + publish the first frame HERE ─────
     // Two wins: the surface pool is built synchronously inside Open()
@@ -645,9 +650,17 @@ void VideoPlaybackController::DecoderThread() {
             1000.0;
         m_reserveMs.store(!(leadMs >= 0.0) && !(leadMs < 0.0) ? 0.0 : leadMs,
                           std::memory_order_relaxed);
-        const double intervalMs = CadenceController::DecodeIntervalMs(
-            sourceIntervalMs, m_reserveMs.load(std::memory_order_relaxed),
-            m_decodeAheadPolicy);
+        const double intervalMs = m_scheduler.IsPrimed()
+            ? CadenceController::DecodeIntervalMs(
+                  sourceIntervalMs,
+                  m_reserveMs.load(std::memory_order_relaxed),
+                  m_decodeAheadPolicy)
+            // Unprimed (nothing consumed since Open/Seek/Clear): the playhead
+            // starts WITH the content — there is no backlog to catch up to,
+            // so pace at the source rate. Bursting here only manufactures
+            // newest-due skips (the load/wrap startup storm). Once the first
+            // frame is consumed the normal reserve policy takes over.
+            : sourceIntervalMs;
 
         // Closed-loop decode pacing: the open-loop sleep overshoots by a
         // steady ~+0.5 ms per iteration (measured: convFps 3-4% under source

@@ -356,5 +356,53 @@ TEST(WrapTargetTest, ZeroDurationPassesThrough) {
                      50.0);
 }
 
+TEST(FrameSchedulerPrimeTest, FreshSchedulerIsUnprimed) {
+    // Nothing consumed yet: the burst gate must hold (decode paces 1x).
+    FrameScheduler s;
+    EXPECT_FALSE(s.IsPrimed());
+}
+
+TEST(FrameSchedulerPrimeTest, ConsumePrimesStarveDoesNot) {
+    FrameScheduler s;
+    VideoFrame future{};
+    future.valid = true;
+    future.slot = 0;
+    future.frameIndex = 1;
+    future.pts = 100.0;  // far future: Tick starves, must not prime
+    s.Push(future);
+    EXPECT_EQ(s.Tick(0.0), nullptr);
+    EXPECT_FALSE(s.IsPrimed());
+    VideoFrame due{};
+    due.valid = true;
+    due.slot = 1;
+    due.frameIndex = 2;
+    due.pts = 0.0;
+    s.Push(due);
+    ASSERT_NE(s.Tick(0.0), nullptr);
+    EXPECT_TRUE(s.IsPrimed());
+}
+
+TEST(FrameSchedulerPrimeTest, ClearDisarmsUntilNextConsume) {
+    FrameScheduler s;
+    VideoFrame a{};
+    a.valid = true;
+    a.slot = 0;
+    a.frameIndex = 1;
+    s.Push(a);
+    ASSERT_NE(s.Tick(0.0), nullptr);
+    EXPECT_TRUE(s.IsPrimed());
+    s.Clear();
+    EXPECT_FALSE(s.IsPrimed());
+    // Post-clear pushes do not re-prime by themselves.
+    VideoFrame b{};
+    b.valid = true;
+    b.slot = 1;
+    b.frameIndex = 2;
+    s.Push(b);
+    EXPECT_FALSE(s.IsPrimed());
+    ASSERT_NE(s.Tick(0.0), nullptr);
+    EXPECT_TRUE(s.IsPrimed());
+}
+
 } // namespace
 } // namespace rex::wallpaper

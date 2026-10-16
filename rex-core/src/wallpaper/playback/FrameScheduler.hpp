@@ -98,6 +98,15 @@ public:
         return static_cast<size_t>(pending > kNumSlots ? kNumSlots : pending);
     }
 
+    /// True once the consumer has taken a frame since the last Clear.
+    /// The decode thread gates catch-up burst on this: bursting into a
+    /// fresh (post-seek/wrap/load) ring only manufactures skips — the
+    /// playhead starts WITH the content (wallpaper has no lip-sync to
+    /// keep), so pace 1x until the first consume, then burst if behind.
+    bool IsPrimed() const {
+        return m_primed.load(std::memory_order_acquire);
+    }
+
 private:
     std::array<VideoFrame, kNumSlots> m_slots{};
     std::atomic<uint64_t> m_writeCount{0};
@@ -115,6 +124,9 @@ private:
     // monotonic presentation: a frame older than this is never presented.
     // Seeded to -inf by ResetPresentationClock after seek / loop wrap.
     double m_lastPresentedPts{-std::numeric_limits<double>::infinity()};
+    // Consumer has taken a frame since the last Clear (see IsPrimed).
+    // Set by Tick, cleared by Clear, read by the decode thread.
+    std::atomic<bool> m_primed{false};
     // Ticks that found nothing due (frame retained). Normal with a reserve.
     std::atomic<uint64_t> m_starvedTicks{0};
 };

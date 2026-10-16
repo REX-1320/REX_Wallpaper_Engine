@@ -143,6 +143,7 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
     }
     m_lastPresentedPts = selectedPts;
     m_lastConsumedWrite.store(selected, std::memory_order_release);
+    m_primed.store(true, std::memory_order_release);
     return &m_slots[(selected - 1) % kNumSlots];
 }
 
@@ -150,6 +151,8 @@ void FrameScheduler::Clear() {
     const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
     m_lastConsumedWrite.store(wc, std::memory_order_release);
     m_countedThrough.store(wc, std::memory_order_release);  // re-baseline
+    m_primed.store(false, std::memory_order_release);  // burst gate: 1x pace
+                                                       // until first consume
     // Seek / loop wrap / recovery re-bases presentation time. m_lastPresentedPts
     // is NOT cleared here: after a wrap the new frames' PTS restart near zero,
     // and the monotonic guard would reject them all. The consumer's next
