@@ -214,6 +214,12 @@ void VideoPlaybackController::Play() {
     }
     m_paused.store(false, std::memory_order_release);
     m_playing.store(true, std::memory_order_release);
+    // Resume starts clean: a pause (auto-pause behind fullscreen apps,
+    // suspend, user pause) leaves the playhead and the target wherever
+    // they froze, so sprinting on resume only manufactures newest-due
+    // skips. Hold 1x until the first consume re-arms the burst gate;
+    // buffered pre-pause frames stay consumable (unlike Clear).
+    m_scheduler.DisarmPrime();
     {
         // P1-8: touch the worker only while excluding Close()'s reset.
         std::lock_guard lock(m_decodeMutex);

@@ -404,5 +404,29 @@ TEST(FrameSchedulerPrimeTest, ClearDisarmsUntilNextConsume) {
     EXPECT_TRUE(s.IsPrimed());
 }
 
+TEST(FrameSchedulerPrimeTest, DisarmHoldsBufferButDropsSprint) {
+    // Resume path: DisarmPrime keeps consumable frames (unlike Clear) and
+    // only withholds the burst until the next consume.
+    FrameScheduler s;
+    VideoFrame a{};
+    a.valid = true;
+    a.slot = 0;
+    a.frameIndex = 1;
+    s.Push(a);
+    ASSERT_NE(s.Tick(0.0), nullptr);
+    EXPECT_TRUE(s.IsPrimed());
+    s.DisarmPrime();
+    EXPECT_FALSE(s.IsPrimed());
+    EXPECT_EQ(s.PendingCount(), 0u);  // consumed, nothing pending
+    VideoFrame b{};
+    b.valid = true;
+    b.slot = 1;
+    b.frameIndex = 2;
+    s.Push(b);
+    EXPECT_EQ(s.PendingCount(), 1u);  // buffered, still consumable
+    ASSERT_NE(s.Tick(0.0), nullptr);
+    EXPECT_TRUE(s.IsPrimed());
+}
+
 } // namespace
 } // namespace rex::wallpaper

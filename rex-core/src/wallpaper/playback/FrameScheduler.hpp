@@ -107,6 +107,13 @@ public:
         return m_primed.load(std::memory_order_acquire);
     }
 
+    /// Disarm the burst gate WITHOUT dropping buffered frames (resume
+    /// path): pace 1x until the next consume re-arms. Unlike Clear, the
+    /// pre-pause frames stay consumable — only the sprint is held off.
+    void DisarmPrime() {
+        m_primed.store(false, std::memory_order_release);
+    }
+
 private:
     std::array<VideoFrame, kNumSlots> m_slots{};
     std::atomic<uint64_t> m_writeCount{0};
