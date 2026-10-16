@@ -346,6 +346,11 @@ const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
     // the render loop past the first loop and explodes the drop counter.
     const double wrapped = WrapTarget(
         targetPts, m_duration, m_looping.load(std::memory_order_relaxed));
+    // P0-4: publish the loop-relative wall target for the decode thread's
+    // lead computation (same PTS epoch as published frames, so loop wraps
+    // stay comparable; a one-iteration transient either bursts or parks,
+    // both safe directions).
+    m_lastTargetPts.store(wrapped, std::memory_order_relaxed);
     const VideoFrame* frame = m_scheduler.Tick(wrapped);
     if (frame) {
         m_consumerFrameCount++;
@@ -597,7 +602,21 @@ void VideoPlaybackController::DecoderThread() {
 
         // Phase D: pace by RESERVE DEPTH rather than a flat source-rate
         // interval. Below the low-water mark the decoder bursts (when enabled)
-        // to rebuild the reserve; at or above it, source rate.
+        // to rebuild the reserve; in band, source rate; above the high-water
+        // mark it parks so the playhead — not an ever-growing lead — bounds
+        // the ring (P0-4). Behind the playhead it bursts to catch up and
+        // never parks (a starved playhead must not be throttled: that was
+        // the reverted 0.6x regression).
+        //
+        // The lead is recomputed from live atomics every iteration —
+        // stateless, so stop/pause/seek transients self-correct and cannot
+        // deadlock the way the reverted latched skip-pre-check did.
+        const double leadMs =
+            (m_position.load(std::memory_order_relaxed) -
+             m_lastTargetPts.load(std::memory_order_relaxed)) *
+            1000.0;
+        m_reserveMs.store(!(leadMs >= 0.0) && !(leadMs < 0.0) ? 0.0 : leadMs,
+                          std::memory_order_relaxed);
         const double intervalMs = CadenceController::DecodeIntervalMs(
             sourceIntervalMs, m_reserveMs.load(std::memory_order_relaxed),
             m_decodeAheadPolicy);

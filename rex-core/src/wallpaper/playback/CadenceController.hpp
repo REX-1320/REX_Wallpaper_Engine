@@ -102,17 +102,32 @@ public:
         return p;
     }
 
-    /// Interval between decodes, in milliseconds, given the current reserve depth.
-    /// Below the low-water mark the decoder bursts; otherwise it paces at the
-    /// source rate. Pure so it is unit-testable without a device.
+    /// Interval between decodes, in milliseconds, given the current reserve
+    /// depth (playhead-relative lead: published PTS minus wall target).
+    /// Below the low-water mark the decoder bursts; in band it paces at the
+    /// source rate; above the high-water mark it parks (decodes slower than
+    /// realtime) so the playhead — not an ever-growing lead — bounds the
+    /// ring. Behind the playhead (negative lead) it bursts to catch up and
+    /// NEVER parks: parking a starved playhead is exactly the 0.6x
+    /// regression of the reverted pool-full park. Pure so it is unit-testable
+    /// without a device.
+    ///
+    /// P0-4: this function is STATELESS (a pure map from the current lead),
+    /// recomputed every decode iteration. The reverted skip-pre-check
+    /// deadlocked stop/restart because a latched "ring full, skip" survived
+    /// the state change it was meant for; a stateless pace cannot stick.
+    static constexpr double kParkFactor = 4.0;  // parked decode runs 4x slower
     static double DecodeIntervalMs(double sourceIntervalMs, double reserveMs,
                                    const DecodeAheadPolicy& p) {
         if (sourceIntervalMs <= 0.0) return 1.0;
+        if (!(reserveMs >= 0.0) && !(reserveMs < 0.0)) return sourceIntervalMs;  // NaN
         const double burst = p.maxBurst > 1.0 ? p.maxBurst : 1.0;
+        if (reserveMs < 0.0) return sourceIntervalMs / burst;  // behind: catch up
         if (reserveMs < p.lowWaterMs) {
             return sourceIntervalMs / burst;
         }
-        return sourceIntervalMs;
+        if (reserveMs <= p.highWaterMs) return sourceIntervalMs;
+        return sourceIntervalMs * kParkFactor;  // ahead: park, let the playhead catch up
     }
 
     /// Reserve depth in milliseconds for `frames` buffered source frames.

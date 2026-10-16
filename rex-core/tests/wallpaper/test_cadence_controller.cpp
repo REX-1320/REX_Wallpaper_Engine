@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "wallpaper/playback/CadenceController.hpp"
 
 using namespace rex::wallpaper;
@@ -81,9 +83,11 @@ TEST(DecodeAheadPolicy, BurstsBelowLowWaterOnlyWhenBurstEnabled) {
     on.maxBurst = 2.0;
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 0.0, on), src / 2.0, 0.001);
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 50.0, on), src / 2.0, 0.001);
-    // At or above the low-water mark it returns to the source rate.
+    // At or above the low-water mark it returns to the source rate…
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 100.0, on), src, 0.001);
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 250.0, on), src, 0.001);
+    // …until the high-water mark, past which it parks (P0-4 backpressure).
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 200.0, on), src, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 250.0, on), src * 4.0, 0.001);
 }
 
 TEST(DecodeAheadPolicy, BurstCeilingIsRespected) {
@@ -96,11 +100,57 @@ TEST(DecodeAheadPolicy, BurstCeilingIsRespected) {
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 0.0, p), src, 0.001);
 }
 
-TEST(DecodeAheadPolicy, NeverDecodesSlowerThanRealtime) {
-    CadenceController::DecodeAheadPolicy p;
-    for (double reserve = 0.0; reserve <= 400.0; reserve += 25.0) {
+TEST(DecodeAheadPolicy, NeverParksWhenStarvedOrInBand) {
+    // P0-4: parking is allowed ONLY above the high-water mark. A starved
+    // playhead (negative lead) or an in-band reserve must never decode
+    // slower than realtime — throttling there was the reverted 0.6x
+    // regression.
+    CadenceController::DecodeAheadPolicy p;  // low 100 ms, high 200 ms
+    for (double reserve = -400.0; reserve <= 200.0; reserve += 25.0) {
         const double interval = CadenceController::DecodeIntervalMs(16.667, reserve, p);
         EXPECT_LE(interval, 16.667 + 1e-9)
             << "reserve=" << reserve << " must not slow the decoder below 1x";
     }
+}
+
+TEST(DecodeAheadPolicy, ParksAboveHighWater) {
+    // P0-4: a lead past high-water parks the decoder (4x interval) so the
+    // playhead — not an ever-growing lead — bounds the ring. Independent of
+    // the burst flag (parking is not bursting).
+    CadenceController::DecodeAheadPolicy off;  // maxBurst 1.0
+    CadenceController::DecodeAheadPolicy on;
+    on.maxBurst = 2.0;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, 200.01, off),
+                16.667 * 4.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, 500.0, off),
+                16.667 * 4.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, 500.0, on),
+                16.667 * 4.0, 0.001);
+    // At exactly high-water it still runs at source rate (boundary inclusive).
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, 200.0, off),
+                16.667, 0.001);
+}
+
+TEST(DecodeAheadPolicy, BehindPlayheadBurstsAndNeverParks) {
+    // Negative lead = decode is behind the playhead (starved): burst to
+    // catch up when enabled, source rate otherwise — never park.
+    CadenceController::DecodeAheadPolicy on;
+    on.maxBurst = 2.0;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -50.0, on),
+                16.667 / 2.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -10000.0, on),
+                16.667 / 2.0, 0.001);
+    CadenceController::DecodeAheadPolicy off;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -50.0, off),
+                16.667, 0.001);
+}
+
+TEST(DecodeAheadPolicy, NanReserveIsSourceRate) {
+    // A torn/racy lead sample must degrade to plain source-rate pacing,
+    // never to burst (overspeed) or park (stall).
+    CadenceController::DecodeAheadPolicy on;
+    on.maxBurst = 2.0;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, nan, on),
+                16.667, 0.001);
 }

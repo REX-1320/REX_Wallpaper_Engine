@@ -283,6 +283,12 @@ private:
     // critical sections).
     mutable std::mutex m_contentMutex;
     mutable ContentRateMeter m_contentMeter;
+    // P0-4 backpressure: latest loop-relative wall target seen by Tick()
+    // (render thread). The decode thread differences it against the published
+    // position to get the playhead-relative lead that paces decode. Plain
+    // atomic, lock-free on x64; a torn/stale sample only mistunes one pacing
+    // iteration (the policy clamps and self-corrects every loop).
+    std::atomic<double> m_lastTargetPts{0.0};
     std::atomic<uint64_t> m_loopWraps{0};  // backward-PTS-jump events (loop/seek)
     using Clock = std::chrono::steady_clock;
     Clock::time_point m_fpsStartTime;
