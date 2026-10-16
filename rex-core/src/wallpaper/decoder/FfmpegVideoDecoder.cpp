@@ -1286,8 +1286,14 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
                                : (m_colorInfo.yuvMatrix == VideoColorInfo::Matrix::BT2020)
                                      ? SWS_CS_BT2020
                                      : SWS_CS_ITU709;
-        const int dstCsp = m_hdrContent ? srcCsp : SWS_CS_DEFAULT;
-        const int dstRange = m_hdrContent ? 1 : 0;  // HDR: full range RGB output
+        // Destination: full-range RGB in the SOURCE primaries, no gamut
+        // conversion. The pixel shader consumes SW-pool bytes as sRGB-
+        // encoded full-range RGB (SrgbToLinear, no range expansion), so
+        // emitting SWS_CS_DEFAULT (=ITU601) limited-range bytes washed SDR
+        // out and hue-shifted 709 sources (deadpool tint, 2026-10-16).
+        // HDR already did srcCsp/full-range; SDR now matches.
+        const int dstCsp = srcCsp;
+        const int dstRange = 1;  // full range RGB output
         sws_setColorspaceDetails(m_sws, sws_getCoefficients(srcCsp), srcRange,
                                  sws_getCoefficients(dstCsp), dstRange,
                                  0, 1 << 16, 1 << 16);
