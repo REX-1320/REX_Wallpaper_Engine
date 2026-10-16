@@ -137,6 +137,112 @@ inline bool DecodePathUnusable(uint64_t framesDecoded, uint64_t attempts,
     return framesDecoded == 0 && attempts >= budget;
 }
 
+// ─── Per-codec hardware-decode probe (pure, unit-testable) ─────────────
+//
+// GetVideoDecoderProfileCount tells REX the driver decodes *something*,
+// not whether it decodes *this file's codec* — so without this check every
+// file attempts a D3D11VA open and discovers the answer from
+// avcodec_open2's failure (slow opens, warning noise, and a doomed attempt
+// on drivers without the codec). Enumerating the profile GUIDs and matching
+// the file's codec skips doomed attempts up front.
+//
+// 2026-10-16 CORRECTION: the first version of this table had fabricated
+// Data4 tails (remembered prefixes, invented tails), which forced HEVC/VP9
+// to software decode with wrong colors. Every constant below is now quoted
+// against FFmpeg libavcodec/dxva2.c (ff_DXVA2_Mode*), mingw-w64
+// dxva2api.idl, Microsoft Learn "Direct3D 12 video GUIDs" (documents D3D11
+// equivalence), and Firefox DXVA2Manager.cpp — all four agree. The canonical
+// string form rides in the trailing comment so the bytes stay
+// eyeball-verifiable against dxva.h.
+//
+// UnknownCodec means REX carries no GUIDs for this codec: the caller must
+// attempt hardware decode exactly as before (status quo — never refuse
+// hardware on an uncertain mapping; the failure direction here is always
+// "try", never "skip").
+enum class HwProfileSupport { UnknownCodec, Supported, Unsupported };
+
+namespace detail {
+inline bool GuidEq(const GUID& a, const GUID& b) {
+    if (a.Data1 != b.Data1 || a.Data2 != b.Data2 || a.Data3 != b.Data3) {
+        return false;
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (a.Data4[i] != b.Data4[i]) return false;
+    }
+    return true;
+}
+
+// Well-known DXVA2/D3D11 decoder-profile GUIDs (VLD variants; drivers also
+// report IDCT/MoComp ones which REX ignores — VLD-or-nothing is the rule).
+inline constexpr GUID kDxvaH264Vld = {  // 1b81be68-a0c7-11d3-b984-00c04f2e73c5
+    0x1b81be68, 0xa0c7, 0x11d3,
+    {0xb9, 0x84, 0x00, 0xc0, 0x4f, 0x2e, 0x73, 0xc5}};
+inline constexpr GUID kDxvaH264VldStereoProgressive = {  // d79e87b7-7eeb-11df-9ae9-224edfd72085
+    0xd79e87b7, 0x7eeb, 0x11df,
+    {0x9a, 0xe9, 0x22, 0x4e, 0xdf, 0xd7, 0x20, 0x85}};
+inline constexpr GUID kDxvaHevcVldMain = {  // 5b11d51b-2f4c-4452-bcc3-09f2a1160cc0
+    0x5b11d51b, 0x2f4c, 0x4452,
+    {0xbc, 0xc3, 0x09, 0xf2, 0xa1, 0x16, 0x0c, 0xc0}};
+inline constexpr GUID kDxvaHevcVldMain10 = {  // 107af0e0-ef1a-4d19-aba8-67a163073d13
+    0x107af0e0, 0xef1a, 0x4d19,
+    {0xab, 0xa8, 0x67, 0xa1, 0x63, 0x07, 0x3d, 0x13}};
+inline constexpr GUID kDxvaVp9VldProfile0 = {  // 463707f8-a1d0-4585-876d-83aa6d60b89e
+    0x463707f8, 0xa1d0, 0x4585,
+    {0x87, 0x6d, 0x83, 0xaa, 0x6d, 0x60, 0xb8, 0x9e}};
+inline constexpr GUID kDxvaVp9VldProfile2 = {  // a4c749ef-6ecf-48aa-8448-50a7a1165ff7
+    0xa4c749ef, 0x6ecf, 0x48aa,
+    {0x84, 0x48, 0x50, 0xa7, 0xa1, 0x16, 0x5f, 0xf7}};
+inline constexpr GUID kDxvaAv1VldProfile0 = {  // b8be4ccb-cf53-46ba-8d59-d6b8a6da5d2a
+    0xb8be4ccb, 0xcf53, 0x46ba,
+    {0x8d, 0x59, 0xd6, 0xb8, 0xa6, 0xda, 0x5d, 0x2a}};
+inline constexpr GUID kDxvaMpeg2Vld = {  // ee27417f-5e77-4d14-a53b-7dc2ed571f0
+    0xee27417f, 0x5e77, 0x4d14,
+    {0xa5, 0x3b, 0x7d, 0xc2, 0xed, 0x57, 0x1f, 0xf0}};
+inline constexpr GUID kDxvaVc1Vld = {  // 1b81be94-a0c7-11d3-b984-00c04f2e73c5
+    0x1b81be94, 0xa0c7, 0x11d3,
+    {0xb9, 0x84, 0x00, 0xc0, 0x4f, 0x2e, 0x73, 0xc5}};
+
+struct CodecProfiles {
+    AVCodecID codec;
+    const GUID* guids;
+    size_t count;
+};
+inline constexpr GUID kH264Guids[] = {kDxvaH264Vld,
+                                      kDxvaH264VldStereoProgressive};
+inline constexpr GUID kHevcGuids[] = {kDxvaHevcVldMain, kDxvaHevcVldMain10};
+inline constexpr GUID kVp9Guids[] = {kDxvaVp9VldProfile0, kDxvaVp9VldProfile2};
+inline constexpr GUID kAv1Guids[] = {kDxvaAv1VldProfile0};
+inline constexpr GUID kMpeg2Guids[] = {kDxvaMpeg2Vld};
+inline constexpr GUID kVc1Guids[] = {kDxvaVc1Vld};
+inline constexpr CodecProfiles kCodecProfileTable[] = {
+    {AV_CODEC_ID_H264, kH264Guids, 2}, {AV_CODEC_ID_HEVC, kHevcGuids, 2},
+    {AV_CODEC_ID_VP9, kVp9Guids, 2},   {AV_CODEC_ID_AV1, kAv1Guids, 1},
+    {AV_CODEC_ID_MPEG2VIDEO, kMpeg2Guids, 1},
+    {AV_CODEC_ID_VC1, kVc1Guids, 1},
+};
+}  // namespace detail
+
+inline HwProfileSupport CheckHwProfileSupport(AVCodecID codec,
+                                              const GUID* profiles,
+                                              size_t count) {
+    const detail::CodecProfiles* entry = nullptr;
+    for (const auto& e : detail::kCodecProfileTable) {
+        if (e.codec == codec) {
+            entry = &e;
+            break;
+        }
+    }
+    if (!entry) return HwProfileSupport::UnknownCodec;
+    for (size_t i = 0; i < count; ++i) {
+        for (size_t j = 0; j < entry->count; ++j) {
+            if (detail::GuidEq(profiles[i], entry->guids[j])) {
+                return HwProfileSupport::Supported;
+            }
+        }
+    }
+    return HwProfileSupport::Unsupported;
+}
+
 // ─── Source frame-rate resolution (pure, unit-testable) ────────────────
 //
 // The container-declared rate (r_frame_rate) can disagree with the actual

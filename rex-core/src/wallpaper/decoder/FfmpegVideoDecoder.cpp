@@ -279,7 +279,53 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                      "— skipping hardware decode, using software path");
     }
     m_hardware = false;
-    if (useHardware && m_hwDecoderProfiles > 0) {
+    // Step 2: skip a doomed hardware attempt when the driver exposes no
+    // profile for this codec instead of discovering it from avcodec_open2's
+    // failure. Unknown codecs always attempt (status quo).
+    bool tryHardware = useHardware && m_hwDecoderProfiles > 0;
+    if (tryHardware) {
+        constexpr UINT kMaxProfiles = 64;
+        GUID profiles[kMaxProfiles];
+        UINT n = m_hwDecoderProfiles < kMaxProfiles ? m_hwDecoderProfiles
+                                                    : kMaxProfiles;
+        for (UINT i = 0; i < n; ++i) {
+            if (FAILED(m_videoDevice->GetVideoDecoderProfile(i,
+                                                             &profiles[i]))) {
+                n = i;
+                break;
+            }
+        }
+        if (CheckHwProfileSupport(m_stream->codecpar->codec_id, profiles,
+                                  n) == HwProfileSupport::Unsupported) {
+            // Log what the driver claims (string form) so the next table
+            // mismatch is diagnosable from runtime.log alone — a wrong
+            // constant here silently forces software decode with different
+            // colors (measured 2026-10-16).
+            std::string claimed;
+            const UINT show = n < 8 ? n : 8;
+            for (UINT i = 0; i < show; ++i) {
+                char g[64];
+                std::snprintf(g, sizeof(g),
+                              "%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                              static_cast<unsigned long>(profiles[i].Data1),
+                              profiles[i].Data2, profiles[i].Data3,
+                              profiles[i].Data4[0], profiles[i].Data4[1],
+                              profiles[i].Data4[2], profiles[i].Data4[3],
+                              profiles[i].Data4[4], profiles[i].Data4[5],
+                              profiles[i].Data4[6], profiles[i].Data4[7]);
+                if (i) claimed += ' ';
+                claimed += g;
+            }
+            REX_LOG_WARN(kModule,
+                         "skipped (driver exposes {} profiles but none for "
+                         "{}) - using software path. driver claims: {}",
+                         m_hwDecoderProfiles,
+                         avcodec_get_name(m_stream->codecpar->codec_id),
+                         claimed.empty() ? "(none enumerated)" : claimed);
+            tryHardware = false;
+        }
+    }
+    if (tryHardware) {
         AVBufferRef* hwDevRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
         if (hwDevRef) {
             AVHWDeviceContext* hwDev =
