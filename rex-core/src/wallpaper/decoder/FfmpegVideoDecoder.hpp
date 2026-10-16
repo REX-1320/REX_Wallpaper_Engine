@@ -195,7 +195,7 @@ inline constexpr GUID kDxvaVp9VldProfile2 = {  // a4c749ef-6ecf-48aa-8448-50a7a1
 inline constexpr GUID kDxvaAv1VldProfile0 = {  // b8be4ccb-cf53-46ba-8d59-d6b8a6da5d2a
     0xb8be4ccb, 0xcf53, 0x46ba,
     {0x8d, 0x59, 0xd6, 0xb8, 0xa6, 0xda, 0x5d, 0x2a}};
-inline constexpr GUID kDxvaMpeg2Vld = {  // ee27417f-5e77-4d14-a53b-7dc2ed571f0
+inline constexpr GUID kDxvaMpeg2Vld = {  // ee27417f-5e77-4d14-a53b-7dc2ed571ff0
     0xee27417f, 0x5e77, 0x4d14,
     {0xa5, 0x3b, 0x7d, 0xc2, 0xed, 0x57, 0x1f, 0xf0}};
 inline constexpr GUID kDxvaVc1Vld = {  // 1b81be94-a0c7-11d3-b984-00c04f2e73c5
