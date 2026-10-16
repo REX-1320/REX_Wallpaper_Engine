@@ -10,6 +10,7 @@
 #include "platform/windows/DesktopHostFactory.hpp"
 #include "platform/windows/MonitorEdid.hpp"
 #include <shared/PreciseSleep.hpp>
+#include <shared/ThreadName.hpp>
 #include <iostream>
 #include <chrono>
 #include <cstdio>
@@ -1724,6 +1725,9 @@ void Engine::CheckSuspendSources() {
 void Engine::RenderLoop() {
     using namespace std::chrono;
 
+    // Diagnostic thread role (ETW/debugger-visible, behavior-neutral).
+    // Present runs on this thread, so it covers the REX-Present role too.
+    rex::shared::SetCurrentThreadName(L"REX-Render");
     REX_LOG_INFO("Engine", "Render loop started");
     REX_LOG_INFO("Engine", "Desktop host: type={} renderWindow={} {}×{} valid={}",
                  m_desktopHost ? std::string(m_desktopHost->GetHostType()) : "none",

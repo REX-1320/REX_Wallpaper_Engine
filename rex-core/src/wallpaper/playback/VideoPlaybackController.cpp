@@ -2,6 +2,7 @@
 
 #include <shared/Logger.hpp>
 #include <shared/PreciseSleep.hpp>
+#include <shared/ThreadName.hpp>
 
 #include <chrono>
 #include <cstdlib>
@@ -493,6 +494,8 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
 }
 
 void VideoPlaybackController::DecoderThread() {
+    // Diagnostic thread role (ETW/debugger-visible, behavior-neutral).
+    rex::shared::SetCurrentThreadName(L"REX-Decode");
     while (m_threadRunning.load(std::memory_order_acquire)) {
         if (!m_playing.load(std::memory_order_acquire) ||
             m_paused.load(std::memory_order_acquire)) {
