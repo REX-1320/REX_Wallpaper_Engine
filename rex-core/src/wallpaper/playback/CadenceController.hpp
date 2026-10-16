@@ -76,6 +76,17 @@ public:
         // merely because the ring holds future frames. Do not re-enable the
         // burst before that lands.
         double maxBurst    = 1.0;   // 1.0 = burst held off (see above)
+        // Catch-up burst: applied ONLY when reserveMs < 0 (published content
+        // is behind the wall clock). Refill burst (0..lowWater) stays on
+        // maxBurst, so enabling catch-up cannot build the deep reserve that
+        // triggered the 2x defect. Rationale (4K120 H.264, 2026-10-16): the
+        // pacing sleep itself caps throughput at ~107 fps (8.33 ms sleep +
+        // ~1 ms work < 119.9 needed), so the decoder can NEVER catch up at
+        // burst 1.0 — reserve drains to seconds. 1.0 = off (default).
+        // Default 2.0: engages ONLY while behind, where the alternative is
+        // sustained failure; at/above water all pacing is unchanged (unit-
+        // proven). Override with REX_CATCHUP_BURST (1 = force off).
+        double catchUpBurst = 2.0;
     };
 
     /// The reserve is capped by the shared pool: ~7 usable frames, so the
@@ -122,7 +133,12 @@ public:
         if (sourceIntervalMs <= 0.0) return 1.0;
         if (!(reserveMs >= 0.0) && !(reserveMs < 0.0)) return sourceIntervalMs;  // NaN
         const double burst = p.maxBurst > 1.0 ? p.maxBurst : 1.0;
-        if (reserveMs < 0.0) return sourceIntervalMs / burst;  // behind: catch up
+        if (reserveMs < 0.0) {
+            // Behind the playhead: catch up. Uses catchUpBurst, NOT maxBurst,
+            // so refill behavior is untouched when this is 1.0 (default).
+            const double cu = p.catchUpBurst > 1.0 ? p.catchUpBurst : 1.0;
+            return sourceIntervalMs / cu;
+        }
         if (reserveMs < p.lowWaterMs) {
             return sourceIntervalMs / burst;
         }

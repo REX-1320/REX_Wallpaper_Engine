@@ -80,6 +80,16 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
                          m_decodeAheadPolicy.highWaterMs);
         }
     }
+    // Catch-up burst: raises the decode-thread throughput ceiling ONLY while
+    // published content trails the wall clock (reserveMs < 0). Refill pacing
+    // is untouched, so this cannot build the deep reserve behind the 2x
+    // defect. Default on (2.0); set REX_CATCHUP_BURST to override ("1" = off).
+    if (const char* cuFlag = std::getenv("REX_CATCHUP_BURST")) {
+        const double cu = std::atof(cuFlag);
+        m_decodeAheadPolicy.catchUpBurst = cu > 1.0 ? cu : 1.0;
+        REX_LOG_INFO(kModule, "catch-up burst override ({:.1f}x) via REX_CATCHUP_BURST",
+                     m_decodeAheadPolicy.catchUpBurst);
+    }
     m_width  = m_decoder->GetWidth();
     m_height = m_decoder->GetHeight();
 

@@ -132,17 +132,42 @@ TEST(DecodeAheadPolicy, ParksAboveHighWater) {
 }
 
 TEST(DecodeAheadPolicy, BehindPlayheadBurstsAndNeverParks) {
-    // Negative lead = decode is behind the playhead (starved): burst to
-    // catch up when enabled, source rate otherwise — never park.
+    // Negative lead = decode is behind the playhead (starved): catch-up
+    // burst applies ONLY via catchUpBurst now — maxBurst alone paces at the
+    // source rate behind the playhead (it governs refill, not catch-up).
+    // Default policy ships catchUpBurst=2.0, so a default policy bursts
+    // behind; an explicit 1.0 forces plain source-rate pacing (rollback).
     CadenceController::DecodeAheadPolicy on;
     on.maxBurst = 2.0;
+    on.catchUpBurst = 1.0;
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -50.0, on),
-                16.667 / 2.0, 0.001);
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -10000.0, on),
-                16.667 / 2.0, 0.001);
-    CadenceController::DecodeAheadPolicy off;
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -50.0, off),
                 16.667, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -10000.0, on),
+                16.667, 0.001);
+    CadenceController::DecodeAheadPolicy defOff;
+    defOff.catchUpBurst = 1.0;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -50.0, defOff),
+                16.667, 0.001);
+    CadenceController::DecodeAheadPolicy def;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -50.0, def),
+                16.667 / 2.0, 0.001);
+}
+
+TEST(DecodeAheadPolicy, CatchUpBurstAppliesOnlyBehindPlayhead) {
+    // catchUpBurst=2: behind (negative) paces 2x; at/above water the refill
+    // and park behavior is byte-identical to burst-off (no deep reserve).
+    CadenceController::DecodeAheadPolicy cu;
+    cu.catchUpBurst = 2.0;
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, -50.0, cu),
+                8.333 / 2.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, -10000.0, cu),
+                8.333 / 2.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, 0.0, cu),
+                8.333, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, 10.0, cu),
+                8.333, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, 500.0, cu),
+                8.333 * 4.0, 0.001);  // parks above high water, unchanged
 }
 
 TEST(DecodeAheadPolicy, NanReserveIsSourceRate) {
