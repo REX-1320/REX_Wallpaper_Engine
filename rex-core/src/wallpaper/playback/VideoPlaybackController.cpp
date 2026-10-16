@@ -91,6 +91,14 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
         REX_LOG_INFO(kModule, "catch-up burst override ({:.1f}x) via REX_CATCHUP_BURST",
                      m_decodeAheadPolicy.catchUpBurst);
     }
+    // Decode pacing servo (default on): cancels the steady sleep overshoot
+    // closed-loop. Rollback: REX_DECODE_SERVO=0.
+    {
+        const char* ds = std::getenv("REX_DECODE_SERVO");
+        m_decodeServoEnabled = !(ds && ds[0] == '0');
+    }
+    m_decodeServo.Reset();
+    m_prevDecodeValid = false;
     m_width  = m_decoder->GetWidth();
     m_height = m_decoder->GetHeight();
 
@@ -458,6 +466,7 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     // not the nominal 200 ms / 2x targets. The pool caps the achievable
     // depth, and reporting the target would overstate it at high source rates.
     t.reserveMs = m_reserveMs.load(std::memory_order_relaxed);
+    t.decodeServoCorrMs = m_decodeServoCorrMs.load(std::memory_order_relaxed);
     t.decodeAheadRate = (m_frameRate > 0.0 && t.decoderFps > 0.0)
                             ? t.decoderFps / m_frameRate : 1.0;
     t.reserveUnderruns = m_reserveUnderruns.load(std::memory_order_relaxed);
@@ -640,8 +649,33 @@ void VideoPlaybackController::DecoderThread() {
             sourceIntervalMs, m_reserveMs.load(std::memory_order_relaxed),
             m_decodeAheadPolicy);
 
+        // Closed-loop decode pacing: the open-loop sleep overshoots by a
+        // steady ~+0.5 ms per iteration (measured: convFps 3-4% under source
+        // at 60 fps), which no fixed interval can recover — the reserve pins
+        // negative and catch-up burst cycles forever. Feed the achieved
+        // iteration interval back through the servo and trim the deadline.
+        // Stalls/pauses surface as one clamped correction (the servo's
+        // conditional integration refuses to bank them).
+        double servoCorrMs = 0.0;
+        if (m_decodeServoEnabled && intervalMs > 0.0) {
+            if (m_prevDecodeValid) {
+                const double achievedMs =
+                    std::chrono::duration<double, std::milli>(
+                        t0 - m_prevDecodeStart)
+                        .count();
+                servoCorrMs =
+                    m_decodeServo.Step(achievedMs - intervalMs, intervalMs);
+            }
+            m_prevDecodeStart = t0;
+            m_prevDecodeValid = true;
+        } else {
+            m_prevDecodeValid = false;
+        }
+        m_decodeServoCorrMs.store(servoCorrMs, std::memory_order_relaxed);
+
         rex::shared::PreciseSleepUntil(
-            t0 + std::chrono::duration<double, std::milli>(intervalMs));
+            t0 + std::chrono::duration<double, std::milli>(intervalMs +
+                                                           servoCorrMs));
         // Ring-full backstop. This is now a SAFETY net, not the primary
         // throttle — the reserve-aware check at the top of the loop handles the
         // normal "reserve is healthy" case. It only catches the pathological

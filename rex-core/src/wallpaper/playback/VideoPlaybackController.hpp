@@ -7,6 +7,7 @@
 #include "wallpaper/audio/AudioPlayer.hpp"
 
 #include <shared/Result.hpp>
+#include <shared/PacingServo.hpp>
 
 #include <windows.h>
 #include <d3d11_4.h>
@@ -61,6 +62,9 @@ struct VideoPlaybackTelemetry {
     // P13 per-stage percentiles (see DecoderDiagnostics).
     double   decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
     double   vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;
+    // Decode pacing servo correction applied to the last sleep deadline
+    // (negative pulls earlier). ~-0.5 ms steady-state on this machine.
+    double   decodeServoCorrMs = 0.0;
     uint32_t recoveryCount   = 0;
     uint64_t sendEagainStalls = 0;  // packets abandoned at send-EAGAIN
     uint32_t hwDecoderProfiles = 0;   // driver HW decoder profile count
@@ -250,6 +254,16 @@ private:
     std::atomic<uint64_t> m_reserveUnderruns{0};
     CadenceController::DecodeAheadPolicy m_decodeAheadPolicy{};
     std::atomic<double> m_position{0.0};
+    // Decode pacing servo: cancels the steady per-sleep wake overshoot
+    // (~+0.5 ms on this machine: ~3% slow at 60 fps, ~6% at 120 fps) that an
+    // open-loop interval can never recover — the reserve pins negative and
+    // catch-up burst cycles forever. Same PacingServo class as the render
+    // loop (shared/, unit-tested). Rollback: REX_DECODE_SERVO=0.
+    PacingServo m_decodeServo{};
+    std::atomic<double> m_decodeServoCorrMs{0.0};
+    bool m_decodeServoEnabled = true;
+    std::chrono::steady_clock::time_point m_prevDecodeStart{};
+    bool m_prevDecodeValid = false;
     // Per-frame stage CSV throttle (diagnostic): last dump time, decode-
     // thread owned. Dumps only when REX_PERFRAME_CSV=1 (see DecoderThread).
     // (Full type: the Clock alias is declared further below.)

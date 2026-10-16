@@ -1195,6 +1195,7 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.decodeMsP50    = vt.decodeMsP50;
         out.decodeMsP95    = vt.decodeMsP95;
         out.decodeMsP99    = vt.decodeMsP99;
+        out.decodeServoCorrMs = vt.decodeServoCorrMs;
         out.vpMsP50        = vt.vpMsP50;
         out.vpMsP95        = vt.vpMsP95;
         out.vpMsP99        = vt.vpMsP99;
@@ -2298,7 +2299,7 @@ void Engine::PaceLoop(
     // frame starts at the deadline, so phase and rate are the same knob and
     // steering phase would just trade the rate away (measured: centring phase
     // at 160 Hz costs -2.44% at 24 fps and -5.88% at 60 fps). See
-    // PhaseServo.hpp and docs/bugs/BASELINE-2026-10-15-phaseA.md.
+    // shared/PacingServo.hpp and docs/bugs/BASELINE-2026-10-15-phaseA.md.
     double servoCorrMs = 0.0;
     if (m_pacingServoEnabled) {
         const auto actual = std::chrono::duration<double, std::milli>(

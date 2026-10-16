@@ -684,7 +684,7 @@ static void TelemetryThread(std::mutex& engineGuard,
                        " | reserve=%.0fms ahead=%.2fx under=%llu"
                        " | servo=%d corr=%.3fms err=%.3fms int=%.3fms"
                        " | lattice=%.3fms@%u%s"
-                       " | decP50=%.2fms decP95=%.2fms decP99=%.2fms content=%.2fx"
+                       " | decP50=%.2fms decP95=%.2fms decP99=%.2fms content=%.2fx | dcorr=%.3fms"
                        " | unusable=%d\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
@@ -725,6 +725,9 @@ static void TelemetryThread(std::mutex& engineGuard,
                         // P0-2: content-rate — the only metric that catches
                         // content running at the wrong speed.
                         t.contentRate,
+                        // Decode pacing servo correction (see
+                        // VideoPlaybackController DecodeThread).
+                        t.decodeServoCorrMs,
                         // P2-1: unusable-path latch for the supervisor's
                         // poison-file park.
                         t.decodePathUnusable ? 1 : 0);
@@ -1328,6 +1331,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("decodeMsP50", json::Json(t.decodeMsP50));
             tel.emplace("decodeMsP95", json::Json(t.decodeMsP95));
             tel.emplace("decodeMsP99", json::Json(t.decodeMsP99));
+            tel.emplace("decodeServoCorrMs", json::Json(t.decodeServoCorrMs));
             tel.emplace("vpMsP50", json::Json(t.vpMsP50));
             tel.emplace("vpMsP95", json::Json(t.vpMsP95));
             tel.emplace("vpMsP99", json::Json(t.vpMsP99));

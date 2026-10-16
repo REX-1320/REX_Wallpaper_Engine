@@ -270,6 +270,9 @@ struct EngineTelemetry {
     // P13 per-stage decode-pipeline percentiles (ms, last 128 frames).
     double decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
     double vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;
+    // Decode pacing servo correction on the last sleep deadline (ms,
+    // negative pulls earlier). ~-0.5 steady-state on the reference machine.
+    double decodeServoCorrMs = 0.0;
 
     // GPU memory (adapter of the D3D12 renderer)
     uint64_t gpuDedicatedBytes = 0;  // LOCAL segment current usage

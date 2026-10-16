@@ -17,8 +17,8 @@
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "wallpaper/video/VideoManager.hpp"
 #include "wallpaper/engine/OcclusionPolicy.hpp"
-#include "wallpaper/engine/PhaseServo.hpp"
 #include "wallpaper/playback/StageTimer.hpp"
+#include <shared/PacingServo.hpp>
 #include "wallpaper/audio/AudioCapture.hpp"
 #include "modules/Settings/interfaces/ISettingsService.hpp"
 #include <rex/wallpaper/IRendererAdapter.hpp>
