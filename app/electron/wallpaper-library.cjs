@@ -53,6 +53,18 @@ class WallpaperLibrary {
     return path.normalize(filePath).toLowerCase()
   }
 
+  // Unlinks a cached poster webp, cache dir ONLY. The library thumbnail may
+  // point at the user's source file (static images) — deleting that would be
+  // data loss, so anything outside <userData>/thumbnails is left alone.
+  unlinkCachedPoster(thumbPath) {
+    try {
+      const dir = path.join(app.getPath('userData'), 'thumbnails') + path.sep
+      if (typeof thumbPath === 'string' && thumbPath.startsWith(dir)) {
+        fs.rmSync(thumbPath, { force: true })
+      }
+    } catch {}
+  }
+
   // ─── CRUD ─────────────────────────────────────────────────────────────
   async add(filePath, type = 'auto', extra = {}) {
     const normalized = this.normalizePath(filePath)
@@ -64,7 +76,19 @@ class WallpaperLibrary {
       let existing = { ...this.items[idx] }
       existing.lastUsed = new Date().toISOString()
       if (extra && typeof extra === 'object' && Object.keys(extra).length > 0) {
-        existing = { ...existing, ...extra }
+        // P0-6: a re-imported file's fresh poster replaces the old one, but
+        // the protected `thumbnail` field is NOT clobbered blindly — unlink
+        // the orphaned cached webp first (cache dir only, never touch the
+        // source file or anything outside the cache).
+        if (typeof extra.thumbnail === 'string' && extra.thumbnail &&
+            extra.thumbnail !== existing.thumbnail) {
+          this.unlinkCachedPoster(existing.thumbnail)
+        }
+        const { thumbnail, ...rest } = extra
+        existing = { ...existing, ...rest }
+        if (typeof thumbnail === 'string' && thumbnail) {
+          existing.thumbnail = thumbnail
+        }
       }
       existing.path = filePath
       this.items[idx] = existing
@@ -93,7 +117,9 @@ class WallpaperLibrary {
       }
     } catch {}
 
-    const thumbnail = detectedType === 'static' ? filePath : ''
+    const thumbnail = (extra && typeof extra.thumbnail === 'string' && extra.thumbnail)
+      ? extra.thumbnail
+      : (detectedType === 'static' ? filePath : '')
 
     const newItem = {
       id: crypto.randomUUID(),

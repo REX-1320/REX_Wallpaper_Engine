@@ -46,9 +46,15 @@ export async function buildFileRecord(f, pathHint = null, thumbUrl = null,
                                        opts = {}) {
   // skipThumbnail defers poster decoding so a large library restore can paint
   // its tiles immediately instead of blocking on N video seeks.
-  const thumb = opts.skipThumbnail ? null : await createThumbnail(f, thumbUrl)
+  //
+  // P0-6: createThumbnail(file, maxSize, urlOverride) resolves a bare data-URL
+  // string (or null) — NOT an object. The old call passed thumbUrl where
+  // maxSize belongs (URL-as-size → NaN canvas → null poster) and read
+  // thumb?.dataUrl off the string (always undefined → nothing persisted).
+  const thumbDataUrl = opts.skipThumbnail
+    ? null
+    : ((await createThumbnail(f, 480, thumbUrl)) ?? null)
   const id = crypto.randomUUID()
-  const thumbDataUrl = thumb?.dataUrl ?? null
   let thumbPath = null
   if (thumbDataUrl) {
     try {

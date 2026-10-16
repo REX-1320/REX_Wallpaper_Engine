@@ -514,30 +514,6 @@ app.whenReady().then(() => {
     }
   })
 
-  // ─── Gallery file restore (P0.3) ──────────────────────────────────────────
-  // Reads a persisted library path back into a data URL so the gallery can
-  // rebuild File objects after a restart. Missing/unreadable files report
-  // ok:false ('not-found') and the gallery skips them (kept in the library,
-  // never silently pruned — the drive may be temporarily unavailable).
-  ipcMain.handle('gallery.read-file', (event, { path: filePath } = {}) => {
-    try {
-      if (typeof filePath !== 'string' || !filePath) return { ok: false, error: 'bad-path' }
-      const stat = fs.statSync(filePath)
-      if (!stat.isFile()) return { ok: false, error: 'not-found' }
-      if (stat.size > 150 * 1024 * 1024) return { ok: false, error: 'too-large' }
-      const ext = path.extname(filePath).toLowerCase()
-      const mime = {
-        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-        '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
-        '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
-      }[ext] ?? 'application/octet-stream'
-      const dataUrl = `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`
-      return { ok: true, dataUrl, name: path.basename(filePath), size: stat.size, lastModified: stat.mtimeMs }
-    } catch (err) {
-      return { ok: false, error: err.code === 'ENOENT' ? 'not-found' : err.message }
-    }
-  })
-
   // ─── Custom title bar (traffic lights) ────────────────────────────────────
   ipcMain.on('window:minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()

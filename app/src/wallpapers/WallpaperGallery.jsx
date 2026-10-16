@@ -23,7 +23,7 @@ import {
 import DisplaySection from './inspector/sections/DisplaySection'
 import PlaylistEngineDialog from './playlist/PlaylistEngineDialog'
 import { playlistEngine } from './playlist/engine'
-import { createThumbnailFromUrl, deleteThumbnail } from './thumbnail'
+import { createThumbnailFromUrl, deleteThumbnail, toFileUrl } from './thumbnail'
 import { buildFileRecord, galleryAdd, galleryGet, galleryList, galleryRemove, galleryRestoreFile } from './gallery'
 
 const SORT_OPTIONS = [
@@ -119,11 +119,18 @@ export default function WallpaperGallery() {
     }
     // Drop the persisted library entry (best-effort). Importing the same
     // path again later re-creates both the entry and the tile.
+    // P0-6: also drop the library-persisted cached poster. deleteThumbnail
+    // is main-side guarded to the thumbnails cache dir, so a static entry
+    // whose thumbnail is the source file itself is never touched.
     try {
       const rp =
         (window.rexDesktop?.getPathForFile ? await window.rexDesktop.getPathForFile(record.file) : null) ??
         null
-      if (rp) galleryRemove(rp)?.catch?.(() => {})
+      if (rp) {
+        const entry = await galleryGet(rp).catch(() => null)
+        galleryRemove(rp)?.catch?.(() => {})
+        if (entry?.thumbnail) deleteThumbnail(entry.thumbnail)?.catch?.(() => {})
+      }
     } catch {
       // memory-only file: nothing persisted
     }
@@ -172,11 +179,14 @@ export default function WallpaperGallery() {
           // seeks, and doing that inline delays the first paint and competes
           // with the wallpaper's first seconds of playback — which is exactly
           // the window that already stutters while Chromium warms up.
-          restored.push(
-            await buildFileRecord(file, itemPath ?? item?.path ?? null, url, {
-              skipThumbnail: true,
-            }),
-          )
+          const record = await buildFileRecord(file, itemPath ?? item?.path ?? null, url, {
+            skipThumbnail: true,
+          })
+          // P0-6: keep the library entry alongside so the persisted cached
+          // poster can be preferred below (restored skips missing files, so
+          // positional indexing into `items` would misalign).
+          record.libraryItem = item
+          restored.push(record)
         } catch {
           // unloadable file: skip tile, keep library entry
         }
@@ -184,6 +194,26 @@ export default function WallpaperGallery() {
       // Restored tiles are appended even when none produced a thumbnail; a
       // poster-less tile is still a usable, clickable entry.
       if (cancelled || restored.length === 0) return
+      // P0-6: prefer the persisted cached poster (no re-decode). The cache
+      // file may be gone (user cleaned the cache dir) — probe it with an
+      // Image first and fall through to progressive decode on failure, so a
+      // stale library path self-heals instead of showing a broken image.
+      const probePoster = (fileUrl) =>
+        new Promise((resolve) => {
+          if (!fileUrl) return resolve(null)
+          const img = new Image()
+          img.onload = () => resolve(fileUrl)
+          img.onerror = () => resolve(null)
+          img.src = fileUrl
+        })
+      for (const r of restored) {
+        if (cancelled || r.thumbDataUrl) continue
+        const cached = r.libraryItem?.thumbnail
+          ? await probePoster(toFileUrl(r.libraryItem.thumbnail))
+          : null
+        if (cancelled) return
+        if (cached) r.thumbDataUrl = cached
+      }
       for (const r of restored) {
         if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
       }
@@ -308,10 +338,15 @@ export default function WallpaperGallery() {
     // Persist fresh imports to the library (best-effort; bridge absent
     // outside the desktop app). gallery.add dedups by normalized path, so a
     // re-imported edited file bumps lastUsed instead of duplicating.
-    for (const f of freshList) {
+    // P0-6: hand the freshly persisted poster to the library so a later
+    // restart can prefer the cached webp over re-decoding the video.
+    freshList.forEach((f, i) => {
       const p = realPaths.get(f)
-      if (p) galleryAdd(p, f.type.startsWith('video/') ? 'video' : 'auto').catch(() => {})
-    }
+      if (p) {
+        const extra = records[i]?.thumbPath ? { thumbnail: records[i].thumbPath } : undefined
+        galleryAdd(p, f.type.startsWith('video/') ? 'video' : 'auto', extra).catch(() => {})
+      }
+    })
     await loadWallpaperFile(records[0].file, records[0].path ?? null)
     e.target.value = ''
   }
