@@ -463,6 +463,13 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
     m_currentScene = scene;
     m_currentPosition = 0.0;
     m_positionBase.store(0.0, std::memory_order_relaxed);
+    // Fresh stream, fresh wall clock: the stopwatch kept running from the
+    // PREVIOUS file, so GetPosition() (= base + elapsed) opened hundreds of
+    // seconds in and the decoder saw a hugely negative lead → catch-up burst
+    // → every apply played fast-forward for seconds ("loads fast", all
+    // files). Restart it here so wall and content start at zero together.
+    m_stopwatch.Reset();
+    m_stopwatch.Start();
 
     // Activate the renderer adapter for this scene type. Every later
     // SetProperty call is gated by what the adapter supports, so
