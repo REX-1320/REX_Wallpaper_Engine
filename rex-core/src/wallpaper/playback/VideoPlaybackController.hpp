@@ -72,6 +72,10 @@ struct VideoPlaybackTelemetry {
     // Largest drop burst seen inside the current window, so a spike the
     // average smooths away is still visible.
     double   schedulerDropsPeak = 0.0;
+    // P2-1 unusable-path latch (decoder never produced a frame: zero
+    // progress past budget, or send-fail streak on a never-decoded path).
+    // The supervisor poison-parks on this; the reason is in runtime.log.
+    bool     decodePathUnusable = false;
     // P0-2 content-rate check: seconds of CONTENT advanced per second of
     // wall clock, from presented PTS over a 10 s window (1.0 = realtime).
     // Position and playbackSpeed read healthy even when displayed content

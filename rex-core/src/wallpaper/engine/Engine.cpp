@@ -1183,6 +1183,7 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
         out.reserveUnderruns   = vt.reserveUnderruns;
         out.playbackSpeed  = vt.playbackSpeed;
         out.contentRate    = vt.contentRate;
+        out.decodePathUnusable = vt.decodePathUnusable;
         out.repeatedFrames =
             m_repeatedVideoFrames.load(std::memory_order_relaxed);
         // Cadence re-presents of the cached frame (Phase 3); increments

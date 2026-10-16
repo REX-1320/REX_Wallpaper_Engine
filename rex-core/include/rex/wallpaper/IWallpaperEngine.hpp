@@ -261,6 +261,12 @@ struct EngineTelemetry {
     // content itself. 0.0 until the first window elapses (or no video).
     double contentRate = 0.0;
 
+    // P2-1 unusable-path latch: the decoder never produced a frame for this
+    // file (zero progress past budget, or send-fail streak while
+    // never-decoded). The supervisor poison-parks on this; the reason is
+    // in runtime.log. False when no video is open.
+    bool decodePathUnusable = false;
+
     // P13 per-stage decode-pipeline percentiles (ms, last 128 frames).
     double decodeMsP50 = 0.0, decodeMsP95 = 0.0, decodeMsP99 = 0.0;
     double vpMsP50     = 0.0, vpMsP95     = 0.0, vpMsP99     = 0.0;

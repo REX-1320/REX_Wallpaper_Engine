@@ -99,6 +99,11 @@ struct DecoderDiagnostics {
     uint32_t hwDecoderProfiles = 0;
     bool     hardwareAccelerated = false;
     bool     eof              = false;
+    // P2-1 unusable-path latch: zero frames decoded after the zero-progress
+    // budget (or a send-fail streak on a never-decoded path). The supervisor
+    // poison-parks on this instead of stalling forever; the reason lives in
+    // runtime.log (logged once at latch time), the bool travels in telemetry.
+    bool     pathUnusable     = false;
 };
 
 // ─── Send-EAGAIN retry policy (pure, unit-testable) ──────────────────────
@@ -118,6 +123,18 @@ struct DecoderDiagnostics {
 // contract's ideal behaviour).
 inline bool ShouldRetrySendPacket(int retryCount, int maxBudget) {
     return retryCount < maxBudget;
+}
+
+// ─── Unusable-decode-path predicate (pure, unit-testable) ─────────────
+//
+// Zero frames decoded after `budget` DecodeFrame attempts (or a send-fail
+// streak on a never-decoded path) means the path is unusable, not slow:
+// surface it so the supervisor can poison-park the file instead of
+// stalling on it forever (P2-1/P2-3). Attempts reset on the first decoded
+// frame, so a slow-but-working path never trips this.
+inline bool DecodePathUnusable(uint64_t framesDecoded, uint64_t attempts,
+                               uint64_t budget = 240) {
+    return framesDecoded == 0 && attempts >= budget;
 }
 
 // ─── Source frame-rate resolution (pure, unit-testable) ────────────────
@@ -286,6 +303,12 @@ private:
     // re-seeks and restarts the streak, so this prevents re-announcing the
     // same unusable-decoder error on every loop until a send succeeds.
     bool m_sendFailReported = false;
+    // P2-1 unusable-path latch (decode-thread written, diagnostics read):
+    // 0 = healthy, 1 = zero frames after the zero-progress budget,
+    // 2 = send-fail streak on a never-decoded path. Write-once per Open
+    // (never cleared except by Close/reopen); the reason is logged once at
+    // latch time, the code travels in DecoderDiagnostics for the supervisor.
+    std::atomic<uint64_t> m_unusableCode{0};
     // P1-8: written by the decode thread, read unlocked by diagnostics —
     // plain bools were a data race. Relaxed: flags only, no ordering.
     std::atomic<bool> m_hardware{false};

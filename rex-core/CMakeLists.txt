@@ -395,6 +395,7 @@ if(BUILD_TESTING)
         tests/wallpaper/test_frame_scheduler_selection.cpp
         tests/wallpaper/test_content_rate.cpp
         tests/wallpaper/test_frame_rate.cpp
+        tests/wallpaper/test_decode_fallback.cpp
         tests/wallpaper/test_phase_servo.cpp
         tests/wallpaper/test_decoder_inventory.cpp
         tests/wallpaper/test_decoder_packet_contract.cpp
