@@ -1,6 +1,6 @@
 // Smoke test for the supervisor pieces against the real built binaries:
 //   1. PING heartbeat against a live rex-wallpaper-runtime.exe
-//   2. StateStore persist + crash report writing
+//   2. Crash report writing
 //   3. rex-minidump.exe capture of the live runtime process
 //   4. Supervisor circuit breaker (runtime killed -> recovery -> report)
 //
@@ -14,7 +14,6 @@ const ROOT = path.resolve(__dirname, '..', 'app', 'electron')
 const RUNTIME = path.resolve(__dirname, '..', 'rex-core', '.build', 'Release', 'rex-wallpaper-runtime.exe')
 const { WallpaperRuntime } = require(path.join(ROOT, 'wallpaperRuntime.cjs'))
 const { RuntimeManager } = require(path.join(ROOT, 'supervisor', 'runtime-manager.cjs'))
-const { StateStore } = require(path.join(ROOT, 'supervisor', 'state-store.cjs'))
 const { CrashReporter } = require(path.join(ROOT, 'supervisor', 'crash-reporter.cjs'))
 const { Minidump } = require(path.join(ROOT, 'supervisor', 'minidump.cjs'))
 const { Supervisor } = require(path.join(ROOT, 'supervisor', 'supervisor.cjs'))
@@ -28,51 +27,50 @@ const check = (name, cond, extra) => {
 }
 
 async function main() {
-  // 1. Runtime + PING
+  // 1. Runtime + PING. send() resolves msg.data (null for PING) on
+  // success and rejects on timeout — so resolution itself is the proof of
+  // life. (The old assertion `pong.pong === true` could never pass: native
+  // sends null data.)
   const runtime = new WallpaperRuntime(RUNTIME, log)
   const mgr = new RuntimeManager(runtime)
   check('manager wraps runtime', mgr.runtime === runtime)
   await runtime.init(60, false)
-  const pong = await runtime.send('PING')
-  check('PING responds', pong && pong.pong === true, JSON.stringify(pong))
+  let pongOk = false
+  try {
+    await runtime.send('PING')
+    pongOk = true
+  } catch {}
+  check('PING responds (resolves without timeout)', pongOk)
   check('alive', mgr.alive === true)
   const pingOk = await mgr.ping(2000)
   check('mgr.ping() true', pingOk === true)
 
-  // 2. StateStore
-  const store = new StateStore(path.join(tmp, 'state.json'))
-  store.update({ lastWallpaper: 'C:/w/x.jpg', wallpaperType: 'image', fillMode: 'fill' })
-  const store2 = new StateStore(path.join(tmp, 'state.json'))
-  const s = store2.get()
-  check('state persisted', s.lastWallpaper === 'C:/w/x.jpg' && s.generation === 1, JSON.stringify(s))
-
-  // 3. CrashReporter
+  // 2. CrashReporter
   const reporter = new CrashReporter({ baseDir: path.join(tmp, 'crashes'), logLine: log })
   const reportDir = reporter.writeReport({
     reason: 'runtime-exit',
     exitCode: -1,
     pid: 9999,
-    state: store2.get(),
+    state: { lastWallpaper: 'C:/w/x.jpg', wallpaperType: 'image', fillMode: 'fill' },
     logs: { appLog: __filename },
   })
   check('report dir written', !!reportDir && fs.existsSync(path.join(reportDir, 'report.json')))
   check('system-info written', fs.existsSync(path.join(reportDir, 'system-info.json')))
   check('log copied', fs.existsSync(path.join(reportDir, 'rex-app.log')))
 
-  // 4. Minidump of the live runtime
+  // 3. Minidump of the live runtime
   const minidump = new Minidump({ logLine: log })
   const dmpPath = path.join(reporter.baseDir, `runtime-${runtime.proc.pid}.dmp`)
   const res = await minidump.capture(runtime.proc.pid, dmpPath)
   check('minidump captured', res.ok && fs.existsSync(dmpPath) && fs.statSync(dmpPath).size > 100000,
     JSON.stringify(res).slice(0, 200))
 
-  // 5. Supervisor: kill runtime -> exit handler -> recovery attempt (reapply
+  // 4. Supervisor: kill runtime -> exit handler -> recovery attempt (reapply
   //    fails because reapply callback returns false here; circuit breaker).
   let reapplied = 0
   let availability = []
   const sup = new Supervisor({
     runtime,
-    stateStore: store2,
     crashReporter: reporter,
     minidump,
     logLine: log,

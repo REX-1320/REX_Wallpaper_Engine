@@ -14,13 +14,13 @@
 //                        replay of the last applied wallpaper via the app's
 //                        reapply callback. A circuit breaker stops after
 //                        maxRecoveryAttempts consecutive failures.
-//   State              — every successful apply is persisted to the StateStore
-//                        so recovery survives an Electron restart too.
+//                        Cross-restart state lives in startup.cjs
+//                        last-wallpaper.json (single source of truth); the
+//                        supervisor keeps no persisted state of its own.
 
 const { CrashReporter } = require('./crash-reporter.cjs')
 const { Minidump } = require('./minidump.cjs')
 const { RuntimeManager } = require('./runtime-manager.cjs')
-const { StateStore } = require('./state-store.cjs')
 
 const DEFAULTS = {
   heartbeatIntervalMs: 2000,
@@ -32,14 +32,13 @@ const DEFAULTS = {
 }
 
 class Supervisor {
-  // deps: { runtime, stateStore, crashReporter, minidump, logLine,
+  // deps: { runtime, crashReporter, minidump, logLine,
   //         getWindow, getLastApplied, reapply, setRuntimeAvailable,
   //         onEvent }
   constructor(deps) {
     this.deps = deps
     this.opts = { ...DEFAULTS, ...(deps.options ?? {}) }
     this.manager = deps.runtime instanceof RuntimeManager ? deps.runtime : new RuntimeManager(deps.runtime)
-    this.stateStore = deps.stateStore ?? new StateStore(deps.stateFilePath ?? '')
     this.crashReporter = deps.crashReporter ?? new CrashReporter({})
     this.minidump = deps.minidump ?? new Minidump({})
 
@@ -113,7 +112,7 @@ class Supervisor {
       runtimeAlive: this.manager.alive,
       runtimePid: this.manager.pid,
       lastRendererPing: this.lastRendererPing,
-      state: this.stateStore.get(),
+      lastApplied: this.deps.getLastApplied?.() ?? null,
     }
   }
 
@@ -206,7 +205,9 @@ class Supervisor {
     // Poison-file circuit breaker (see constructor): reapply success
     // below resets recoveryAttempts, so a file that kills the runtime
     // seconds after every successful re-apply would loop forever.
-    const cur = this.deps.getLastApplied?.() ?? this.stateStore.get()
+    // getLastApplied is the single source of truth (in-memory in main,
+    // persisted across restarts by startup.cjs last-wallpaper.json).
+    const cur = this.deps.getLastApplied?.()
     const curPath = cur?.params?.path ?? null
     const abnormal = code !== 0 && code !== null && code !== undefined
     if (abnormal && curPath && curPath === this.lastRecoveredPath) {
@@ -248,7 +249,7 @@ class Supervisor {
 
   // ─── Crash reporting ──────────────────────────────────────────────────────
   _writeReport({ reason, exitCode, pid, minidump = false }) {
-    const state = this.deps.getLastApplied?.() ?? this.stateStore.get()
+    const state = this.deps.getLastApplied?.() ?? null
     const logs = {
       runtimeLog: this.deps.logs?.runtimeLog,
       crashLog: this.deps.logs?.crashLog,

@@ -1,6 +1,8 @@
 'use strict'
 // P0.2 headless proof: REAL WallpaperRuntime + RuntimeManager + Supervisor +
-// CrashReporter + StateStore against a fake native. Scenarios A-G.
+// CrashReporter against a fake native. Scenarios A-G.
+// (StateStore was deleted: cross-restart state lives in startup.cjs
+// last-wallpaper.json; the supervisor keeps no persisted state.)
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -8,7 +10,6 @@ const { WallpaperRuntime } = require('D:\\REX_doc\\app\\electron\\wallpaperRunti
 const { RuntimeManager } = require('D:\\REX_doc\\app\\electron\\supervisor\\runtime-manager.cjs')
 const { Supervisor } = require('D:\\REX_doc\\app\\electron\\supervisor\\supervisor.cjs')
 const { CrashReporter } = require('D:\\REX_doc\\app\\electron\\supervisor\\crash-reporter.cjs')
-const { StateStore } = require('D:\\REX_doc\\app\\electron\\supervisor\\state-store.cjs')
 
 const FAKE = 'C:\\Users\\Moinu\\AppData\\Local\\Temp\\opencode\\rex-verify\\fake_native.cjs'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -25,9 +26,10 @@ function makeEnv(tag, opts, fakeEnv) {
   const dir = tmpDir(tag)
   const log = []
   const events = []
+  const msgs = []
   const avail = []
   const env = {
-    dir, log, events, avail,
+    dir, log, events, msgs, avail,
     reapplies: 0,
     reapplyResult: true,
     win: null,
@@ -58,8 +60,7 @@ function makeEnv(tag, opts, fakeEnv) {
     getLastApplied: () => ({ kind: 'video', params: { path: 'x.mp4' } }),
     reapply: async () => { env.reapplies++; return env.reapplyResult },
     setRuntimeAvailable: (v) => avail.push(v),
-    onEvent: (m) => events.push(m.event),
-    stateFilePath: path.join(dir, 'supervisor-state.json'),
+    onEvent: (m) => { events.push(m.event); msgs.push(m) },
     crashReporter: new CrashReporter({ baseDir: path.join(dir, 'crashes') }),
     minidump: { capture: async () => ({ ok: false }) },
     logs: {},
@@ -162,6 +163,32 @@ async function scenarioG() {
   sup.stop(); try { rt.proc && rt.proc.kill() } catch {}
 }
 
+async function scenarioH() {
+  // Poison-file breaker: same path crashes AFTER every successful reapply.
+  // getLastApplied always reports poison.mp4; each reapply succeeds AND
+  // restarts the fake so it can crash again. Expect exactly 2 reapplies,
+  // then a park with the recovery-parked-poison event carrying path+streak
+  // (the renderer toasts on this event — see runtimeEvents.js).
+  const { env, rt, sup } = makeEnv('h', {}, { FAKE_EXIT_AFTER_MS: '400', FAKE_EXIT_CODE: '2' })
+  sup.deps.getLastApplied = () => ({ kind: 'video', params: { path: 'poison.mp4' } })
+  sup.deps.reapply = async () => {
+    env.reapplies++
+    await rt.init(60, true)
+    return true
+  }
+  await rt.init(60, true)
+  sup.start()
+  await sleep(5000)
+  const park = env.msgs.find((m) => m.event === 'recovery-parked-poison')
+  check('H: exactly 2 reapplies then park', env.reapplies === 2, 'reapplies=' + env.reapplies)
+  check('H: parked-poison event fired', !!park)
+  check('H: event carries path+streak',
+    !!park && park.data && park.data.path === 'poison.mp4' && park.data.streak === 2,
+    JSON.stringify(park && park.data))
+  check('H: no gave-up (park preempts the cap)', !env.events.includes('recovery-gave-up'))
+  sup.stop(); try { rt.proc && rt.proc.kill() } catch {}
+}
+
 async function main() {
   await scenarioA()
   await scenarioB()
@@ -170,6 +197,7 @@ async function main() {
   await scenarioE()
   await scenarioF()
   await scenarioG()
+  await scenarioH()
   console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURES')
   process.exit(failures === 0 ? 0 : 1)
 }

@@ -178,7 +178,12 @@ class AppStateManager {
     const keys = keyPath.split('.')
     let obj = this.state
     for (let i = 0; i < keys.length - 1; i++) {
-      obj = obj[keys[i]]
+      // Create missing intermediates so set() on a never-existing nested key
+      // works instead of throwing (get() was already safe). A primitive in
+      // the way is replaced — it cannot hold the new subtree.
+      const k = keys[i]
+      if (obj[k] === null || typeof obj[k] !== 'object') obj[k] = {}
+      obj = obj[k]
     }
     obj[keys[keys.length - 1]] = value
     this.save()

@@ -625,7 +625,6 @@ app.whenReady().then(() => {
         win.webContents.send('wallpaper:event', msg)
       }
     },
-    stateFilePath: path.join(app.getPath('userData'), 'supervisor-state.json'),
     logs: {
       runtimeLog: path.join(tempDir, 'REX', 'runtime.log'),
       crashLog: path.join(tempDir, 'REX', 'crash.log'),
