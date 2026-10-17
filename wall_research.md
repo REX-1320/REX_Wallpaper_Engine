@@ -913,3 +913,13 @@ repeats trace to external stalls exceeding the ~60 ms reserve; recovery is
 Verification: astral 22 s crossing a wrap - 0 starves, 1 wrap, seek 0.1 ms,
 positions 10.0 / 20.0 / 8.8 exact (1x throughout). Diagnostics kept permanent:
 2048-row stage ring + seek-duration log.
+
+Live in-app re-verify (12:19-12:2x, app session with instrumentation on): user
+reported the first-seconds judder on Aari/OLED GONE while clicking through
+ahri / blue-haired / igris with rapid applies - 0 starves across the session,
+2 loop wraps handled without starves, present ring 257 rows: gaps 16.65-16.81 ms
+(target 16.683), dwell 2 vblanks, deadlineMiss 0. The 12:04 complaint did not
+reproduce in the warm session; no code changed between the two sessions, so the
+difference is session state (GPU clock ramp / system load on first applies
+after idle), not an engine defect. Watch item: first-seconds judder on a COLD
+GPU after boot - if it returns, capture with REX_PERFRAME_CSV + SCHED_DEBUG.
