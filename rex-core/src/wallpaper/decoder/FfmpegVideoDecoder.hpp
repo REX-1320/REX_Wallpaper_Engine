@@ -124,8 +124,21 @@ struct DecoderDiagnostics {
 // retryCount is the number of consecutive EAGAIN retries already spent on the
 // CURRENT packet; maxBudget < 0 means "unbounded" (used by tests to show the
 // contract's ideal behaviour).
-inline bool ShouldRetrySendPacket(int retryCount, int maxBudget) {
-    return retryCount < maxBudget;
+//
+// The helper CONSUMES one retry per call and RESETS the count when the budget
+// is spent: the budget bounds ONE packet's retries, it must not poison every
+// later packet. The defect this guards (audit 2026-10-17 D1): the decoder
+// kept its exhausted count across packets, so after a single saturated
+// episode — e.g. the startup refill burst loading the decoder — every later
+// EAGAIN packet was dropped instantly with no retry at all, which is
+// intermittent-start-stutter shaped.
+inline bool ShouldRetrySendPacket(int& retryCount, int maxBudget) {
+    if (maxBudget < 0 || retryCount < maxBudget) {
+        ++retryCount;
+        return true;
+    }
+    retryCount = 0;  // episode over: the NEXT packet gets a fresh budget
+    return false;
 }
 
 // ─── Unusable-decode-path predicate (pure, unit-testable) ─────────────

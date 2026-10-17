@@ -30,6 +30,7 @@ extern "C" {
 #include <vector>
 
 #include "wallpaper/audio/AudioPlayer.hpp"
+#include "wallpaper/audio/AudioCapture.hpp"
 
 using namespace rex::wallpaper;
 
@@ -395,6 +396,95 @@ TEST(AudioModeTest, UnsupportedWidthsStepDownToLadder) {
     EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Stereo, 2, 8), 2);
     // A hypothetical 8ch source asked for "auto" on an 8ch endpoint.
     EXPECT_EQ(AudioPlayer::NegotiateChannels(AudioOutputMode::Auto, 8, 8), 6);
+}
+
+// ─── Ring layout ─────────────────────────────────────────────────────────
+
+// The defect this guards (audit 2026-10-17 P0): ResizeRing's early-return
+// compared the TRACKED channel count against the request, but the caller
+// (OpenEndpoint) assigns the tracked count BEFORE calling it — so the check
+// was always true and a stereo ring stayed allocated under a 5.1/quad
+// layout. PushFrameToRing then wrote a wider stride into the smaller
+// allocation (heap overrun). The predicate must verify the ALLOCATION.
+TEST(AudioRingLayoutTest, StereoAllocationIsNotReusedForWiderLayout) {
+    // Ring holds 1 s @ 48 kHz stereo; a 5.1 request must force a rebuild.
+    EXPECT_FALSE(RingLayoutMatches(/*ringSize=*/48000 * 2, /*ringFrames=*/48000,
+                                   /*wantFrames=*/48000, /*wantChannels=*/6));
+}
+
+TEST(AudioRingLayoutTest, MatchingAllocationIsReused) {
+    EXPECT_TRUE(RingLayoutMatches(48000 * 2, 48000, 48000, 2));
+    EXPECT_TRUE(RingLayoutMatches(48000 * 6, 48000, 48000, 6));
+}
+
+TEST(AudioRingLayoutTest, StaleCapacityForcesAResize) {
+    EXPECT_FALSE(RingLayoutMatches(24000 * 2, 24000, 48000, 2));
+}
+
+TEST(AudioRingLayoutTest, EmptyRingAlwaysResizes) {
+    EXPECT_FALSE(RingLayoutMatches(0, 0, 48000, 2));
+}
+
+// ─── Capture format classification ───────────────────────────────────────
+
+namespace {
+WAVEFORMATEXTENSIBLE MakeExtensible(WORD channels, DWORD rate, WORD bits,
+                                    const GUID& sub) {
+    WAVEFORMATEXTENSIBLE wf{};
+    wf.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    wf.Format.nChannels = channels;
+    wf.Format.nSamplesPerSec = rate;
+    wf.Format.wBitsPerSample = bits;
+    wf.Format.nBlockAlign = static_cast<WORD>(channels * bits / 8);
+    wf.Format.nAvgBytesPerSec = rate * wf.Format.nBlockAlign;
+    wf.Format.cbSize =
+        sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    wf.Samples.wValidBitsPerSample = bits;
+    wf.SubFormat = sub;
+    return wf;
+}
+} // namespace
+
+// The defect this guards (audit 2026-10-17 AU2): WAVE_FORMAT_EXTENSIBLE was
+// lumped in with PCM and read as int16, but the shared-mode mix format on
+// most endpoints is 32-bit FLOAT inside an EXTENSIBLE container — so the
+// spectrum was computed from reinterpreted float bytes (garbage bands). The
+// real sample type lives in the SubFormat GUID, not in wFormatTag.
+TEST(AudioCaptureFormatTest, ExtensibleFloatIsFloatNotS16) {
+    auto wf = MakeExtensible(2, 48000, 32, kCaptureSubtypeIeeeFloat);
+    EXPECT_EQ(ClassifyCaptureFormat(reinterpret_cast<const WAVEFORMATEX*>(&wf)),
+              CaptureSampleFormat::Float32);
+}
+
+TEST(AudioCaptureFormatTest, ExtensiblePcmUsesBitsPerSample) {
+    auto pcm16 = MakeExtensible(6, 48000, 16, kCaptureSubtypePcm);
+    EXPECT_EQ(
+        ClassifyCaptureFormat(reinterpret_cast<const WAVEFORMATEX*>(&pcm16)),
+        CaptureSampleFormat::S16);
+    auto pcm32 = MakeExtensible(2, 48000, 32, kCaptureSubtypePcm);
+    EXPECT_EQ(
+        ClassifyCaptureFormat(reinterpret_cast<const WAVEFORMATEX*>(&pcm32)),
+        CaptureSampleFormat::S32);
+}
+
+TEST(AudioCaptureFormatTest, PlainTagsClassify) {
+    WAVEFORMATEX pcm{};
+    pcm.wFormatTag = WAVE_FORMAT_PCM;
+    pcm.wBitsPerSample = 16;
+    EXPECT_EQ(ClassifyCaptureFormat(&pcm), CaptureSampleFormat::S16);
+    WAVEFORMATEX flt{};
+    flt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    flt.wBitsPerSample = 32;
+    EXPECT_EQ(ClassifyCaptureFormat(&flt), CaptureSampleFormat::Float32);
+}
+
+TEST(AudioCaptureFormatTest, UnknownSubformatIsUnsupportedNotS16) {
+    // Reinterpreting an unknown payload as PCM would feed the FFT garbage —
+    // an unsupported classification keeps the waveform at silence instead.
+    GUID bogus = {0x12345678, 0x1234, 0x1234, {1, 2, 3, 4, 5, 6, 7, 8}};
+    auto wf = MakeExtensible(2, 48000, 32, bogus);
+    EXPECT_EQ(ClassifyCaptureFormat(reinterpret_cast<const WAVEFORMATEX*>(&wf)),
+              CaptureSampleFormat::Unsupported);
 }
 
 // ─── Downmix matrix ──────────────────────────────────────────────────────

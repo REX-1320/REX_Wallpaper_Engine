@@ -963,9 +963,11 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             // The retry is bounded because D3D11VA can return EAGAIN from send
             // while receive also returns EAGAIN (saturated surface pool), and
             // an unbounded retry spins forever holding the decode mutex.
+            // ShouldRetrySendPacket consumes one retry and RESETS the budget
+            // when spent, so the next packet starts fresh instead of being
+            // dropped instantly for the rest of the stream (audit D1).
             if (rex::wallpaper::ShouldRetrySendPacket(m_sendEagainRetries,
                                                       kMaxSendEagainRetries)) {
-                ++m_sendEagainRetries;
                 continue;
             }
             REX_LOG_WARN(kModule, "avcodec_send_packet stuck at EAGAIN ({} "

@@ -39,6 +39,7 @@ export default function DesktopApply() {
         active.playback.mute,
         active.playback.volume,
         active.playback.speed,
+        active.playback.audioMode,
       ].join('|')
     : null
 

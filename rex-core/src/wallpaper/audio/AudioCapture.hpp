@@ -2,15 +2,73 @@
 
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <vector>
 #include <windows.h>
+#include <mmreg.h>
 #include <wrl/client.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 
 namespace rex::wallpaper {
+
+// ─── Capture format classification ───────────────────────────────────────
+//
+// The shared-mode mix format is frequently WAVE_FORMAT_EXTENSIBLE (any
+// >2-channel endpoint, and most float32 endpoints), whose REAL sample type
+// lives in the SubFormat GUID — not in wFormatTag. Treating EXTENSIBLE as
+// PCM int16 reinterpreted float32 bytes as int16 (garbage spectrum bands;
+// audit 2026-10-17 AU2).
+//
+// The GUIDs are local constants — referencing the SDK's extern
+// KSDATAFORMAT_SUBTYPE_* symbols would drag in uuid.lib; same practice as
+// the decoder's DXVA profile table. Values are the standard serialized
+// {0000000X-0000-0010-8000-00AA00389B71} forms.
+inline constexpr GUID kCaptureSubtypePcm = {
+    0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+inline constexpr GUID kCaptureSubtypeIeeeFloat = {
+    0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+
+inline bool CaptureGuidEquals(const GUID& a, const GUID& b) {
+    return a.Data1 == b.Data1 && a.Data2 == b.Data2 && a.Data3 == b.Data3 &&
+           std::memcmp(a.Data4, b.Data4, sizeof(a.Data4)) == 0;
+}
+
+enum class CaptureSampleFormat { Unsupported, Float32, S16, S24, S32 };
+
+inline CaptureSampleFormat ClassifyCaptureFormat(const WAVEFORMATEX* wf) {
+    if (!wf) return CaptureSampleFormat::Unsupported;
+    if (wf->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+        return CaptureSampleFormat::Float32;
+    }
+    if (wf->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        if (wf->cbSize <
+            sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+            return CaptureSampleFormat::Unsupported;  // SubFormat absent
+        }
+        const GUID& sub =
+            reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(wf)->SubFormat;
+        if (CaptureGuidEquals(sub, kCaptureSubtypeIeeeFloat)) {
+            return CaptureSampleFormat::Float32;
+        }
+        if (!CaptureGuidEquals(sub, kCaptureSubtypePcm)) {
+            // e.g. passthrough/compressed subtypes: reinterpretation would
+            // feed the FFT garbage — silence beats garbage.
+            return CaptureSampleFormat::Unsupported;
+        }
+        // EXTENSIBLE + PCM: fall through to the container-bits switch.
+    } else if (wf->wFormatTag != WAVE_FORMAT_PCM) {
+        return CaptureSampleFormat::Unsupported;
+    }
+    switch (wf->wBitsPerSample) {
+        case 16: return CaptureSampleFormat::S16;
+        case 24: return CaptureSampleFormat::S24;
+        case 32: return CaptureSampleFormat::S32;
+        default: return CaptureSampleFormat::Unsupported;
+    }
+}
 
 // Captures loopback audio via WASAPI and computes an FFT spectrum.
 // Thread-safe; the render thread reads the latest spectrum.

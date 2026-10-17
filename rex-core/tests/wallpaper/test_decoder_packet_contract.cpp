@@ -202,9 +202,9 @@ p->data = static_cast<uint8_t*>(av_malloc(size));
             const int s = avcodec_send_packet(dec, p);
             if (s == AVERROR(EAGAIN)) {
                 // The contract: the packet was not consumed. Drain output,
-                // then retry the SAME packet.
+                // then retry the SAME packet. The helper consumes the retry
+                // and resets the count once spent (see its header comment).
                 if (rex::wallpaper::ShouldRetrySendPacket(retries, maxSendBudget)) {
-                    ++retries;
                     ++r.sendRetries;
                     AVFrame* drain = av_frame_alloc();
                     while (avcodec_receive_frame(dec, drain) == 0) {
@@ -322,16 +322,37 @@ const EncodedStream& Stream() {
 
 TEST(SendPacketContract, RetriesWhileUnderBudget) {
     using rex::wallpaper::ShouldRetrySendPacket;
-    EXPECT_TRUE(ShouldRetrySendPacket(0, 8));
-    EXPECT_TRUE(ShouldRetrySendPacket(7, 8));
+    int retries = 0;
+    // The helper CONSUMES one retry per call: eight calls spend the budget.
+    for (int i = 0; i < 8; ++i) EXPECT_TRUE(ShouldRetrySendPacket(retries, 8));
     // Budget exhausted -> the decoder was refusing input; advance the demuxer.
-    EXPECT_FALSE(ShouldRetrySendPacket(8, 8));
-    EXPECT_FALSE(ShouldRetrySendPacket(99, 8));
+    // (The next call RE-ARMS the budget for the next packet; that contract is
+    // asserted in ExhaustedBudgetResetsForTheNextPacket.)
+    EXPECT_FALSE(ShouldRetrySendPacket(retries, 8));
 }
 
 TEST(SendPacketContract, ZeroBudgetNeverRetries) {
     using rex::wallpaper::ShouldRetrySendPacket;
-    EXPECT_FALSE(ShouldRetrySendPacket(0, 0));
+    int retries = 0;
+    EXPECT_FALSE(ShouldRetrySendPacket(retries, 0));
+}
+
+TEST(SendPacketContract, ExhaustedBudgetResetsForTheNextPacket) {
+    // A spent budget must bound THIS packet only. The defect this guards: the
+    // decoder kept its exhausted retry count across packets, so after ONE
+    // saturated episode every later EAGAIN packet was dropped instantly with
+    // no retry at all — decode holes while the decoder saturates (exactly
+    // when the startup refill burst loads it), i.e. the intermittent
+    // start-stutter signature this suite exists to pin down.
+    using rex::wallpaper::ShouldRetrySendPacket;
+    int retries = 0;
+    for (int i = 0; i < 8; ++i) ASSERT_TRUE(ShouldRetrySendPacket(retries, 8));
+    EXPECT_FALSE(ShouldRetrySendPacket(retries, 8))
+        << "the packet must be dropped once the budget is spent";
+    EXPECT_EQ(retries, 0)
+        << "the spent budget must reset so the NEXT packet gets a fresh one";
+    EXPECT_TRUE(ShouldRetrySendPacket(retries, 8))
+        << "the next packet's first EAGAIN must retry again";
 }
 
 // ─── Round trip ──────────────────────────────────────────────────────────

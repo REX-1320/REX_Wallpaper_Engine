@@ -84,7 +84,10 @@ export async function updateDesktopSettings(w) {
   const caps = DESKTOP_CAPABILITIES[w.type] ?? []
   const opts = {}
   if (w.type === 'IMAGE') {
-    if (caps.includes('fillMode')) opts.mode = DESKTOP_STYLE_BY_MODE[w.display.mode] ?? 'cover'
+    // SET_FILL_MODE speaks the ENGINE vocabulary (fill/fit/stretch/center/
+    // tile); DESKTOP_STYLE_BY_MODE's cover/stretched belong to the OS
+    // wallpaper path (wallpaper:set) and were rejected here (audit Q2).
+    if (caps.includes('fillMode')) opts.mode = ENGINE_MODE_BY_MODE[w.display.mode] ?? 'fill'
   } else if (w.type === 'VIDEO') {
     if (caps.includes('fillMode')) opts.mode = ENGINE_MODE_BY_MODE[w.display.mode] ?? 'fill'
     if (caps.includes('loop')) opts.loop = w.playback.loop

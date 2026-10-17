@@ -741,10 +741,19 @@ bool AudioPlayer::DecodeNextChunk() {
 void AudioPlayer::ResizeRing(int channels) {
     if (channels <= 0) return;
     std::lock_guard lock(m_ringMutex);
-    if (m_channels == channels && !m_ring.empty()) return;
+    const size_t wantFrames =
+        std::max<size_t>(static_cast<size_t>(m_sampleRate),
+                         static_cast<size_t>(m_bufferFrames) * 4);
+    // Verify the ALLOCATION, not just the tracked channel count: the caller
+    // assigns m_channels before calling, so comparing counts alone always
+    // said "already sized" and left a stereo ring under a 5.1/quad layout —
+    // every push/render step then ran a wider stride over the smaller
+    // allocation (heap overrun; audit 2026-10-17 P0).
+    if (RingLayoutMatches(m_ring.size(), m_ringFrames, wantFrames, channels)) {
+        return;
+    }
     m_channels = channels;
-    m_ringFrames = std::max<size_t>(static_cast<size_t>(m_sampleRate),
-                                    static_cast<size_t>(m_bufferFrames) * 4);
+    m_ringFrames = wantFrames;
     m_ring.assign(m_ringFrames * static_cast<size_t>(m_channels), 0);
     m_scratch.clear();
     m_readPos = m_writePos = m_bufferedFrames = 0;

@@ -19,59 +19,79 @@ AudioCapture::~AudioCapture() {
 bool AudioCapture::Start() {
     if (m_running.load()) return true;
 
-    HRESULT hr;
+    // Everything acquired before m_running flips true must be released on the
+    // failure paths: Stop() early-returns while not running, so a failed
+    // Start used to leak the WAVEFORMATEX and leave the COM apartment
+    // initialized on this thread forever (audit 2026-10-17 AU2).
+    bool coInitialized = false;
+    auto fail = [this, &coInitialized]() {
+        m_captureClient.Reset();
+        m_audioClient.Reset();
+        m_device.Reset();
+        m_enumerator.Reset();
+        if (m_waveFormat) {
+            CoTaskMemFree(m_waveFormat);
+            m_waveFormat = nullptr;
+        }
+        if (coInitialized) {
+            CoUninitialize();
+            coInitialized = false;
+        }
+        return false;
+    };
 
-    hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         REX_LOG_ERROR(kModule, "CoInitializeEx failed (0x{:08x})", hr);
         return false;
     }
+    coInitialized = SUCCEEDED(hr);
 
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
         CLSCTX_ALL, IID_PPV_ARGS(&m_enumerator));
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "MMDeviceEnumerator creation failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     Microsoft::WRL::ComPtr<IMMDevice> audioDevice;
     hr = m_enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &audioDevice);
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "GetDefaultAudioEndpoint failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     hr = audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
         reinterpret_cast<void**>(m_audioClient.GetAddressOf()));
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "AudioClient activation failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     hr = m_audioClient->GetMixFormat(&m_waveFormat);
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "GetMixFormat failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     REFERENCE_TIME hnsPeriod;
     hr = m_audioClient->GetDevicePeriod(nullptr, &hnsPeriod);
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "GetDevicePeriod failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     hr = m_audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_LOOPBACK, hnsPeriod, 0, m_waveFormat, nullptr);
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "AudioClient::Initialize failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     hr = m_audioClient->GetService(IID_PPV_ARGS(&m_captureClient));
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "GetService(IAudioCaptureClient) failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     m_waveform.clear();
@@ -80,7 +100,7 @@ bool AudioCapture::Start() {
     hr = m_audioClient->Start();
     if (FAILED(hr)) {
         REX_LOG_ERROR(kModule, "AudioClient::Start failed (0x{:08x})", hr);
-        return false;
+        return fail();
     }
 
     m_running.store(true, std::memory_order_release);
@@ -146,22 +166,62 @@ void AudioCapture::CaptureThread() {
 void AudioCapture::ProcessAudio(const BYTE* data, UINT32 frames) {
     std::vector<float> mono(frames, 0.0f);
 
-    if (m_waveFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        const float* s = reinterpret_cast<const float*>(data);
-        for (UINT32 i = 0; i < frames; ++i) {
-            float sum = 0;
-            for (WORD ch = 0; ch < m_waveFormat->nChannels; ++ch)
-                sum += s[i * m_waveFormat->nChannels + ch];
-            mono[i] = sum / m_waveFormat->nChannels;
-        }
-    } else if (m_waveFormat->wFormatTag == WAVE_FORMAT_PCM ||
-               m_waveFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-        const int16_t* s = reinterpret_cast<const int16_t*>(data);
-        for (UINT32 i = 0; i < frames; ++i) {
-            int32_t sum = 0;
-            for (WORD ch = 0; ch < m_waveFormat->nChannels; ++ch)
-                sum += s[i * m_waveFormat->nChannels + ch];
-            mono[i] = static_cast<float>(sum) / (32768.0f * m_waveFormat->nChannels);
+    // The sample type comes from ClassifyCaptureFormat (SubFormat-aware for
+    // WAVE_FORMAT_EXTENSIBLE — see the header): reading float32 payloads as
+    // int16 produced garbage spectrum bands on every endpoint whose shared
+    // mix format is float (audit AU2).
+    const int nCh = m_waveFormat ? m_waveFormat->nChannels : 0;
+    if (data && nCh > 0) {
+        switch (ClassifyCaptureFormat(m_waveFormat)) {
+            case CaptureSampleFormat::Float32: {
+                const float* s = reinterpret_cast<const float*>(data);
+                for (UINT32 i = 0; i < frames; ++i) {
+                    float sum = 0.0f;
+                    for (int ch = 0; ch < nCh; ++ch) sum += s[i * nCh + ch];
+                    mono[i] = sum / nCh;
+                }
+                break;
+            }
+            case CaptureSampleFormat::S16: {
+                const int16_t* s = reinterpret_cast<const int16_t*>(data);
+                for (UINT32 i = 0; i < frames; ++i) {
+                    int32_t sum = 0;
+                    for (int ch = 0; ch < nCh; ++ch) sum += s[i * nCh + ch];
+                    mono[i] = static_cast<float>(sum) / (32768.0f * nCh);
+                }
+                break;
+            }
+            case CaptureSampleFormat::S24: {
+                // Tightly packed 3-byte little-endian signed samples.
+                for (UINT32 i = 0; i < frames; ++i) {
+                    const BYTE* p = data + static_cast<size_t>(i) * nCh * 3;
+                    int32_t sum = 0;
+                    for (int ch = 0; ch < nCh; ++ch) {
+                        const BYTE* s = p + static_cast<size_t>(ch) * 3;
+                        int32_t v = s[0] | (s[1] << 8) | (s[2] << 16);
+                        if (v & 0x800000) v -= 0x1000000;
+                        sum += v;
+                    }
+                    mono[i] = static_cast<float>(sum) / (8388608.0f * nCh);
+                }
+                break;
+            }
+            case CaptureSampleFormat::S32: {
+                // Normalise per sample as float: summing raw int32 would
+                // overflow for wide layouts.
+                const int32_t* s = reinterpret_cast<const int32_t*>(data);
+                for (UINT32 i = 0; i < frames; ++i) {
+                    float sum = 0.0f;
+                    for (int ch = 0; ch < nCh; ++ch) {
+                        sum += static_cast<float>(s[i * nCh + ch]) /
+                               2147483648.0f;
+                    }
+                    mono[i] = sum / nCh;
+                }
+                break;
+            }
+            case CaptureSampleFormat::Unsupported:
+                break;  // stays silent rather than feeding garbage
         }
     }
 

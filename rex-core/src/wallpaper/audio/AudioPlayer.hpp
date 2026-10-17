@@ -52,6 +52,20 @@ AudioOutputMode AudioChannelsToMode(int channels);
 /// Human-readable name, for logs and the UI.
 const char* AudioModeName(AudioOutputMode mode);
 
+/// Ring-layout predicate for AudioPlayer::ResizeRing: true when the existing
+/// allocation already matches, i.e. the rebuild can be skipped. It verifies
+/// the ALLOCATION (size and capacity), not a tracked channel count — the
+/// caller assigns the tracked count BEFORE calling ResizeRing, so a count
+/// comparison alone always said "already sized" and left a narrower ring
+/// under a wider layout (heap overrun in the render step; audit P0
+/// 2026-10-17). Pure, so the decision is unit-tested.
+inline bool RingLayoutMatches(size_t ringSize, size_t ringFrames,
+                              size_t wantFrames, int wantChannels) {
+    if (wantChannels <= 0 || ringFrames == 0) return false;
+    const size_t wantSize = wantFrames * static_cast<size_t>(wantChannels);
+    return ringSize == wantSize && ringFrames == wantFrames;
+}
+
 // ─── AudioPlayer ─────────────────────────────────────────────────────────
 //
 // Decodes the audio stream of a media file (its OWN AVFormatContext — never

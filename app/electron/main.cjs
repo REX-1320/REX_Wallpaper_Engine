@@ -131,6 +131,13 @@ async function reapplyLastWallpaper() {
         volume: params.volume ?? 1,
         speed: params.speed ?? 1,
       })
+      if (params.audioMode != null) {
+        try {
+          await runtime.send('SET_AUDIO_MODE', { value: params.audioMode })
+        } catch (err) {
+          logLine('runtime:recovery SET_AUDIO_MODE failed', err.message)
+        }
+      }
     }
     capabilities = null
     await runtime.send('PLAY', {})
@@ -180,7 +187,7 @@ async function applyStoredWallpaper(entry) {
       await runtime.init()
       await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
     } else {
-    await runtime.init(params.fps ?? 0, true)
+      await runtime.init(params.fps ?? 0, true)
       await runtime.send('LOAD', {
         path: params.path,
         type: 'video',
@@ -190,6 +197,13 @@ async function applyStoredWallpaper(entry) {
         volume: params.volume ?? 1,
         speed: params.speed ?? 1,
       })
+      if (params.audioMode != null) {
+        try {
+          await runtime.send('SET_AUDIO_MODE', { value: params.audioMode })
+        } catch (err) {
+          logLine('startup: re-apply SET_AUDIO_MODE failed', err.message)
+        }
+      }
     }
     capabilities = null // adapter changed — refresh on next query
     await runtime.send('PLAY', {})
@@ -396,6 +410,17 @@ app.whenReady().then(() => {
         volume: volume ?? 1,
         speed: speed ?? 1,
       })
+      if (audioMode != null) {
+        // The audio layout is a live playback property, not part of LOAD —
+        // omitting this left the UI's choice on the apply path (audit Q2).
+        // Non-fatal: the wallpaper must apply even if the layout request
+        // is refused (the engine falls back and reports it).
+        try {
+          await runtime.send('SET_AUDIO_MODE', { value: audioMode })
+        } catch (err) {
+          logLine('wallpaper:video SET_AUDIO_MODE failed', err.message)
+        }
+      }
       capabilities = null // adapter changed — refresh on next query
       await runtime.send('PLAY', {})
       lastApplied = {
@@ -414,7 +439,7 @@ app.whenReady().then(() => {
 
   // Live property updates — only the properties the active renderer
   // actually supports are sent; the rest are reported as skipped.
-  ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed, muted } = {}) => {
+  ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed, muted, audioMode } = {}) => {
     const applied = []
     const skipped = []
     // SET_FILL_MODE is the only update without a null guard — sending it with
