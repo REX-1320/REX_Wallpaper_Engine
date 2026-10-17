@@ -530,7 +530,9 @@ private:
     // DumpDecodeStages() snapshots it to perframe_decode.csv when
     // REX_PERFRAME_CSV=1. queueDepth is stamped by the controller after
     // DecodeFrame returns (-1 = unknown).
-    StageRing<DecodeStage, 256> m_stageRing;  // decode-thread owned
+    // 2048 rows covers a full ~25-35 s run at 60-90 decode fps, so one dump
+    // (5 s cadence, overwrite) spans startup through the first loop wrap.
+    StageRing<DecodeStage, 2048> m_stageRing;  // decode-thread owned
     uint64_t m_stageSeq = 0;                  // decode-thread owned
     std::chrono::steady_clock::time_point m_lastProduce{};  // decode-thread
     bool m_haveLastProduce = false;                         // owned

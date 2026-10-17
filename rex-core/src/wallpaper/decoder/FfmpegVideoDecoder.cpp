@@ -531,6 +531,7 @@ bool FfmpegVideoDecoder::Flush() {
 
 bool FfmpegVideoDecoder::SeekInternal(double seconds) {
     if (!m_fmtCtx || !m_stream) return false;
+    const auto tSeek0 = Clock::now();
     const int64_t ts = av_rescale_q(static_cast<int64_t>(seconds * AV_TIME_BASE),
                                     AV_TIME_BASE_Q, m_stream->time_base);
     int ret = av_seek_frame(m_fmtCtx, m_videoStreamIndex, ts, AVSEEK_FLAG_BACKWARD);
@@ -541,6 +542,12 @@ bool FfmpegVideoDecoder::SeekInternal(double seconds) {
         avcodec_flush_buffers(m_decCtx);
         m_eof = false;
         m_pktPending = false;
+        // Loop wraps log one seek line per wrap (10-30 s cadence on typical
+        // loop files) - the only in-the-wild measure of loop-restart cost.
+        // Measured warm-cache: ~0.1 ms; cold reads can be 10x higher.
+        REX_LOG_INFO(kModule, "seek to {:.2f}s took {:.1f} ms", seconds,
+                     std::chrono::duration<double, std::milli>(Clock::now() - tSeek0)
+                         .count());
         return true;
     }
     REX_LOG_WARN(kModule, "seek to {:.2f}s failed (av_seek_frame {})", seconds, ret);

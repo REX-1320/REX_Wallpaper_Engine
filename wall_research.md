@@ -881,3 +881,35 @@ and isolate the refill/catch-up/park behaviors. Verified on the default path
 Remaining, newly tracked in TODO.md: (a) 60 fps LOAD startup storm (~2-9 drops
 in the first seconds after PLAY); (b) wrap-boundary repeat window (~100-300 ms
 at the loop point of short files, tied to the decoder's internal EOS seek).
+
+---
+
+### P16 - Wrap forensics: loop-restart is healthy; earlier windows were environmental (2026-10-17)
+
+Method: stage ring enlarged 256 -> 2048 rows (one 5 s dump now spans a full
+~30 s run including the wrap), loop-seek timing log in `SeekInternal`,
+`REX_SCHED_DEBUG=1`. Content: astral 4K60 H.264, 21.183 s loop, flat
+~1.8 MB/s CBR (no bitrate tail - the "heavy tail" suspect is refuted).
+
+Findings (run D 11:40 + verification run 11:43):
+- demux EOF fires at the TRUE stream end.
+- loop seek to 0.00 s: **0.1 ms** (warm cache).
+- EOF -> first post-wrap frame ~35 ms; full re-prime gap 73 ms (one row).
+- post-wrap: 4 scheduler starves (~33 ms total) while the playhead catches
+  the Clear-rebaselined stream; then exact 1x.
+- steady decode rows (content 18.7-21.1 s): 19/19 at 16.6-17.0 ms; whole-run
+  histogram: 2018 rows at 16-17 ms, 5 at 8 ms (refill burst), 2 at 15 ms,
+  one 73 ms (wrap) - nothing in between.
+- refill burst measured TRUE 2x: 7.7-8.0 ms decode cycles (~130 fps) while
+  reserve < low-water.
+
+The once-seen 8-starve / ~0.9 s pre-wrap starvation (run B, 11:30:51, content
+20.0-20.9) did not reproduce at 11:40/11:43 with identical content and config;
+it began exactly at an external wall-clock moment and shares the signature of
+the system-load stall class (cf. the obanai +19/+18 burst at 11:12). Remaining
+repeats trace to external stalls exceeding the ~60 ms reserve; recovery is
+~1 s at the measured 2x refill.
+
+Verification: astral 22 s crossing a wrap - 0 starves, 1 wrap, seek 0.1 ms,
+positions 10.0 / 20.0 / 8.8 exact (1x throughout). Diagnostics kept permanent:
+2048-row stage ring + seek-duration log.
