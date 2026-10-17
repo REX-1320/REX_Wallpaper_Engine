@@ -71,10 +71,16 @@ TEST(DecodeAheadPolicy, PoolSlotCapMakesTwoHundredMsUnreachableAtHighFps) {
 TEST(DecodeAheadPolicy, BurstsBelowLowWaterOnlyWhenBurstEnabled) {
     const double src = 1000.0 / 24.0;  // 24 fps
 
-    // Burst DISABLED (the shipped default while the scheduler work settles):
-    // the decoder paces at the source rate regardless of reserve depth.
+    // The shipped default enables the refill burst (scheduler precondition
+    // fixed 2026-10-17; A/B in the DecodeAheadPolicy docs). Rollback is an
+    // explicit maxBurst = 1.0.
+    CadenceController::DecodeAheadPolicy def;
+    EXPECT_DOUBLE_EQ(def.maxBurst, 2.0);
+
+    // Burst DISABLED: the decoder paces at the source rate regardless of
+    // reserve depth.
     CadenceController::DecodeAheadPolicy off;
-    EXPECT_DOUBLE_EQ(off.maxBurst, 1.0);
+    off.maxBurst = 1.0;
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 0.0, off), src, 0.001);
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(src, 50.0, off), src, 0.001);
 
@@ -117,7 +123,8 @@ TEST(DecodeAheadPolicy, ParksAboveHighWater) {
     // P0-4: a lead past high-water parks the decoder (4x interval) so the
     // playhead — not an ever-growing lead — bounds the ring. Independent of
     // the burst flag (parking is not bursting).
-    CadenceController::DecodeAheadPolicy off;  // maxBurst 1.0
+    CadenceController::DecodeAheadPolicy off;
+    off.maxBurst = 1.0;  // isolate parking from the (default-on) refill burst
     CadenceController::DecodeAheadPolicy on;
     on.maxBurst = 2.0;
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, 200.01, off),
@@ -157,6 +164,7 @@ TEST(DecodeAheadPolicy, CatchUpBurstAppliesOnlyBehindPlayhead) {
     // catchUpBurst=2: behind (negative) paces 2x; at/above water the refill
     // and park behavior is byte-identical to burst-off (no deep reserve).
     CadenceController::DecodeAheadPolicy cu;
+    cu.maxBurst = 1.0;  // isolate catch-up from the (default-on) refill burst
     cu.catchUpBurst = 2.0;
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, -50.0, cu),
                 8.333 / 2.0, 0.001);

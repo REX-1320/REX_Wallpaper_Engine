@@ -851,3 +851,33 @@ Every item below is **measured or read from source**, not assumed.
 * mpv VRR / display-resample (#12005) — https://github.com/mpv-player/mpv/issues/12005
 * Top-tier decoder axis-by-axis research — see `_research_top_decoders.md`
 * Presentation pacing research — see `_research_present_pacing.md`
+
+---
+
+### P15 - Decode-ahead refill burst re-enabled (A/B re-run 2026-10-17)
+
+The Phase D refill burst (pacing the decoder 2x while `0 <= reserve < lowWater`)
+was held at `maxBurst=1.0` because the scheduler displayed future frames when a
+reserve was held (the user-visible ~2x content defect). `e5bfdf0` removed that
+fallback — the documented precondition. A/B re-run on the current build
+(`sustain-rt.cjs`, 38-45 s per arm, telemetry + `REX_PERFRAME_CSV` arm):
+
+| Clip | Arm | reserve | gapJit | dwell p50/p95/p99/max | under | drops | content |
+|---|---|---|---|---|---|---|---|
+| Aari 4K AV1 24 fps | OFF | -6 ms | 0.70 ms | 5/12/16/16 vbl | 0 | 1 | 1.00x |
+| Aari 4K AV1 24 fps | **ON** | **+122..163 ms** | **0.27-0.32 ms** | **5/5-6/6/6** | **0** | 2 | 1.00x |
+| obanai 4K H.264 60 fps | OFF | ~0 | 5.09 ms | - | 11 | 27 | 1.00x |
+| obanai 4K H.264 60 fps | **ON** | +41..58 ms | **2.42 ms** (steady windows 0.2-0.3) | 2/4/4/4 | **4** | 12 | 1.00x |
+| astral 4K 60 fps | **ON** | +57..62 ms steady | **0.22-0.26 ms** | 2/4/4/4-6 | **0** | wrap-boundary only | 1.00x |
+
+**The 2x defect is gone:** the content meter read 1.00x in every ON run
+(the meter is fed from *presented* frame PTS, so a content jump would show).
+
+Shipped: `maxBurst` default 2.0; `REX_DECODE_AHEAD` semantics: unset = ON,
+`1` = off (rollback), `>1` = custom multiplier. Unit tests pin the new default
+and isolate the refill/catch-up/park behaviors. Verified on the default path
+(no env): Aari `reserve=+120 ms`, `under=0`, `content=1.00x`. **733/733 ctest.**
+
+Remaining, newly tracked in TODO.md: (a) 60 fps LOAD startup storm (~2-9 drops
+in the first seconds after PLAY); (b) wrap-boundary repeat window (~100-300 ms
+at the loop point of short files, tied to the decoder's internal EOS seek).

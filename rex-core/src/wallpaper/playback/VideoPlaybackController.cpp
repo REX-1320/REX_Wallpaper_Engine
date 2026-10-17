@@ -64,12 +64,11 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     // decoder thrash burst->park->burst (measured: schedDrops 204, effFps 52.5).
     m_decodeAheadPolicy = CadenceController::PolicyFor(m_frameRate);
 
-    // Feature flag / rollback switch. Decode-ahead is OFF by default: it
-    // measurably helps low-fps GPU-stalled content but a deep ring makes the
-    // scheduler count still-buffered frames as drops. Set REX_DECODE_AHEAD to
-    // an explicit burst multiplier (e.g. "2") to enable, "0"/unset to disable.
-    // Measured A/B belongs in wall_research.md; nothing should re-enable this
-    // without that comparison.
+    // Feature flag / rollback switch. The refill burst ships ON by default
+    // since 2026-10-17 (precondition fix e5bfdf0 landed; A/B in the
+    // DecodeAheadPolicy docs — content meter 1.00x in every ON run).
+    // REX_DECODE_AHEAD > 1 sets an explicit multiplier; "0"/"1" forces the
+    // burst off (rollback); unset keeps the default.
     if (const char* flag = std::getenv("REX_DECODE_AHEAD")) {
         const double burst = std::atof(flag);
         if (burst > 1.0) {
@@ -79,6 +78,10 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
                          "highWater={:.0f}ms) via REX_DECODE_AHEAD",
                          burst, m_decodeAheadPolicy.lowWaterMs,
                          m_decodeAheadPolicy.highWaterMs);
+        } else {
+            m_decodeAheadPolicy.maxBurst = 1.0;
+            REX_LOG_INFO(kModule,
+                         "decode-ahead DISABLED (burst=1.0) via REX_DECODE_AHEAD");
         }
     }
     // Catch-up burst: raises the decode-thread throughput ceiling ONLY while

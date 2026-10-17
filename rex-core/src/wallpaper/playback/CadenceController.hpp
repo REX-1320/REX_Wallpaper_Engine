@@ -54,28 +54,26 @@ public:
     struct DecodeAheadPolicy {
         double lowWaterMs  = 100.0;
         double highWaterMs = 200.0;
-        // Controlled A/B (2026-10-15, 4 runs/arm, drops+repeats as deltas over
-        // a 15 s window, system load held under 20%):
-        //   Aari  24fps  OFF AE_p95 34.04 / drops 0.1/s / effFps 23.4 / under 3-8
-        //                  ON  AE_p95  3.83 / drops 0.0/s / effFps 24.0 / under 0
-        //   obanai 60fps OFF AE_p95  2.74 / drops 0.1/s / effFps 59.1 / under 24-30
-        //                  ON  AE_p95  0.61 / drops 0.9/s / effFps 60.0 / under 0
-        // Timing gains are real and are NOT bought with dropped frames on Aari.
+        // Refill burst — default ON (2.0) since 2026-10-17.
         //
-        // HELD OFF DESPITE THAT, because the reserve triggers a USER-VISIBLE
-        // defect the timing metrics cannot see: with future frames buffered,
-        // FrameScheduler::Tick selects the NEWEST due frame (FrameScheduler.cpp
-        // :51) and its catch-up fallback returns the newest published frame
-        // regardless of PTS (:64-77), so displayed CONTENT advances in jumps
-        // while the playhead advances 1x — the wallpaper reads as playing at
-        // ~2x. Position still reports 1.000x and effFps still reports the
-        // source rate, so no existing telemetry detects it.
-        //
-        // Correct fix: make the scheduler consume the frame closest to the
-        // playhead (oldest due) and stop the catch-up fallback from firing
-        // merely because the ring holds future frames. Do not re-enable the
-        // burst before that lands.
-        double maxBurst    = 1.0;   // 1.0 = burst held off (see above)
+        // The 2026-10-15 A/B showed the refill eliminated underruns (Aari
+        // AE_p95 34.04 -> 3.83 ms, under 3-8 -> 0; obanai under 24-30 -> 0)
+        // but it was held off: with a reserve held, FrameScheduler::Tick's
+        // catch-up fallback displayed frames whose PTS had not been reached,
+        // so the displayed CONTENT ran ahead of the playhead (~2x) while
+        // position and effFps still reported 1x. e5bfdf0 removed that
+        // fallback (future frames are retained; starvation returns nullptr
+        // and the render loop re-presents), which was the documented
+        // precondition to re-enable — the hold-off below is resolved.
+        // A/B re-run 2026-10-17 (harness, current build):
+        //   Aari   24fps OFF res -6ms, jit 0.70ms, dwell max 16 vbl, under 0
+        //                ON  res +122..163ms, jit 0.27-0.32, dwell max 6, under 0
+        //   obanai 60fps OFF jit 5.09ms, under 11
+        //                ON  jit 2.42ms, under 4 (clean windows 0.2-0.3ms)
+        //   astral 60fps ON  res +57..62ms steady, jit 0.22-0.26, under 0
+        // The content meter read 1.00x in every ON run (the exact 2x symptom
+        // the hold-off existed to prevent). Rollback: REX_DECODE_AHEAD=1.
+        double maxBurst    = 2.0;
         // Catch-up burst: applied ONLY when reserveMs < 0 (published content
         // is behind the wall clock). Refill burst (0..lowWater) stays on
         // maxBurst, so enabling catch-up cannot build the deep reserve that
