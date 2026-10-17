@@ -23,7 +23,10 @@ bool Compositor::Initialize(HWND targetWindow) {
         return false;
     }
 
-    CreateSrvHeap();
+    if (!CreateSrvHeap()) {
+        printf("[REX] Compositor: Failed to create SRV heap\n");
+        return false;
+    }
 
     if (!CreateRootSignature()) {
         printf("[REX] Compositor: Failed to create root signature\n");
@@ -88,13 +91,25 @@ bool Compositor::CreateDevice() {
     }
 #endif
 
+    // G2: every step is HRESULT-checked — the old code ignored all of them
+    // and dereferenced possibly-null objects (crash) or returned true with
+    // a half-built compositor.
     ComPtr<IDXGIFactory4> factory;
-    CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(hr) || !factory) {
+        printf("[REX] Compositor: CreateDXGIFactory1 failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
 
-    ComPtr<IDXGIAdapter1> adapter;
-    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
-        DXGI_ADAPTER_DESC1 desc;
-        adapter->GetDesc1(&desc);
+    for (UINT i = 0;; i++) {
+        ComPtr<IDXGIAdapter1> adapter;
+        const HRESULT ehr = factory->EnumAdapters1(i, &adapter);
+        if (ehr == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(ehr) || !adapter) continue;
+
+        DXGI_ADAPTER_DESC1 desc = {};
+        if (FAILED(adapter->GetDesc1(&desc))) continue;
         if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
 
         if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
@@ -108,34 +123,67 @@ bool Compositor::CreateDevice() {
     D3D12_COMMAND_QUEUE_DESC queueDesc = {};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    m_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_commandQueue));
+    hr = m_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_commandQueue));
+    if (FAILED(hr) || !m_commandQueue) {
+        printf("[REX] Compositor: CreateCommandQueue failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
 
-    m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+    hr = m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
         IID_PPV_ARGS(&m_commandAllocator));
+    if (FAILED(hr) || !m_commandAllocator) {
+        printf("[REX] Compositor: CreateCommandAllocator failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
 
-    m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+    hr = m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
         m_commandAllocator.Get(), nullptr, IID_PPV_ARGS(&m_commandList));
+    if (FAILED(hr) || !m_commandList) {
+        printf("[REX] Compositor: CreateCommandList failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
 
-    m_commandList->Close();
+    hr = m_commandList->Close();
+    if (FAILED(hr)) {
+        printf("[REX] Compositor: command list close failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
     rtvHeapDesc.NumDescriptors = FRAME_COUNT;
     rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    m_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_rtvHeap));
+    hr = m_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_rtvHeap));
+    if (FAILED(hr) || !m_rtvHeap) {
+        printf("[REX] Compositor: RTV heap creation failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
     m_rtvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     return true;
 }
 
-void Compositor::CreateSrvHeap() {
+bool Compositor::CreateSrvHeap() {
+    if (!m_device) return false;
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
     srvHeapDesc.NumDescriptors = MAX_TEXTURES;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    m_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_srvHeap));
+    HRESULT hr = m_device->CreateDescriptorHeap(&srvHeapDesc,
+                                                IID_PPV_ARGS(&m_srvHeap));
+    if (FAILED(hr) || !m_srvHeap) {
+        printf("[REX] Compositor: SRV heap creation failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
     m_srvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return true;
 }
 
 bool Compositor::CreateRootSignature() {
@@ -337,8 +385,15 @@ bool Compositor::CreatePipelineState() {
 }
 
 bool Compositor::CreateSwapChain(HWND targetWindow) {
+    // G2: HRESULT-checked end to end (was unchecked → null deref on any
+    // failure, and true returned with a half-built swapchain).
     ComPtr<IDXGIFactory4> factory;
-    CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(hr) || !factory) {
+        printf("[REX] Compositor: CreateDXGIFactory1 failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
 
     RECT clientRect;
     GetClientRect(targetWindow, &clientRect);
@@ -355,14 +410,29 @@ bool Compositor::CreateSwapChain(HWND targetWindow) {
     swapChainDesc.SampleDesc.Count = 1;
 
     ComPtr<IDXGISwapChain1> tempSwapChain;
-    factory->CreateSwapChainForHwnd(m_commandQueue.Get(), targetWindow,
+    hr = factory->CreateSwapChainForHwnd(m_commandQueue.Get(), targetWindow,
         &swapChainDesc, nullptr, nullptr, &tempSwapChain);
+    if (FAILED(hr) || !tempSwapChain) {
+        printf("[REX] Compositor: CreateSwapChainForHwnd failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
 
-    tempSwapChain.As(&m_swapChain);
+    hr = tempSwapChain.As(&m_swapChain);
+    if (FAILED(hr) || !m_swapChain) {
+        printf("[REX] Compositor: swapchain QI failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
     for (int i = 0; i < FRAME_COUNT; i++) {
-        m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_renderTargets[i]));
+        hr = m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_renderTargets[i]));
+        if (FAILED(hr) || !m_renderTargets[i]) {
+            printf("[REX] Compositor: GetBuffer(%d) failed: 0x%08lx\n", i,
+                   static_cast<unsigned long>(hr));
+            return false;
+        }
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
             m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
         rtvHandle.ptr += i * m_rtvDescriptorSize;

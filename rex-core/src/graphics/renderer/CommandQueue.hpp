@@ -7,6 +7,7 @@
 #include <shared/Result.hpp>
 
 #include <cstdint>
+#include <mutex>
 
 namespace rex::graphics {
 
@@ -65,6 +66,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
     Microsoft::WRL::ComPtr<ID3D12Fence>        m_fence;
     HANDLE                                    m_fenceEvent = nullptr;
+    // R2: the queue is shared across renderer instances on different
+    // threads; the increment + Signal pair must be atomic as a unit (a bare
+    // ++ allowed two threads to signal out of order and the fence value to
+    // go backwards, hanging WaitForValue).
+    std::mutex                                m_fenceMutex;
     UINT64                                    m_fenceValue = 0;
 };
 

@@ -32,17 +32,17 @@ ImageLoader::~ImageLoader() {
 
 // ─── Loading ────────────────────────────────────────────────────────────────
 
-shared::Result<const graphics::CachedTexture*> ImageLoader::Load(
-    std::string_view path)
+shared::Result<std::shared_ptr<const graphics::CachedTexture>>
+ImageLoader::Load(std::string_view path)
 {
     if (path.empty()) {
-        return shared::Result<const graphics::CachedTexture*>(
+        return shared::Result<std::shared_ptr<const graphics::CachedTexture>>(
             shared::ErrorCode::InvalidArgument,
             "Empty path");
     }
 
     if (!IsFormatSupported(path)) {
-        return shared::Result<const graphics::CachedTexture*>(
+        return shared::Result<std::shared_ptr<const graphics::CachedTexture>>(
             shared::ErrorCode::UnsupportedFormat,
             "Unsupported image format: " + std::string(path));
     }
@@ -50,8 +50,8 @@ shared::Result<const graphics::CachedTexture*> ImageLoader::Load(
     return m_cache.GetOrLoad(path);
 }
 
-shared::Result<const graphics::CachedTexture*> ImageLoader::Reload(
-    std::string_view path)
+shared::Result<std::shared_ptr<const graphics::CachedTexture>>
+ImageLoader::Reload(std::string_view path)
 {
     return m_cache.Reload(path);
 }
@@ -70,7 +70,7 @@ bool ImageLoader::IsLoaded(std::string_view path) const {
     return m_cache.Contains(path);
 }
 
-const graphics::CachedTexture* ImageLoader::Get(
+std::shared_ptr<const graphics::CachedTexture> ImageLoader::Get(
     std::string_view path) const
 {
     return m_cache.Get(path);

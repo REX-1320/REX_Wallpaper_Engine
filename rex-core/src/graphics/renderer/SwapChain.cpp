@@ -273,13 +273,16 @@ shared::Result<void> SwapChain::RefreshHdrSelection(ID3D12Device* device) {
                                     "SwapChain not initialized");
     }
     const DXGI_FORMAT before = m_format;
-    // May ResizeBuffers(0,0) internally when the format changes.
+    // May ResizeBuffers(0,0) internally when the format changes; R1: it
+    // also drops the old RTVs/back buffers (ResizeBuffers requires it).
     UpdateHdrSelection();
-    if (m_format == before) {
+    if (m_format == before && m_rtvHeap) {
+        // No format change and the views are intact — nothing to do.
         return shared::Result<void>();
     }
-    // The format changed behind the existing RTVs — they describe the old
-    // buffers, so re-fetch them.
+    // Format changed (the views describe the old buffers) or a failed
+    // switch attempt dropped them for the retained format — re-fetch either
+    // way, otherwise the next frame binds dead back buffers.
     return CreateRenderTargetViews(device);
 }
 
@@ -319,11 +322,14 @@ void SwapChain::UpdateHdrSelection() {
                                 : DXGI_FORMAT_R8G8B8A8_UNORM;
     if (hdr == m_isHdr && fmt == m_format) return;
 
-    m_isHdr = hdr;
-    m_format = fmt;
-    m_hdrActive = hdr;
-    m_displayMaxNits = hdr ? static_cast<float>(desc1.MaxLuminance) : 0.0f;
-    m_displayMinNits = hdr ? static_cast<float>(desc1.MinLuminance) : 0.0f;
+    // R1: ResizeBuffers fails while back-buffer references are held, so
+    // drop the RTVs + back buffers first. Selection state is committed
+    // ONLY on success — the failure branch used to claim SDR while the
+    // swapchain kept its previous (possibly HDR) format, desyncing the
+    // PSO/RTV from the real buffers.
+    for (auto& rt : m_renderTargets) rt.Reset();
+    m_rtvHeap.Reset();
+    m_rtvHandles[0] = m_rtvHandles[1] = m_rtvHandles[2] = {};
 
     // A format change requires ResizeBuffers (0,0 = keep current size);
     // the color space is a per-swap-chain property.
@@ -332,13 +338,28 @@ void SwapChain::UpdateHdrSelection() {
     if (FAILED(hr)) {
         REX_LOG_WARN("SwapChain", "format change resize failed: {:08x}",
                      static_cast<unsigned long>(hr));
-        m_isHdr = false;
-        m_format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        m_hdrActive = false;
-        m_displayMaxNits = 0.0f;
-        m_displayMinNits = 0.0f;
         return;
     }
+
+    m_isHdr = hdr;
+    m_format = fmt;
+    m_hdrActive = hdr;
+    m_displayMaxNits = hdr ? static_cast<float>(desc1.MaxLuminance) : 0.0f;
+    m_displayMinNits = hdr ? static_cast<float>(desc1.MinLuminance) : 0.0f;
+
+    // ResizeBuffers may replace the frame-latency waitable (P1-12) — a
+    // stale handle waits out a 1 s timeout per frame; re-query it like
+    // Resize() does.
+    if (m_frameLatencyWaitable) {
+        CloseHandle(m_frameLatencyWaitable);
+        m_frameLatencyWaitable = nullptr;
+    }
+    Microsoft::WRL::ComPtr<IDXGISwapChain2> swapChain2;
+    if (SUCCEEDED(m_swapChain.As(&swapChain2))) {
+        swapChain2->SetMaximumFrameLatency(2);
+        m_frameLatencyWaitable = swapChain2->GetFrameLatencyWaitableObject();
+    }
+
     m_swapChain->SetColorSpace1(hdr ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
                                     : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
     REX_LOG_INFO("SwapChain", "HDR10 output {}", hdr ? "enabled" : "disabled");

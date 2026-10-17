@@ -112,13 +112,29 @@ TextureData DecodeTextureFromFile(std::string_view path) {
 
     // Get dimensions
     UINT width = 0, height = 0;
-    converter->GetSize(&width, &height);
+    hr = converter->GetSize(&width, &height);
+    if (FAILED(hr) || width == 0 || height == 0) {
+        REX_LOG_ERROR("WICLoader", "GetSize failed: {:08x} ({}x{})", hr,
+                      width, height);
+        return result;
+    }
     result.width = static_cast<int>(width);
     result.height = static_cast<int>(height);
-    result.rowPitch = result.width * 4; // RGBA8 = 4 bytes per pixel
+    // Audit P3 #14: width × 4 × height overflowed 32-bit and produced a
+    // truncated allocation fed to CopyPixels (WIC then wrote past it).
+    const uint64_t rowPitch64 = static_cast<uint64_t>(width) * 4; // RGBA8
+    const uint64_t bufferSize64 = rowPitch64 * height;
+    if (bufferSize64 > 0xFFFFFFFFull) {
+        REX_LOG_ERROR("WICLoader", "Image too large: {}x{} ({} bytes)",
+                      width, height, bufferSize64);
+        result.width = 0;
+        result.height = 0;
+        return result;
+    }
+    result.rowPitch = static_cast<int>(rowPitch64);
+    const UINT bufferSize = static_cast<UINT>(bufferSize64);
 
     // Copy pixels
-    UINT bufferSize = result.rowPitch * result.height;
     result.pixels.resize(bufferSize);
 
     hr = converter->CopyPixels(

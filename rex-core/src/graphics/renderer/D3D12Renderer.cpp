@@ -1405,6 +1405,10 @@ void D3D12Renderer::RefreshHdrOutput() {
 
 void D3D12Renderer::SyncHdrStateLocked() {
     if (!m_initialized) return;
+    // R1: a format switch inside the refresh calls ResizeBuffers, which
+    // requires all back-buffer references released and no in-flight work
+    // sampling them — drain the queue first (cheap when already idle).
+    ActiveQueue().WaitForGPU();
     auto sr = m_swapChain.RefreshHdrSelection(m_device.Get());
     if (sr.IsError()) {
         REX_LOG_WARN("D3D12", "HDR refresh failed: {}; keeping {} output",
@@ -1456,8 +1460,17 @@ bool D3D12Renderer::UploadTextureToGPU(const TextureData& data) {
         return false;
     }
 
+    // R3: the decoder's rowPitch is tightly packed (width × 4); D3D12 placed
+    // footprints require a 256-byte row pitch, so widths that aren't a
+    // multiple of 64 pixels (1366/3440) corrupted or failed the copy. Pad
+    // rows in the upload buffer and declare the padded pitch.
+    constexpr UINT kRowPitchAlign = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT; // 256
+    const UINT srcRowPitch = static_cast<UINT>(data.rowPitch);
+    const UINT rowPitch =
+        (srcRowPitch + (kRowPitchAlign - 1)) & ~(kRowPitchAlign - 1);
+
     // Upload buffer
-    UINT64 uploadSize = static_cast<UINT64>(data.rowPitch) * data.height;
+    UINT64 uploadSize = static_cast<UINT64>(rowPitch) * data.height;
     uploadSize = (uploadSize + 511) & ~511ULL;
 
     heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -1493,9 +1506,9 @@ bool D3D12Renderer::UploadTextureToGPU(const TextureData& data) {
         const uint8_t* src = data.pixels.data();
         uint8_t* dst = static_cast<uint8_t*>(mapped);
         for (int row = 0; row < data.height; ++row) {
-            memcpy(dst, src, static_cast<size_t>(data.rowPitch));
-            src += data.rowPitch;
-            dst += data.rowPitch;
+            memcpy(dst, src, static_cast<size_t>(srcRowPitch));
+            src += srcRowPitch;
+            dst += rowPitch;
         }
     }
     uploadBuffer->Unmap(0, nullptr);
@@ -1522,7 +1535,7 @@ bool D3D12Renderer::UploadTextureToGPU(const TextureData& data) {
     srcLoc.PlacedFootprint.Footprint.Width    = static_cast<UINT>(data.width);
     srcLoc.PlacedFootprint.Footprint.Height   = static_cast<UINT>(data.height);
     srcLoc.PlacedFootprint.Footprint.Depth    = 1;
-    srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(data.rowPitch);
+    srcLoc.PlacedFootprint.Footprint.RowPitch = rowPitch;
 
     uploadList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
 

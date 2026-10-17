@@ -49,7 +49,7 @@ private:
     bool CreateRootSignature();
     bool CreatePipelineState();
     bool CreateSwapChain(HWND targetWindow);
-    void CreateSrvHeap();
+    bool CreateSrvHeap();
     bool CreateVertexBuffer();
     void PopulateCommandList();
 

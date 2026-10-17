@@ -102,8 +102,9 @@ private:
     float m_contrast       = 1.0f;
     float m_saturation     = 1.0f;
 
-    // Pixel cache pointer (owned by TextureCache)
-    const graphics::CachedTexture* m_texture = nullptr;
+    // G1: shared snapshot of the cache entry — a hot-reload publishing a
+    // new entry can no longer dangle this pointer mid-frame.
+    std::shared_ptr<const graphics::CachedTexture> m_texture;
     uint64_t m_version = 0;
 };
 

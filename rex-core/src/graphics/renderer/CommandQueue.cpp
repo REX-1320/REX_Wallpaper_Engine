@@ -64,7 +64,10 @@ void CommandQueue::Shutdown() {
         m_fenceEvent = nullptr;
     }
 
-    m_fenceValue = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_fenceMutex);
+        m_fenceValue = 0;
+    }
 }
 
 void CommandQueue::Execute(ID3D12CommandList* const* lists, UINT count) {
@@ -77,18 +80,31 @@ void CommandQueue::Execute(ID3D12CommandList* list) {
 }
 
 void CommandQueue::WaitForGPU() {
-    m_fenceValue++;
-    HRESULT hr = m_queue->Signal(m_fence.Get(), m_fenceValue);
-    if (FAILED(hr)) {
-        REX_LOG_ERROR("CommandQueue", "Signal failed: {:08x}", hr);
-        return;
+    if (!m_queue || !m_fence) return;
+
+    UINT64 value = 0;
+    {
+        // R2: increment + Signal as one unit — two threads signaling the
+        // shared queue could otherwise order Signal(v) after Signal(v+1),
+        // dropping the fence value backwards and hanging waiters.
+        std::lock_guard<std::mutex> lock(m_fenceMutex);
+        value = ++m_fenceValue;
+        HRESULT hr = m_queue->Signal(m_fence.Get(), value);
+        if (FAILED(hr)) {
+            REX_LOG_ERROR("CommandQueue", "Signal failed: {:08x}", hr);
+            return;
+        }
     }
 
-    if (m_fence->GetCompletedValue() < m_fenceValue) {
-        hr = m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
-        if (SUCCEEDED(hr)) {
-            WaitForSingleObject(m_fenceEvent, INFINITE);
+    if (m_fence->GetCompletedValue() < value) {
+        // R2: per-wait event — the shared auto-reset m_fenceEvent loses
+        // wakeups when two waiters race (one reset consumes the signal).
+        HANDLE ev = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (!ev) return;
+        if (SUCCEEDED(m_fence->SetEventOnCompletion(value, ev))) {
+            WaitForSingleObject(ev, INFINITE);
         }
+        CloseHandle(ev);
     }
 }
 
@@ -98,12 +114,14 @@ void CommandQueue::WaitForFence(ID3D12Fence* fence, UINT64 value) {
 }
 
 UINT64 CommandQueue::Signal() {
-    m_fenceValue++;
-    HRESULT hr = m_queue->Signal(m_fence.Get(), m_fenceValue);
+    if (!m_queue || !m_fence) return 0;
+    std::lock_guard<std::mutex> lock(m_fenceMutex);
+    const UINT64 value = ++m_fenceValue;
+    HRESULT hr = m_queue->Signal(m_fence.Get(), value);
     if (FAILED(hr)) {
         REX_LOG_ERROR("CommandQueue", "Signal failed: {:08x}", hr);
     }
-    return m_fenceValue;
+    return value;
 }
 
 bool CommandQueue::WaitForValue(UINT64 value, DWORD timeoutMs) {

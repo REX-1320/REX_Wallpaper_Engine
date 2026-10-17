@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -57,15 +58,24 @@ public:
     TextureCache& operator=(const TextureCache&) = delete;
 
     // ── Cache operations ────────────────────────────────────────────────
+    //
+    // G1: entries are returned as shared_ptr snapshots. The old raw-pointer
+    // API handed out `&entry.texture` after unlocking — a hot-reload /
+    // Evict / Clear on another thread could rewrite or destroy it out from
+    // under the reader (data race + use-after-free). A reload now publishes
+    // a NEW CachedTexture object instead of mutating the live one, so a
+    // held snapshot stays valid and immutable.
 
     /// Load an image into the cache. Returns the entry on success.
     /// If the file has already been cached and hasn't changed, returns
     /// the existing entry without re-decoding.
-    shared::Result<const CachedTexture*> GetOrLoad(std::string_view path);
+    shared::Result<std::shared_ptr<const CachedTexture>> GetOrLoad(
+        std::string_view path);
 
     /// Reload a cached entry from disk (for hot-reload). Returns the
     /// updated entry, or the existing entry if the file didn't change.
-    shared::Result<const CachedTexture*> Reload(std::string_view path);
+    shared::Result<std::shared_ptr<const CachedTexture>> Reload(
+        std::string_view path);
 
     /// Evict an entry from the cache.
     void Evict(std::string_view path);
@@ -76,8 +86,8 @@ public:
     /// Check whether an entry is cached.
     bool Contains(std::string_view path) const;
 
-    /// Get a pointer to a cached entry, or nullptr.
-    const CachedTexture* Get(std::string_view path) const;
+    /// Get a snapshot of a cached entry, or nullptr.
+    std::shared_ptr<const CachedTexture> Get(std::string_view path) const;
 
     /// Number of cached entries.
     size_t Size() const;
@@ -96,8 +106,8 @@ private:
     static int64_t GetFileWriteTime(std::string_view path);
 
     struct Entry {
-        CachedTexture texture;
-        std::string key; // stable string for pointer stability
+        std::shared_ptr<CachedTexture> texture;
+        std::string key;
     };
 
     mutable std::mutex m_mutex;

@@ -67,11 +67,13 @@ public:
 
     /// Load an image, caching if successful. Returns the decoded pixel
     /// data. Supported formats: PNG, JPEG, BMP, TIFF, WEBP, GIF, ICO.
-    shared::Result<const graphics::CachedTexture*> Load(
+    /// G1: shared snapshot — stays valid if a hot-reload replaces the
+    /// cache entry while the caller still holds it.
+    shared::Result<std::shared_ptr<const graphics::CachedTexture>> Load(
         std::string_view path);
 
     /// Reload an image from disk (for hot-reload or explicit refresh).
-    shared::Result<const graphics::CachedTexture*> Reload(
+    shared::Result<std::shared_ptr<const graphics::CachedTexture>> Reload(
         std::string_view path);
 
     /// Evict an image from the cache.
@@ -85,8 +87,9 @@ public:
     /// Check whether an image is cached.
     bool IsLoaded(std::string_view path) const;
 
-    /// Get cached texture data, or nullptr.
-    const graphics::CachedTexture* Get(std::string_view path) const;
+    /// Get a cached-texture snapshot, or nullptr.
+    std::shared_ptr<const graphics::CachedTexture> Get(
+        std::string_view path) const;
 
     /// Detect the image format from file extension.
     static ImageFormat DetectFormat(std::string_view path);
