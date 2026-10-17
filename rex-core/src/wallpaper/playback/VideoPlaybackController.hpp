@@ -131,7 +131,12 @@ public:
     /// Render thread finished consuming frameIndex — releases its pool slot
     /// lease in the decoder (Phase D slot-lifetime prerequisite).
     void NotifyFrameConsumed(int64_t frameIndex) {
-        if (m_decoder) m_decoder->NotifyFrameConsumed(frameIndex);
+        // P1-8 discipline: snapshot under the leaf mutex — Close() resets
+        // m_decoder, so a raw read here could use-after-free on a scene
+        // switch racing the render thread's per-frame report.
+        if (auto decoder = SnapshotDecoder()) {
+            decoder->NotifyFrameConsumed(frameIndex);
+        }
     }
     void SetMute(bool mute);
     /// Mute state snapshot (P1-8: under m_decodeMutex like all member

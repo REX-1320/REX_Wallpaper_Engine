@@ -225,6 +225,10 @@ void VideoManager::SetVolume(float volume) {
 }
 
 void VideoManager::SetAudioOutputMode(AudioOutputMode mode) {
+    // m_monitorMutex: same unlocked-iteration race as NotifyFrameConsumed
+    // (ClearVideoFrames resets monitorController under this lock while a
+    // settings push iterated it raw).
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
     if (m_controller) m_controller->SetAudioOutputMode(mode);
     for (auto& entry : m_monitorEntries) {
         if (entry.monitorController) entry.monitorController->SetAudioOutputMode(mode);

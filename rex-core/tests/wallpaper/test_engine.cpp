@@ -523,6 +523,70 @@ TEST(RecoveryBackoffTest, NonPositiveInputIsTreatedAsFirstFailure) {
               rex::wallpaper::NextRecoveryDelayMs(0));
 }
 
+// Regression: the pre-fix render loop consumed the host request at READ time
+// (m_recoveryNeeded.exchange(false), Engine.cpp:1836). A failed attempt
+// re-arms the flag and schedules a backoff deadline; on the following pass,
+// still inside the window, the exchange cleared the flag while skipping the
+// attempt — the retry never ran and a host-only recovery (Explorer restart,
+// no device loss) bricked the wallpaper for the session. The request must be
+// consumed at attempt time only.
+
+TEST(RecoveryBackoffTest, RequestConsumedOnlyWhenAttemptRuns) {
+    using rex::wallpaper::DecideRecovery;
+    // No request, or not yet at the deadline -> no attempt, nothing consumed.
+    EXPECT_FALSE(DecideRecovery(false, false, true).consumeRequest);
+    EXPECT_FALSE(DecideRecovery(true, false, false).consumeRequest);
+    EXPECT_FALSE(DecideRecovery(true, false, false).attempt);
+    // Deadline reached with a host request -> attempt runs and consumes it.
+    const auto ready = DecideRecovery(true, false, true);
+    EXPECT_TRUE(ready.attempt);
+    EXPECT_TRUE(ready.consumeRequest);
+    // Device-loss-only (no host request): attempt, but nothing to consume.
+    const auto lost = DecideRecovery(false, true, true);
+    EXPECT_TRUE(lost.attempt);
+    EXPECT_FALSE(lost.consumeRequest);
+}
+
+TEST(RecoveryBackoffTest, FailedAttemptRetriesAfterBackoffWindow) {
+    // Drive the fixed render-loop decision across three passes: attempt 1
+    // fails and re-arms + backs off; pass 2 is inside the window and must
+    // NOT consume the request; pass 3, deadline reached, attempts again.
+    bool pending = true;
+    bool ready = true;
+    int attempts = 0;
+
+    auto pass = [&]() {
+        const auto d = rex::wallpaper::DecideRecovery(pending, false, ready);
+        if (d.consumeRequest) pending = false;
+        if (d.attempt) {
+            ++attempts;
+            // Failure branch: re-arm the request, schedule the deadline.
+            ready = false;
+            pending = true;
+        }
+        return d;
+    };
+
+    EXPECT_TRUE(pass().attempt);   // pass 1: first attempt runs
+    EXPECT_FALSE(pass().attempt);  // pass 2: inside the backoff window
+    EXPECT_TRUE(pending);          //   -> request survived (pre-fix: lost)
+    ready = true;                  // deadline elapses
+    EXPECT_TRUE(pass().attempt);   // pass 3: retry runs
+    EXPECT_EQ(attempts, 2);
+
+    // Pre-fix model for contrast: consuming at read time loses the retry.
+    bool legacyPending = true;
+    auto legacyConsumeAtRead = [&]() {
+        const bool r = legacyPending;
+        legacyPending = false;
+        return r;
+    };
+    (void)legacyConsumeAtRead();  // pass 1: attempt ran, then failure re-arms
+    legacyPending = true;
+    (void)legacyConsumeAtRead();  // pass 2: inside window — cleared, no attempt
+    EXPECT_FALSE(legacyPending);  // nothing left when the deadline passes
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Playback-settings truth (P1-7 / R9)
 // ═══════════════════════════════════════════════════════════════════════════

@@ -99,6 +99,10 @@ public:
     /// Render thread reports the frameIndex it has finished consuming, so the
     /// decode thread can safely recycle that frame's pool slot (Phase D).
     void NotifyFrameConsumed(int64_t frameIndex) {
+        // m_monitorMutex: entry iteration races command-thread mutation
+        // (ClearVideoFrames resets monitorController under this lock) — an
+        // unlocked loop here was a use-after-free on a scene switch.
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
         if (m_controller) m_controller->NotifyFrameConsumed(frameIndex);
         for (auto& entry : m_monitorEntries) {
             if (entry.monitorController) {

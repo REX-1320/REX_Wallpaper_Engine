@@ -1831,13 +1831,23 @@ void Engine::RenderLoop() {
         // re-arming the flag: a host that could not be reacquired (Explorer
         // still restarting) spun this thread at 100% CPU, and because the
         // frame counter stopped advancing, ran the %30/%120 housekeeping on
-        // every pass. A single failed attempt also used to consume the
-        // request and never retry, bricking the wallpaper for the session.
-        const bool hostRecoveryRequested = m_recoveryNeeded.exchange(false);
+        // every pass. A second hazard: the host request was consumed with
+        // exchange(false) at READ time, so a failed attempt's re-armed
+        // request was cleared on the next in-window pass and the retry
+        // never ran — host-only recovery bricked until restart. The request
+        // is now consumed only when an attempt actually runs
+        // (DecideRecovery, RecoveryBackoff.hpp).
+        const bool hostRecoveryRequested =
+            m_recoveryNeeded.load(std::memory_order_acquire);
         const bool deviceLost = m_renderer && m_renderer->IsDeviceRemoved();
         if (hostRecoveryRequested || deviceLost) {
             const auto now = high_resolution_clock::now();
-            if (now >= m_nextRecoveryAttempt) {
+            const auto decision = DecideRecovery(hostRecoveryRequested, deviceLost,
+                                                 now >= m_nextRecoveryAttempt);
+            if (decision.consumeRequest) {
+                m_recoveryNeeded.store(false, std::memory_order_release);
+            }
+            if (decision.attempt) {
                 REX_LOG_INFO("Engine", "Recovery requested ({}), reinitializing...",
                              deviceLost ? "device removed" : "desktop host");
                 SetState(EngineState::Error);

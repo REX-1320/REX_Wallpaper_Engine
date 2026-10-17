@@ -29,4 +29,30 @@ inline int NextRecoveryDelayMs(int currentDelayMs) {
     return doubled < kMaxRecoveryDelayMs ? doubled : kMaxRecoveryDelayMs;
 }
 
+/// One render-pass decision for device-loss / desktop-host recovery.
+struct RecoveryDecision {
+    /// Run the recovery procedure this pass.
+    bool attempt = false;
+    /// Clear the host request flag. True only when an attempt runs with a
+    /// host request outstanding.
+    bool consumeRequest = false;
+};
+
+/// Pure gate for the render loop's recovery block. An attempt may run only
+/// after the backoff deadline (`readyToAttempt`). The host request flag must
+/// be consumed AT ATTEMPT TIME: the pre-fix loop read it with
+/// exchange(false) before the deadline check, so a failed attempt's re-armed
+/// request was cleared on the next in-window pass and the retry never ran —
+/// host-only recovery (Explorer restart, no device loss) bricked the
+/// wallpaper until app restart.
+inline RecoveryDecision DecideRecovery(bool hostRequested, bool deviceLost,
+                                       bool readyToAttempt) {
+    RecoveryDecision d;
+    if (!hostRequested && !deviceLost) return d;
+    if (!readyToAttempt) return d;  // retain the request across the window
+    d.attempt = true;
+    d.consumeRequest = hostRequested;
+    return d;
+}
+
 } // namespace rex::wallpaper

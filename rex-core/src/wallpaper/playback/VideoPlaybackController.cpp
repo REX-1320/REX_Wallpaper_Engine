@@ -720,7 +720,9 @@ void VideoPlaybackController::DecoderThread() {
             const auto nowDump = Clock::now();
             if (nowDump - m_lastStageDump > std::chrono::seconds(5)) {
                 m_lastStageDump = nowDump;
-                auto dec = m_decoder;
+                // SnapshotDecoder: same P1-8 discipline as every other
+                // decoder access (Close() may reset m_decoder concurrently).
+                auto dec = SnapshotDecoder();
                 if (dec) {
                     const size_t rows = dec->DumpDecodeStages();
                     if (rows > 0) {

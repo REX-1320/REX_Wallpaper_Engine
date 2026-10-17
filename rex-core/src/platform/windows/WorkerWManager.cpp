@@ -3,6 +3,7 @@
 #include <shared/Logger.hpp>
 #include <wtsapi32.h>
 #include <powrprof.h>
+#include <memory>
 #include <string>
 #include <vector>
 #include <chrono>
@@ -643,11 +644,17 @@ bool WorkerWManager::ReacquireWorkerW(bool requestWorkerWSpawn) {
         }
         m_acquired = false;
 
-        HWND workerW = nullptr;
-        if (!RunOnWindowThread([this, &workerW, requestWorkerWSpawn] {
-                workerW = FindBlankWorkerW(requestWorkerWSpawn);
-                return true;
-            }, 10000) || !workerW) {
+        // W1: on timeout the op stays queued on the window thread and runs
+        // LATER — capturing the result local by reference was a
+        // use-after-scope. shared_ptr keeps the cell alive for the task's
+        // lifetime; the value is read only when the op completed.
+        auto workerWSlot = std::make_shared<HWND>(nullptr);
+        const bool found = RunOnWindowThread([this, workerWSlot, requestWorkerWSpawn] {
+            *workerWSlot = FindBlankWorkerW(requestWorkerWSpawn);
+            return true;
+        }, 10000);
+        const HWND workerW = found ? *workerWSlot : nullptr;
+        if (!found || !workerW) {
             m_state.store(DesktopHostState::Suspect, std::memory_order_release);
             REX_LOG_ERROR("WorkerW", "Reacquire failed: no wallpaper WorkerW");
             return false;
