@@ -923,3 +923,6 @@ reproduce in the warm session; no code changed between the two sessions, so the
 difference is session state (GPU clock ramp / system load on first applies
 after idle), not an engine defect. Watch item: first-seconds judder on a COLD
 GPU after boot - if it returns, capture with REX_PERFRAME_CSV + SCHED_DEBUG.
+Post-reboot verification (user, same day): full PC reboot then fresh app run -
+playback fine, first-seconds judder did not return on a COLD boot either.
+The cold-GPU watch item remains theoretical; mission track closed.
