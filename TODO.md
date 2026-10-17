@@ -13,6 +13,25 @@
 
 > Full audit with file:line evidence + refuted claims: [`docs/bugs/AUDIT-2026-10-06-parallel-audit.md`](docs/bugs/AUDIT-2026-10-06-parallel-audit.md) (2026-10-06, 4 parallel subsystem audits, high-severity items hand-verified).
 
+### New discoveries (2026-10-17, full-repo quality audit — findings only, no fixes yet)
+
+> Full consolidated report: [`docs/bugs/AUDIT-2026-10-17-quality-audit.md`](docs/bugs/AUDIT-2026-10-17-quality-audit.md) — 10 read-only agents, **2×P0 / 14×P1 / ~30×P2 / ~55×P3**, every finding at `file:line`. A1/A2/A3 re-verified: A1 fixed (one residual), A2 partial, A3 fixed. Tooling: no `.clang-format`/`.clang-tidy`; CI clang-tidy step is a **no-op** (target doesn't exist + continue-on-error); cache has no `/W3`/`/W4`; `C:/vcpkg/.../vcpkg.cmake` is a **STUB** blocking fresh configures.
+
+- [ ] **P0 — Audio ring heap OOB when endpoint channels ≠ 2.** `ResizeRing` guard always true (caller pre-assigns `m_channels`) → ring never resized; 4/6-ch endpoint ⇒ OOB write/read. (`AudioPlayer.cpp:456,744` + `:936-946,1029-1040`)
+- [ ] **P0 — `wallpaper:update` ReferenceError — ALL live updates broken.** `audioMode` missing from destructure but read at `:428`; error toast on every settings change; audio-mode IPC unreachable. (`app/electron/main.cjs:417,428`, introduced `8e13cd90`)
+- [ ] **P1 — Decoder EAGAIN retry budget never resets → prime suspect for the intermittent START stutter (user report 2026-10-17: Aari + Mind Blowing OLED, sometimes).** After budget exhaustion every later EAGAIN packet drops instantly; decoder is heaviest at startup (refill burst). (`FfmpegVideoDecoder.cpp:966-977`)
+- [ ] **P1 — Engine recovery retry consumed during backoff → device-loss retry can be lost (A2 residual; docs claiming closure overstated).** (`Engine.cpp:1836-1868`)
+- [ ] **P1 — VideoManager unlocked iteration (`NotifyFrameConsumed`, `SetAudioOutputMode`) — UAF vs scene switch.** (`VideoManager.hpp:101-108,227-232`)
+- [ ] **P1 — Controller `NotifyFrameConsumed` reads `m_decoder` unlocked.** (`VideoPlaybackController.hpp:133-136`)
+- [ ] **P1 — WorkerWManager by-ref capture UAF on `ReacquireWorkerW` timeout.** (`WorkerWManager.cpp:647`)
+- [ ] **P1 — TextureCache raw pointers escape lock (hot-reload race) / Compositor ignores all HRESULTs (null-deref).** (`TextureCache.cpp:73-89`; `compositor.cpp:92-136,341-372`)
+- [ ] **P1 — HDR `ResizeBuffers` with back-buffer refs held; `CommandQueue` fence counter non-atomic + shared event; static-image RowPitch unaligned (needs 256).** (`SwapChain.cpp:330`; `CommandQueue.cpp:80-101`; `D3D12Renderer.cpp:1525`)
+- [ ] **P1 — AudioCapture `WAVE_FORMAT_EXTENSIBLE` misparse (32-bit float read as int16) + COM leaks on Start-failure paths.** (`AudioCapture.cpp:149-166,24-84`)
+- [ ] **P1 — Audio mode never applied/reapplied (LOAD/`settingsKey`/reapply omit it); update-path fill-mode value mismatch.** (`main.cjs:390-398,423`; `desktop.js:87`)
+- [ ] **P2 handoff — quit truncation (native ~5 s telemetry join vs 3 s kill), INIT-timeout wedge, parked hang watchdog (PING now ships), login-item override, crash-report pid/path, spawn-failure unreported.** (§5.5/§5.10 of audit)
+- [ ] **Hygiene (owner call) — orphaned `rex-core/src/wallpaper/renderer/` (15 files, no target, cannot compile; live renderer is `src/graphics/renderer/`); dead modules (Sync/widgets-runtime/UpdateManager/desktop_personalization/Windows.cpp stubs); unbuilt tests (`test_compositor_render.cpp` etc.); root clutter list.** (§6 of audit)
+- [ ] **Tooling (deferred per user) — restore vcpkg; add `.clang-format` + `.clang-tidy`; real CI lint (current step is a no-op); `/W4` census; test-target cleanup; coverage gaps.** (§2 + §3.3 of audit)
+
 ### New discoveries (2026-10-15, phase-first stutter mitigation — Phase A re-baseline)
 
 > Full 10×10 elevated-PresentMon data, method, column mapping and per-run tables: [`docs/bugs/BASELINE-2026-10-15-phaseA.md`](docs/bugs/BASELINE-2026-10-15-phaseA.md). Build `fc0695d`, tree clean, 651/651 ctest. SDR-only, graceful shutdown, zero blanks.
