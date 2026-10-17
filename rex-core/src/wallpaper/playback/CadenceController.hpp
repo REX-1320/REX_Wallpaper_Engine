@@ -132,16 +132,19 @@ public:
         if (!(reserveMs >= 0.0) && !(reserveMs < 0.0)) return sourceIntervalMs;  // NaN
         const double burst = p.maxBurst > 1.0 ? p.maxBurst : 1.0;
         if (reserveMs < 0.0) {
-            // Behind the playhead: catch up. Uses catchUpBurst, NOT maxBurst,
-            // so refill behavior is untouched when this is 1.0 (default).
-            // Hysteresis (2026-10-16): deficits within one source frame are
-            // pacing noise — bursting on them limit-cycles (burst overshoots
-            // ahead, newest-due skips, behind again: measured 4.4 drops/s +
-            // 4.3 repeats/s steady-state on 4K60 with effFps 56.5 vs 59.9).
-            // Hold 1x inside one frame; rescue-burst only when deeper behind.
+            // Behind the playhead: catch up — EVERY negative lead bursts.
+            // A 1x hold behind the playhead freezes the deficit (the decode
+            // lag equals the playhead speed): an absorbing state. Measured
+            // 2026-10-17 live: cold-load entries of -5..-40 ms stayed pinned
+            // for minutes (late-frame storms, dwell smear 4-17 vblanks,
+            // underruns); only an external pause/resume reset escaped. The
+            // 2026-10-16 one-frame hysteresis treated shallow deficits as
+            // pacing noise, but a properly refilled reserve cannot reach
+            // negative from noise — only load/stall transients get here, and
+            // those need the burst. Uses catchUpBurst, NOT maxBurst, so
+            // rollback stays an explicit catchUpBurst = 1.0.
             const double cu = p.catchUpBurst > 1.0 ? p.catchUpBurst : 1.0;
-            if (reserveMs < -sourceIntervalMs) return sourceIntervalMs / cu;
-            return sourceIntervalMs;
+            return sourceIntervalMs / cu;
         }
         if (reserveMs < p.lowWaterMs) {
             return sourceIntervalMs / burst;

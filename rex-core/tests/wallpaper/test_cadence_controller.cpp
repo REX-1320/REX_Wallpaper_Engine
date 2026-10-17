@@ -178,20 +178,41 @@ TEST(DecodeAheadPolicy, CatchUpBurstAppliesOnlyBehindPlayhead) {
                 8.333 * 4.0, 0.001);  // parks above high water, unchanged
 }
 
-TEST(DecodeAheadPolicy, CatchUpHasOneFrameHysteresis) {
-    // Deficits within one source frame are pacing noise: hold 1x instead of
-    // bursting, or the burst/overshoot/skip cycle churns forever (measured
-    // 4.4 drops/s steady-state on 4K60). Deeper deficits rescue-burst.
+TEST(DecodeAheadPolicy, ShallowDeficitsCatchUp) {
+    // Regression (2026-10-17 live repro): holding 1x for deficits within one
+    // source frame is an ABSORBING state — behind the playhead 1x equals the
+    // playhead speed, so the deficit can never shrink. Cold-load entries
+    // (measured -5..-40 ms) stayed pinned for minutes with late-frame storms
+    // and dwell smear; only an external pause/resume reset escaped. Every
+    // negative lead must catch up.
     CadenceController::DecodeAheadPolicy cu;
     cu.catchUpBurst = 2.0;
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, -8.332, cu),
-                8.333, 0.001);
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(8.333, -8.334, cu),
                 8.333 / 2.0, 0.001);
     EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -16.0, cu),
-                16.667, 0.001);
-    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -17.0, cu),
                 16.667 / 2.0, 0.001);
+    EXPECT_NEAR(CadenceController::DecodeIntervalMs(16.667, -0.5, cu),
+                16.667 / 2.0, 0.001);
+}
+
+TEST(DecodeAheadPolicy, NegativeReserveRecoversToLowWater) {
+    // Fixed-point simulation of the live pacing loop (24 fps): each decode
+    // iteration takes `interval`, during which the playhead advances one
+    // source interval, so the reserve gains (sourceInterval - interval).
+    // From the measured cold-load entry deficit the reserve must reach the
+    // low-water mark; under the old one-frame hysteresis it froze at the
+    // entry value forever (the absorbing state).
+    const double src = 1000.0 / 24.0;  // 41.667 ms
+    const CadenceController::DecodeAheadPolicy p =
+        CadenceController::PolicyFor(24.0);
+    double reserve = -40.0;  // measured cold-load entry, 2026-10-17 session
+    int iterations = 0;
+    while (reserve < p.lowWaterMs && iterations < 240) {
+        reserve += src - CadenceController::DecodeIntervalMs(src, reserve, p);
+        ++iterations;
+    }
+    EXPECT_GE(reserve, p.lowWaterMs) << "reserve stayed stuck at entry";
+    EXPECT_LE(iterations, 12) << "recovery must complete in ~0.5 s";
 }
 
 TEST(DecodeAheadPolicy, NanReserveIsSourceRate) {
