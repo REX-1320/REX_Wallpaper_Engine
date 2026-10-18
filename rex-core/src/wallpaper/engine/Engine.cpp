@@ -268,13 +268,24 @@ shared::Result<void> Engine::Shutdown() {
         REX_LOG_INFO("Engine", "Shutting down...");
 
         SetState(EngineState::ShuttingDown);
-        m_desktopHost->StopMonitor();
         m_running = false;
         // NOTE: m_mutex is intentionally released here (end of scope) before
-        // joining the render thread. The render thread calls GetPosition() /
-        // CheckFullScreenPause() internally which both re-enter m_mutex —
-        // joining while holding the lock is a guaranteed deadlock.
+        // the teardown below. The render thread (still running until the
+        // join below) calls GetPosition() / CheckFullScreenPause() which
+        // both re-enter m_mutex — the join must never wait on a lock this
+        // thread holds.
     } // <── m_mutex released here
+
+    // Audit 2026-10-17, #14: stop the Explorer monitor OUTSIDE the lock.
+    // StopMonitor joins the monitor thread, which may be blocked inside
+    // ReacquireWorkerW for seconds (window-message timeouts); holding
+    // m_mutex across the join stalled every command/telemetry API for the
+    // whole window. Safe without the lock: the monitor thread's only engine
+    // touchpoint is the recovery callback — a single atomic store on
+    // m_recoveryNeeded (see StartMonitor above) — and the render thread's
+    // host accesses go through WorkerWManager's own op lock, which
+    // StopMonitor deliberately does not hold while joining.
+    m_desktopHost->StopMonitor();
 
     // The render thread may still be executing its current frame; wait for
     // it to observe m_running==false and exit cleanly.
@@ -321,31 +332,51 @@ shared::Result<void> Engine::Shutdown() {
 shared::Result<void> Engine::ReinitializeRenderer() {
     REX_LOG_INFO("Engine", "Reinitializing renderer...");
 
-    // The renderer and the video backend are destroyed and rebuilt here on
-    // the render thread. m_mutex is held across the swap so no command or
-    // telemetry thread can be inside them (GetTelemetry, GetDuration,
-    // GetFrameSurface, LoadScene, ...) while they are being replaced.
-    // It must NOT be held across the caller: HandleDeviceLoss reloads the
-    // scene afterwards and LoadScene/Play take m_mutex themselves.
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // Audit 2026-10-17, #14 — this used to hold m_mutex for the entire
+    // rebuild: decode-thread joins, GPU drain, host reacquire and device/
+    // swapchain creation (seconds on a bad day), stalling every command
+    // and telemetry API that needed the lock. The lock now only guards the
+    // *swaps*: the dying backends are detached onto locals under it, torn
+    // down and rebuilt WITHOUT it, and installed at the end. While they
+    // are detached the members are null; command paths null-check, Play/
+    // LoadScene stay rejected because the state remains Error for the whole
+    // rebuild, and Stop/UnloadScene reject on m_rebuildInProgress (they
+    // could otherwise flip the state and let a load run against the
+    // not-yet-installed backends).
+    // It must NOT be held across the caller either: HandleDeviceLoss
+    // reloads the scene afterwards and LoadScene/Play take m_mutex
+    // themselves.
+    std::unique_ptr<VideoManager> oldVideo;
+    std::unique_ptr<D3D12Renderer> oldRenderer;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_rebuildInProgress.store(true, std::memory_order_release);
 
-    // Device loss restarts the pacing grid; do not let the servo integrate
-    // across the discontinuity.
-    m_pacingServo.Reset();
-    m_pacingPrevValid = false;
-    m_pacingServoActive.store(false, std::memory_order_relaxed);
+        // Device loss restarts the pacing grid; do not let the servo
+        // integrate across the discontinuity.
+        m_pacingServo.Reset();
+        m_pacingPrevValid = false;
+        m_pacingServoActive.store(false, std::memory_order_relaxed);
 
-    // Destroy old renderer (and the video backend that borrowed its device)
-    if (m_videoManager) {
-        m_videoManager->ShutdownMonitorCompositors();
-        m_videoManager->Shutdown();
-        m_videoManager.reset();
+        // Phase 3: drop the cadence re-present cache before tearing down —
+        // slot handles/fence values below belong to the dying backend.
+        m_hasVideoFrame.store(false, std::memory_order_release);
+
+        // Swap the backends out; the heavy shutdown of the detached
+        // objects runs below without the lock.
+        oldVideo = std::move(m_videoManager);
+        oldRenderer = std::move(m_renderer);
     }
-    // Phase 3: drop the cadence re-present cache before tearing down —
-    // slot handles/fence values below belong to the dying backend.
-    m_hasVideoFrame.store(false, std::memory_order_release);
-    if (m_renderer) {
-        m_renderer->Shutdown();
+
+    // ── Heavy phase: teardown and rebuild with the lock released ───────
+    if (oldVideo) {
+        oldVideo->ShutdownMonitorCompositors();
+        oldVideo->Shutdown();
+        oldVideo.reset();
+    }
+    if (oldRenderer) {
+        oldRenderer->Shutdown();
+        oldRenderer.reset();
     }
 
     // Reacquire the desktop host if it was lost (e.g., Explorer restart).
@@ -355,6 +386,8 @@ shared::Result<void> Engine::ReinitializeRenderer() {
         if (result.IsError()) {
             REX_LOG_ERROR("Engine", "Failed to reacquire desktop host: {}",
                           result.Error().message);
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_rebuildInProgress.store(false, std::memory_order_release);
             return result;
         }
     }
@@ -363,38 +396,50 @@ shared::Result<void> Engine::ReinitializeRenderer() {
     int width  = m_desktopHost->GetWidth();
     int height = m_desktopHost->GetHeight();
 
-    m_renderer = std::make_unique<D3D12Renderer>();
+    auto newRenderer = std::make_unique<D3D12Renderer>();
     // P0-2: same ordering as Initialize — force-SDR must be visible to the
     // swapchain before it is created, not after.
-    m_renderer->SetForceSdr(m_config.forceSdr);
-    auto result = m_renderer->Initialize(renderWindow, width, height);
+    newRenderer->SetForceSdr(m_config.forceSdr);
+    auto result = newRenderer->Initialize(renderWindow, width, height);
     if (result.IsError()) {
         REX_LOG_ERROR("Engine", "Failed to reinitialize renderer: {}",
                       result.Error().message);
+        // Members stay detached — the recovery retry path rebuilds from
+        // scratch; until it succeeds, Play/LoadScene reject on Error state.
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_rebuildInProgress.store(false, std::memory_order_release);
         return result;
     }
 
     // Recreate the video backend on the new device.
-    m_videoManager = std::make_unique<VideoManager>();
-    auto vmResult = m_videoManager->Initialize(m_config, m_renderer->GetDevice().Get());
+    auto newVideo = std::make_unique<VideoManager>();
+    auto vmResult = newVideo->Initialize(m_config, newRenderer->GetDevice().Get());
     if (vmResult.IsError()) {
         REX_LOG_WARN("Engine", "VideoManager re-init failed: {} (video scenes will not play)",
                      vmResult.Error().message);
-        m_videoManager.reset();
+        newVideo.reset();
     }
 
-    // Rebuild per-monitor compositors (device changed) and restore
-    // persisted assignments.
-    if (m_videoManager) {
-        m_videoManager->SetWallpaperHostWindow(
-            m_desktopHost->GetWallpaperLayerWindow());
-    }
-    SetupMonitorCompositors();
+    // ── Install the new backends (brief) ───────────────────────────────
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_renderer = std::move(newRenderer);
+        m_videoManager = std::move(newVideo);
 
-    // LoadScene only accepts Initialized/Stopped states; the engine is in
-    // Error during recovery, so move to Initialized before the caller
-    // (HandleDeviceLoss) reloads the scene.
-    SetState(EngineState::Initialized);
+        // Rebuild per-monitor compositors (device changed) and restore
+        // persisted assignments.
+        if (m_videoManager) {
+            m_videoManager->SetWallpaperHostWindow(
+                m_desktopHost->GetWallpaperLayerWindow());
+        }
+        SetupMonitorCompositors();
+
+        m_rebuildInProgress.store(false, std::memory_order_release);
+        // LoadScene only accepts Initialized/Stopped states; the engine is
+        // in Error during recovery, so move to Initialized before the
+        // caller (HandleDeviceLoss) reloads the scene.
+        SetState(EngineState::Initialized);
+    }
 
     REX_LOG_INFO("Engine", "Renderer reinitialized successfully");
     return shared::Result<void>();
@@ -655,6 +700,17 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
 shared::Result<void> Engine::UnloadScene() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    // Audit 2026-10-17, #14: during device-loss recovery the backends are
+    // detached and recovery owns the lifecycle until ReinitializeRenderer
+    // installs the new ones. An unload mid-rebuild would flip the state to
+    // Initialized with the members still null, letting a LoadScene/Play run
+    // against the half-built pair — reject like Play does in Error state
+    // (#8); the caller can retry once the rebuild finishes (seconds).
+    if (m_rebuildInProgress.load(std::memory_order_acquire)) {
+        return shared::Result<void>(shared::ErrorCode::InvalidState,
+                                    "Engine is recovering (renderer rebuild)");
+    }
+
     REX_LOG_INFO("Engine", "Unloading scene");
 
     // The pacing grid is about to change discontinuously; carrying the servo
@@ -787,11 +843,15 @@ shared::Result<void> Engine::Stop() {
 
     // Audit 2026-10-17, #8 — Stop is a timeline reset, legal from any live
     // state (Running/Paused/Stopped/Initialized; idempotent) but rejected
-    // from Uninitialized (no backend exists) and ShuttingDown (teardown
+    // from Uninitialized (no backend exists), ShuttingDown (teardown
     // owns the backends; a "successful" stop would stamp Stopped onto a
-    // dying object).
+    // dying object), and mid-rebuild (audit 2026-10-17, #14: the backends
+    // are detached during ReinitializeRenderer; a Stop that stamped
+    // Stopped would make LoadScene/Play legal against the not-yet-
+    // installed backends before recovery reloads the scene).
     if (m_state == EngineState::Uninitialized
-        || m_state == EngineState::ShuttingDown) {
+        || m_state == EngineState::ShuttingDown
+        || m_rebuildInProgress.load(std::memory_order_acquire)) {
         return shared::Result<void>(shared::ErrorCode::InvalidState,
                                     "Engine is not running");
     }

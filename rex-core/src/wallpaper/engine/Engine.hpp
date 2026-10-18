@@ -192,6 +192,13 @@ private:
     std::thread m_renderThread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_recoveryNeeded{false};
+    // True while ReinitializeRenderer has detached the renderer/video
+    // backends and is rebuilding them (audit 2026-10-17, #14). During that
+    // window the members are null: Play/LoadScene are already rejected
+    // because the state stays Error, and Stop/UnloadScene check this flag
+    // so neither can flip the state and let a load run against the
+    // not-yet-installed backends.
+    std::atomic<bool> m_rebuildInProgress{false};
     // Recovery retry pacing (render-thread only, see RecoveryBackoff.hpp).
     // m_recoveryDelayMs is the backoff ladder position, m_nextRecoveryAttempt
     // the earliest time the next attempt may run.
