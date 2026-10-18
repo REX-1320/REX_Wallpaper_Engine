@@ -17,6 +17,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <d3d11_4.h>
@@ -28,6 +30,7 @@ using rex::wallpaper::D3d11vaCanDecodeChroma;
 using rex::wallpaper::DecodePathUnusable;
 using rex::wallpaper::HwProfileSupport;
 using rex::wallpaper::PlanSwsSlices;
+using rex::wallpaper::SignalSharedFenceOrdered;
 using rex::wallpaper::SliceSourcePointers;
 using rex::wallpaper::SwsCacheHit;
 using rex::wallpaper::SwsCacheKey;
@@ -424,4 +427,49 @@ TEST(SwsSliceParity, Sliced422p10ToBgraIsBitExact) {
   for (SwsContext* c : lanes) {
     sws_freeContext(c);
   }
+}
+
+// ─── Shared fence sequence (audit 2026-10-17 #5) ─────────────────────────
+
+TEST(SharedFenceSequence, FreshSessionValueClearsEveryPriorSignal) {
+  // Old defect: every decoder Open reset its private counter to 1 while the
+  // shared fence object kept the previous session's high-water mark, so a
+  // consumer waiting on a fresh session's early frames could be released by
+  // stale values before the copies had executed. Values must therefore keep
+  // climbing across close/open cycles.
+  UINT64 highWater = 0;
+  for (int i = 0; i < 40; ++i) {  // "session 1"
+    highWater = SignalSharedFenceOrdered([](UINT64) {});
+  }
+  const UINT64 fresh = SignalSharedFenceOrdered([](UINT64) {});  // "Open #2"
+  EXPECT_GT(fresh, highWater);
+}
+
+TEST(SharedFenceSequence, SignalEnqueueOrderMatchesValueOrderUnderContention) {
+  // Two decoders (global + per-monitor) draw concurrently on one shared
+  // context. The enqueue callbacks must observe strictly increasing values:
+  // if a lower value could be enqueued after a higher one, the fence would
+  // move backwards and leave in-between waits stranded.
+  std::mutex recordMutex;
+  std::vector<UINT64> order;
+  auto enqueue = [&](UINT64 v) {
+    std::lock_guard<std::mutex> g(recordMutex);
+    order.push_back(v);
+  };
+  auto draw = [&](int n) {
+    for (int i = 0; i < n; ++i) {
+      SignalSharedFenceOrdered(enqueue);
+    }
+  };
+  std::thread a(draw, 300);
+  std::thread b(draw, 300);
+  a.join();
+  b.join();
+
+  ASSERT_EQ(static_cast<size_t>(600), order.size());
+  bool strictlyIncreasing = true;
+  for (size_t i = 1; i < order.size() && strictlyIncreasing; ++i) {
+    strictlyIncreasing = order[i - 1] < order[i];
+  }
+  EXPECT_TRUE(strictlyIncreasing);
 }

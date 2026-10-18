@@ -12,6 +12,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string_view>
 #include <vector>
 
@@ -58,8 +59,9 @@ struct VideoColorInfo {
 // ring of shareable BGRA textures (pool slot `slot`). The D3D12 consumer
 // opens each slot's NT shared handle once (FfmpegVideoDecoder::GetSlotHandle)
 // and waits on the slot's D3D12 fence value (GetSlotFence) before sampling;
-// both are exposed through VideoManager. Fence values are monotonic, so
-// waiting on the latest value of a slot is always race-free.
+// both are exposed through VideoManager. Fence values are drawn from one
+// process-wide monotonic sequence (SignalSharedFenceOrdered), so waiting on
+// the latest value of a slot is always race-free.
 
 struct VideoFrame {
     HANDLE   sharedHandle = nullptr;  // NT handle of the pool slot (stable per Open)
@@ -420,6 +422,43 @@ inline double ResolveFrameRate(int64_t nbFrames, double durationSec,
     }
     if (usedCount) *usedCount = false;
     return declaredFps > 0.0 ? declaredFps : 30.0;
+}
+
+// ─── Shared fence sequence (pure, unit-testable) ────────────────────────
+//
+// Every decoder signals ONE process-wide shared fence (VideoManager's
+// D3D12-created handle, opened per D3D11 device) and all of them enqueue
+// those signals on views of the SAME immediate context. History (audit
+// 2026-10-17 #5): each decoder kept a private counter that restarted at 1
+// on every Open. Two writers then collide on one fence: a consumer waiting
+// on a fresh session's (or the per-monitor decoder's) frame could be
+// released by an older producer's higher, stale value before the frame's
+// copy had executed, sampling a half-written slot. Values therefore come
+// from one process-wide sequence, and the draw + signal enqueue run under
+// one lock: enqueue order then equals value order, so the shared fence can
+// never move backwards (a signal enqueued after a higher one would strand
+// every waiter in between).
+inline UINT64 NextSharedFenceValue() {
+    static std::atomic<UINT64> next{0};
+    return next.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+/// The lock that keeps a {draw, enqueue} pair atomic across all decoders.
+inline std::mutex& SharedFenceLock() {
+    static std::mutex lock;
+    return lock;
+}
+
+/// Draw the next shared-fence value and enqueue its signal in one lock
+/// step. `enqueueSignal(value)` must only submit the GPU signal (e.g.
+/// ID3D11DeviceContext4::Signal); callers publish the returned value to
+/// consumers afterwards.
+template <class SignalFn>
+inline UINT64 SignalSharedFenceOrdered(SignalFn&& enqueueSignal) {
+    std::lock_guard<std::mutex> lock(SharedFenceLock());
+    const UINT64 value = NextSharedFenceValue();
+    enqueueSignal(value);
+    return value;
 }
 
 // ─── FfmpegVideoDecoder ─────────────────────────────────────────────────

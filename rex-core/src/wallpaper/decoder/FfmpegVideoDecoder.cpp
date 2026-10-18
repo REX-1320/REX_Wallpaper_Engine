@@ -1315,14 +1315,19 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
     m_context->CopySubresourceRegion(m_poolTex[slot].Get(), 0, 0, 0, 0,
                                       tex11, srcSubresource, &srcBox);
 
-    ++m_fenceValue;
-    m_slotFence[slot].store(m_fenceValue, std::memory_order_release);
-    m_context4->Signal(m_fence11.Get(), m_fenceValue);
+    // Audit 2026-10-17 #5: draw from the process-wide sequence and enqueue
+    // the signal as one step — the shared fence stays monotonic across
+    // decoder sessions and instances, so a consumer can never be released
+    // by a stale higher value before this frame's copy has executed.
+    const UINT64 fenceValue = SignalSharedFenceOrdered(
+        [&](UINT64 v) { m_context4->Signal(m_fence11.Get(), v); });
+    m_fenceValue = fenceValue;
+    m_slotFence[slot].store(fenceValue, std::memory_order_release);
     m_context->Flush();
 
     outFrame.sharedHandle = m_poolHandles[slot];
     outFrame.slot = slot;
-    outFrame.fenceValue = m_fenceValue;
+    outFrame.fenceValue = fenceValue;
     outFrame.pts = m_frame->best_effort_timestamp != AV_NOPTS_VALUE
                        ? static_cast<double>(av_rescale_q(m_frame->best_effort_timestamp,
                                                           m_stream->time_base,
@@ -1543,16 +1548,18 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
     m_context->Unmap(m_staging.Get(), 0);
     m_context->CopyResource(m_poolTex[slot].Get(), m_staging.Get());
 
-    ++m_fenceValue;
-    m_slotFence[slot].store(m_fenceValue, std::memory_order_release);
-    m_context4->Signal(m_fence11.Get(), m_fenceValue);
+    // Same shared-fence discipline as the GPU path (audit 2026-10-17 #5).
+    const UINT64 fenceValue = SignalSharedFenceOrdered(
+        [&](UINT64 v) { m_context4->Signal(m_fence11.Get(), v); });
+    m_fenceValue = fenceValue;
+    m_slotFence[slot].store(fenceValue, std::memory_order_release);
     m_context->Flush();
 
     m_cpuToGpuCopies.fetch_add(1, std::memory_order_relaxed);
 
     outFrame.sharedHandle = m_poolHandles[slot];
     outFrame.slot = slot;
-    outFrame.fenceValue = m_fenceValue;
+    outFrame.fenceValue = fenceValue;
     outFrame.pts = m_frame->best_effort_timestamp != AV_NOPTS_VALUE
                        ? static_cast<double>(av_rescale_q(m_frame->best_effort_timestamp,
                                                           m_stream->time_base,
