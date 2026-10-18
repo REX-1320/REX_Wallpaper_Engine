@@ -1239,6 +1239,20 @@ void D3D12Renderer::RenderFrame() {
             pso = useHdrPso ? m_pipelineStateHdr.Get()
                             : m_pipelineState.Get();
         }
+        if (!pso) {
+            // Audit 2026-10-17, #4 residual: the flag says HDR but the HDR
+            // PSO does not exist (its creation failed and the SDR revert
+            // also failed). Never bind null — the draw would be dropped
+            // with the whole pass. Draw with the SDR pipeline until the
+            // next refresh retries the HDR PSO.
+            if (!m_hdrPsoMissingWarned) {
+                m_hdrPsoMissingWarned = true;
+                REX_LOG_WARN("D3D12",
+                             "HDR PSO missing while the HDR flag is set — "
+                             "using the SDR pipeline until the next refresh");
+            }
+            pso = m_pipelineState.Get();
+        }
         m_commandList->SetPipelineState(pso);
         m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
@@ -1428,9 +1442,34 @@ void D3D12Renderer::SyncHdrStateLocked() {
     if (action.createHdrPso) {
         if (!CreatePipelineState(DXGI_FORMAT_R16G16B16A16_FLOAT,
                                  m_pipelineStateHdr)) {
+            // Audit 2026-10-17, #4: this branch used to clear the cached
+            // flag immediately. With the OS already on HDR that made the
+            // pass bind the SDR PSO and sRGB math onto an R16F/PQ back
+            // buffer (format mismatch + wrong transform). Bring flag and
+            // buffers back into agreement instead: force the swapchain to
+            // SDR and only claim SDR once that actually took. The forced
+            // flag stays pinned so a later refresh cannot flip the format
+            // back to HDR and fail again (each oscillation would cost two
+            // ResizeBuffers + recreated RTVs).
             REX_LOG_ERROR("D3D12",
-                          "HDR PSO creation failed; staying on SDR output");
-            m_isHdrOutput = false;
+                          "HDR PSO creation failed; reverting output to SDR");
+            m_swapChain.SetForceSdr(true);
+            auto revert = m_swapChain.RefreshHdrSelection(m_device.Get());
+            if (revert.IsError()) {
+                REX_LOG_WARN("D3D12", "SDR revert refresh failed: {}",
+                             revert.Error().message.c_str());
+            }
+            m_isHdrOutput = graphics::HdrFlagAfterPsoFailure(m_swapChain.IsHDR());
+            if (m_isHdrOutput) {
+                REX_LOG_WARN("D3D12",
+                             "SDR revert did not take — still on R16F/PQ; "
+                             "keeping the HDR flag so the PSO choice matches "
+                             "the buffers (next refresh retries the PSO)");
+            } else {
+                REX_LOG_WARN("D3D12",
+                             "staying on SDR output (HDR retry needs an app "
+                             "restart)");
+            }
         }
     }
 }

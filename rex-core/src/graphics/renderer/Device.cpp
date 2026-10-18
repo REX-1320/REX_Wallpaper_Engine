@@ -29,15 +29,35 @@ shared::Result<void> Device::Initialize(D3D_FEATURE_LEVEL minimumFeatureLevel) {
                                     "CreateDXGIFactory2 failed");
     }
 
-    // Prefer hardware adapter
+    // Prefer hardware adapter. Audit 2026-10-17, #5: only
+    // DXGI_ERROR_NOT_FOUND means "enumeration exhausted" — any other
+    // failure (or a null adapter) previously entered the loop body and
+    // dereferenced a null adapter. Stop on any error and fall through to
+    // the default-adapter path below.
     Microsoft::WRL::ComPtr<IDXGIAdapter4> adapter;
-    for (UINT i = 0; factory->EnumAdapterByGpuPreference(
-             i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-             IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND; ++i) {
-        DXGI_ADAPTER_DESC3 desc;
+    for (UINT i = 0;; ++i) {
+        hr = factory->EnumAdapterByGpuPreference(
+            i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+            IID_PPV_ARGS(&adapter));
+        if (hr == DXGI_ERROR_NOT_FOUND) {
+            break;  // enumeration exhausted: no more adapters
+        }
+        if (FAILED(hr) || !adapter) {
+            REX_LOG_WARN("Device",
+                         "EnumAdapterByGpuPreference({}) failed: 0x{:08x} — "
+                         "falling back to the default adapter",
+                         i, static_cast<unsigned>(hr));
+            adapter.Reset();
+            break;
+        }
+
+        DXGI_ADAPTER_DESC3 desc{};
         if (SUCCEEDED(adapter->GetDesc3(&desc))) {
             // Skip software adapters
-            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+                adapter.Reset();
+                continue;
+            }
 
             // Check if this adapter supports D3D12 at the requested level
             if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), minimumFeatureLevel,

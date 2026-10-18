@@ -175,3 +175,12 @@ TEST(HdrSyncPlanTest, MissingPsoIsRecreatedEvenWhenFlagMatches) {
     EXPECT_FALSE(a.updateFlag);
     EXPECT_TRUE(a.createHdrPso);
 }
+
+TEST(HdrSyncPlanTest, PsoFailureFlagTracksRevertedSwapchain) {
+    // Audit 2026-10-17, #4: after a failed HDR-PSO creation the cached
+    // flag may only claim SDR once the forced-SDR refresh actually
+    // reverted the swapchain — clearing it over an R16F/PQ buffer would
+    // bind the SDR pipeline with sRGB math onto PQ surfaces.
+    EXPECT_FALSE(HdrFlagAfterPsoFailure(false));  // revert took → SDR is real
+    EXPECT_TRUE(HdrFlagAfterPsoFailure(true));    // revert failed → keep HDR
+}

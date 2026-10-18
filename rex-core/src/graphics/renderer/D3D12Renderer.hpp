@@ -286,6 +286,10 @@ private:
     VideoColorInfo m_activeColorInfo;   // colorimetry of the bound frame
     bool m_isHdrOutput = false;         // swap chain is R16F + PQ/BT.2020
     bool m_forceSdr = false;            // --force-sdr: override hdrOutput to 0
+    // One-shot log latch for the failed-HDR-PSO bind fallback (audit
+    // 2026-10-17, #4): at most one retry window per process, so a single
+    // warning is enough to keep the log honest without spamming frames.
+    bool m_hdrPsoMissingWarned = false;
     float m_displayPeakNits = 80.0f;    // tone-mapping target (display or
                                         // SDR reference white in nits)
     float m_inputFormat = 0.0f;         // shader input format (0=NV12, 1=RGBA16, 2=P010)

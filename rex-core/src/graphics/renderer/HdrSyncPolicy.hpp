@@ -31,4 +31,17 @@ inline HdrSyncAction PlanHdrSync(bool cachedHdr, bool liveHdr,
     return action;
 }
 
+/// Decide the cached HDR flag after a FAILED HDR-PSO creation.
+/// The refresh first tries to bring flag and buffers back together by
+/// reverting the swapchain to SDR (forced-SDR refresh); the flag may only
+/// claim SDR once the swapchain actually is SDR. Clearing the flag over
+/// an R16F/PQ back buffer would bind the SDR pipeline with sRGB math onto
+/// a PQ surface (format mismatch + wrong transform) — audit 2026-10-17,
+/// #4. While the swapchain is still HDR the flag stays true so the PSO
+/// choice keeps matching the real buffers and the next refresh retries
+/// the missing PSO.
+inline bool HdrFlagAfterPsoFailure(bool swapchainHdrAfterRevert) {
+    return swapchainHdrAfterRevert;
+}
+
 }  // namespace rex::graphics

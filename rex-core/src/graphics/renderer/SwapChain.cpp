@@ -307,17 +307,24 @@ double SwapChain::MeasureWaitForFrameMs() const {
 
 void SwapChain::UpdateHdrSelection() {
     if (!m_swapChain) return;
-    if (m_forceSdr) return;  // --force-sdr: stay on SDR format
 
-    Microsoft::WRL::ComPtr<IDXGIOutput> output;
-    if (FAILED(m_swapChain->GetContainingOutput(&output))) return;
-    Microsoft::WRL::ComPtr<IDXGIOutput6> out6;
+    // m_forceSdr selects SDR output — including *reverting* an existing
+    // R16F/PQ format. The renderer's failed-HDR-PSO path forces SDR to
+    // bring its cached flag and the real buffers back into agreement, so
+    // this can no longer early-return while the swapchain is HDR (audit
+    // 2026-10-17, #4); when forced and already SDR it still no-ops below.
+    bool hdr = false;
     DXGI_OUTPUT_DESC1 desc1 = {};
-    if (FAILED(output.As(&out6)) || FAILED(out6->GetDesc1(&desc1))) return;
+    if (!m_forceSdr) {
+        Microsoft::WRL::ComPtr<IDXGIOutput> output;
+        if (FAILED(m_swapChain->GetContainingOutput(&output))) return;
+        Microsoft::WRL::ComPtr<IDXGIOutput6> out6;
+        if (FAILED(output.As(&out6)) || FAILED(out6->GetDesc1(&desc1))) return;
 
-    // HDR10-capable outputs advertise the PQ/BT.2020 color space. scRGB
-    // (advanced color) is intentionally treated as SDR for now.
-    const bool hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+        // HDR10-capable outputs advertise the PQ/BT.2020 color space. scRGB
+        // (advanced color) is intentionally treated as SDR for now.
+        hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    }
     const DXGI_FORMAT fmt = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
                                 : DXGI_FORMAT_R8G8B8A8_UNORM;
     if (hdr == m_isHdr && fmt == m_format) return;
