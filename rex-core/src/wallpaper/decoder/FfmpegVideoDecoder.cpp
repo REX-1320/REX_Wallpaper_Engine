@@ -284,6 +284,25 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     // profile for this codec instead of discovering it from avcodec_open2's
     // failure. Unknown codecs always attempt (status quo).
     bool tryHardware = useHardware && m_hwDecoderProfiles > 0;
+    // Step 2b: D3D11VA only outputs 4:2:0 (NV12/P010). A stream with any
+    // other chroma layout — e.g. HEVC Rext 4:4:4 — opens with hwaccel
+    // attached and only fails at get_format, where FFmpeg silently falls
+    // back to software decode WHILE KEEPING the hardware thread pin set
+    // below (thread_count=1): measured 92-121 ms/frame single-threaded on
+    // a 3840x1752 Rext clip vs 21 ms/frame with auto threads (2026-10-17).
+    // Skip the doomed attempt so the software path keeps auto threads.
+    if (tryHardware &&
+        !D3d11vaCanDecodeChroma(
+            static_cast<AVPixelFormat>(m_stream->codecpar->format))) {
+        const char* fmtName = av_get_pix_fmt_name(
+            static_cast<AVPixelFormat>(m_stream->codecpar->format));
+        REX_LOG_INFO(kModule,
+                     "hardware decode skipped: {} chroma unsupported by "
+                     "D3D11VA (4:2:0 only), using software decode with "
+                     "auto threads",
+                     fmtName ? fmtName : "unknown");
+        tryHardware = false;
+    }
     if (tryHardware) {
         constexpr UINT kMaxProfiles = 64;
         GUID profiles[kMaxProfiles];
@@ -397,11 +416,9 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                     std::string(codec->name) + " (" + std::string(path) +
                     ") - transcode to H.264/HEVC or update the GPU driver");
         }
-        m_sws = sws_getContext(m_width, m_height,
-                               static_cast<AVPixelFormat>(m_stream->codecpar->format),
-                               m_width, m_height, AV_PIX_FMT_BGRA,
-                               SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!m_sws) {
+        if (!EnsureSws(m_width, m_height,
+                       static_cast<AVPixelFormat>(m_stream->codecpar->format),
+                       /*sixteenBit=*/false)) {
             Close();
             return shared::Result<void>(shared::ErrorCode::OutOfMemory,
                                         "cannot create swscale context");
@@ -506,7 +523,7 @@ void FfmpegVideoDecoder::Close() {
     m_fenceValue = 0;
     m_frameIndex = 0;
     m_colorInfo = VideoColorInfo{};
-    m_sws16bit = false;
+    m_swsKey = SwsCacheKey{};
 
     m_fence11.Reset();
     m_context4.Reset();
@@ -637,12 +654,9 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
 
     // Software fallback needs a swscale context sized for the new stream.
     if (!hwOk) {
-        sws_freeContext(m_sws);
-        m_sws = sws_getContext(newStream->codecpar->width, newStream->codecpar->height,
-                               static_cast<AVPixelFormat>(newStream->codecpar->format),
-                               newStream->codecpar->width, newStream->codecpar->height,
-                               AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!m_sws) {
+        if (!EnsureSws(newStream->codecpar->width, newStream->codecpar->height,
+                       static_cast<AVPixelFormat>(newStream->codecpar->format),
+                       /*sixteenBit=*/false)) {
             avcodec_free_context(&m_decCtx);
             m_decCtx = nullptr;
             REX_LOG_ERROR(kModule, "stream switch failed: cannot create swscale context");
@@ -1315,6 +1329,32 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
     return true;
 }
 
+bool FfmpegVideoDecoder::EnsureSws(int w, int h, AVPixelFormat srcFormat,
+                                   bool sixteenBit) {
+    const VideoColorInfo info = ResolveColorInfo();
+    const SwsColorParams p = SwsColorParamsFor(info.yuvMatrix, info.fullRange);
+    const SwsCacheKey want{srcFormat, sixteenBit, p.srcCsp, p.srcRange};
+    if (m_sws != nullptr && SwsCacheHit(m_swsKey, want)) {
+        return true;
+    }
+    if (m_sws) {
+        sws_freeContext(m_sws);
+        m_sws = nullptr;
+    }
+    m_sws = sws_getContext(w, h, srcFormat, w, h,
+                           sixteenBit ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_BGRA,
+                           SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!m_sws) {
+        m_swsKey = SwsCacheKey{};
+        return false;
+    }
+    sws_setColorspaceDetails(m_sws, sws_getCoefficients(p.srcCsp), p.srcRange,
+                             sws_getCoefficients(p.dstCsp), p.dstRange, 0,
+                             1 << 16, 1 << 16);
+    m_swsKey = want;
+    return true;
+}
+
 bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
     // Software fallback: swscale to BGRA (SDR) / RGBA64 (HDR), staging
     // upload, CopyResource into the pool slot (CPU round-trip).
@@ -1323,7 +1363,8 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
     if (!m_loggedSwFallback) {
         m_loggedSwFallback = true;
         REX_LOG_WARN(kModule, "software frame conversion (CPU upload) "
-                     "active decodePath=SW_RGBA16");
+                     "active decodePath={}",
+                     m_hdrContent ? "SW_RGBA16" : "SW_BGRA8");
     }
     if (!m_swFrame || !m_stream) return false;
 
@@ -1345,44 +1386,16 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
 
     const auto frameFormat = static_cast<AVPixelFormat>(srcFrame->format);
     const AVPixelFormat swFormat = m_hdrContent ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_BGRA;
-    if (!m_sws ||
-        frameFormat != static_cast<AVPixelFormat>(m_stream->codecpar->format) ||
-        m_sws16bit != m_hdrContent) {
-        if (m_sws) {
-            sws_freeContext(m_sws);
-        }
-        m_sws = sws_getContext(srcFrame->width, srcFrame->height, frameFormat,
-                               srcFrame->width, srcFrame->height, swFormat,
-                               SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!m_sws) {
-            REX_LOG_ERROR(kModule, "swscale context creation failed");
-            if (dlFrame) av_frame_free(&dlFrame);
-            return false;
-        }
-        m_sws16bit = m_hdrContent;
-        // Tell swscale the source YUV range/matrix so limited/full and
-        // 601/709/2020 sources convert correctly.
-        // For HDR (BT.2020 PQ): use BT.2020 as BOTH source and dest
-        // so swscale does YCbCr→RGB with BT.2020 matrix but NO gamut
-        // conversion. The shader handles BT.2020→BT.709 in linear space
-        // after PQ decode.
-        const int srcRange = m_colorInfo.fullRange ? 1 : 0;
-        const int srcCsp = (m_colorInfo.yuvMatrix == VideoColorInfo::Matrix::BT601)
-                               ? SWS_CS_SMPTE170M
-                               : (m_colorInfo.yuvMatrix == VideoColorInfo::Matrix::BT2020)
-                                     ? SWS_CS_BT2020
-                                     : SWS_CS_ITU709;
-        // Destination: full-range RGB in the SOURCE primaries, no gamut
-        // conversion. The pixel shader consumes SW-pool bytes as sRGB-
-        // encoded full-range RGB (SrgbToLinear, no range expansion), so
-        // emitting SWS_CS_DEFAULT (=ITU601) limited-range bytes washed SDR
-        // out and hue-shifted 709 sources (deadpool tint, 2026-10-16).
-        // HDR already did srcCsp/full-range; SDR now matches.
-        const int dstCsp = srcCsp;
-        const int dstRange = 1;  // full range RGB output
-        sws_setColorspaceDetails(m_sws, sws_getCoefficients(srcCsp), srcRange,
-                                 sws_getCoefficients(dstCsp), dstRange,
-                                 0, 1 << 16, 1 << 16);
+    // EnsureSws always applies the resolved matrix/range; contexts left on
+    // swscale defaults convert BT.709 sources with the BT.601 matrix
+    // (deadpool tint, 2026-10-16). The Open()/SwitchStream presets used to
+    // bypass sws_setColorspaceDetails entirely because the old cache check
+    // compared only format and bit depth — m_swsKey now carries colorimetry.
+    if (!EnsureSws(srcFrame->width, srcFrame->height, frameFormat,
+                   m_hdrContent)) {
+        REX_LOG_ERROR(kModule, "swscale context creation failed");
+        if (dlFrame) av_frame_free(&dlFrame);
+        return false;
     }
 
     if (!EnsurePool(static_cast<UINT>(srcFrame->width),

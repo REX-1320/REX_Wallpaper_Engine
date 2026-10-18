@@ -22,8 +22,14 @@
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 
 using rex::wallpaper::CheckHwProfileSupport;
+using rex::wallpaper::D3d11vaCanDecodeChroma;
 using rex::wallpaper::DecodePathUnusable;
 using rex::wallpaper::HwProfileSupport;
+using rex::wallpaper::SwsCacheHit;
+using rex::wallpaper::SwsCacheKey;
+using rex::wallpaper::SwsColorParams;
+using rex::wallpaper::SwsColorParamsFor;
+using rex::wallpaper::VideoColorInfo;
 
 namespace {
 
@@ -126,4 +132,88 @@ TEST(DecodePathUnusable, SlowButWorkingNeverTrips) {
 TEST(DecodePathUnusable, CustomBudget) {
   EXPECT_TRUE(DecodePathUnusable(0, 8, 8));
   EXPECT_FALSE(DecodePathUnusable(0, 7, 8));
+}
+
+// ─── D3D11VA chroma gate (2026-10-17) ───────────────────────────────────
+//
+// The Oppenheimer Rext 4:4:4 clip opens with hwaccel attached, then FFmpeg
+// falls back to software decode INSIDE the stream while keeping the
+// hardware path's single-thread pin — measured 92-121 ms/frame (~8-11 fps)
+// vs 21 ms/frame with 8 threads. D3D11VA only ever produces 4:2:0
+// surfaces; skipping the doomed attempt up front keeps software decode on
+// auto threads.
+
+TEST(HwChromaGate, FourTwentyFormatsAttemptHardware) {
+  EXPECT_TRUE(D3d11vaCanDecodeChroma(AV_PIX_FMT_YUV420P));
+  EXPECT_TRUE(D3d11vaCanDecodeChroma(AV_PIX_FMT_YUV420P10LE));
+  EXPECT_TRUE(D3d11vaCanDecodeChroma(AV_PIX_FMT_YUV420P12LE));
+  EXPECT_TRUE(D3d11vaCanDecodeChroma(AV_PIX_FMT_NV12));
+  EXPECT_TRUE(D3d11vaCanDecodeChroma(AV_PIX_FMT_P010LE));
+}
+
+TEST(HwChromaGate, NonFourTwentyRefused) {
+  EXPECT_FALSE(D3d11vaCanDecodeChroma(AV_PIX_FMT_YUV444P10LE));  // Rext clip
+  EXPECT_FALSE(D3d11vaCanDecodeChroma(AV_PIX_FMT_YUV444P));
+  EXPECT_FALSE(D3d11vaCanDecodeChroma(AV_PIX_FMT_YUV422P));
+  EXPECT_FALSE(D3d11vaCanDecodeChroma(AV_PIX_FMT_GRAY8));
+}
+
+TEST(HwChromaGate, UnknownFormatKeepsStatusQuo) {
+  // AV_PIX_FMT_NONE means "not resolved yet": attempt hardware, never
+  // refuse on uncertainty (same rule as HwProfileSupport::UnknownCodec).
+  EXPECT_TRUE(D3d11vaCanDecodeChroma(AV_PIX_FMT_NONE));
+}
+
+// ─── swscale colorimetry policy (2026-10-17) ────────────────────────────
+//
+// Every SwsContext creation must apply the source matrix/range; contexts
+// left on swscale defaults convert BT.709 sources with the BT.601 matrix
+// (deadpool tint, 2026-10-16). The cache key carries matrix and range so a
+// context created before colorimetry was known can never be reused once it
+// is known.
+
+TEST(SwsColorPolicy, KnownMatricesMapToSwsCoefficients) {
+  const auto p709 = SwsColorParamsFor(VideoColorInfo::Matrix::BT709, false);
+  EXPECT_EQ(p709.srcCsp, SWS_CS_ITU709);
+  EXPECT_EQ(p709.srcRange, 0);
+  EXPECT_EQ(p709.dstCsp, SWS_CS_ITU709);
+  EXPECT_EQ(p709.dstRange, 1);
+
+  const auto p601 = SwsColorParamsFor(VideoColorInfo::Matrix::BT601, false);
+  EXPECT_EQ(p601.srcCsp, SWS_CS_SMPTE170M);
+  EXPECT_EQ(p601.dstCsp, SWS_CS_SMPTE170M);
+
+  const auto p2020 = SwsColorParamsFor(VideoColorInfo::Matrix::BT2020, true);
+  EXPECT_EQ(p2020.srcCsp, SWS_CS_BT2020);
+  EXPECT_EQ(p2020.srcRange, 1);  // full-range source flips src range only
+  EXPECT_EQ(p2020.dstRange, 1);  // destination is always full-range RGB
+}
+
+TEST(SwsColorPolicy, FullRangeSourceFlipsSrcRangeOnly) {
+  const auto p = SwsColorParamsFor(VideoColorInfo::Matrix::BT709, true);
+  EXPECT_EQ(p.srcRange, 1);
+  EXPECT_EQ(p.dstCsp, SWS_CS_ITU709);
+  EXPECT_EQ(p.dstRange, 1);
+}
+
+TEST(SwsColorPolicy, CacheHitRequiresIdenticalColorimetry) {
+  const SwsCacheKey want{AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 0};
+  EXPECT_TRUE(SwsCacheHit(want, want));
+
+  // A context created with different (or default 601) colorimetry must
+  // never be reused for a 709 source.
+  EXPECT_FALSE(
+      SwsCacheHit({AV_PIX_FMT_YUV444P10LE, false, SWS_CS_SMPTE170M, 0}, want));
+  EXPECT_FALSE(
+      SwsCacheHit({AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 1}, want));
+  EXPECT_FALSE(
+      SwsCacheHit({AV_PIX_FMT_YUV444P10LE, true, SWS_CS_ITU709, 0}, want));
+  EXPECT_FALSE(
+      SwsCacheHit({AV_PIX_FMT_YUV420P10LE, false, SWS_CS_ITU709, 0}, want));
+}
+
+TEST(SwsColorPolicy, DefaultKeyNeverHits) {
+  // Default-constructed key == the state before any context was created.
+  const SwsCacheKey want{AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 0};
+  EXPECT_FALSE(SwsCacheHit(SwsCacheKey{}, want));
 }

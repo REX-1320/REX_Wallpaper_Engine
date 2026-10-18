@@ -19,6 +19,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 }
 
 struct SwsContext;  // libswscale (software conversion)
@@ -259,6 +261,69 @@ inline HwProfileSupport CheckHwProfileSupport(AVCodecID codec,
     return HwProfileSupport::Unsupported;
 }
 
+// ─── D3D11VA chroma gate (pure, unit-testable) ──────────────────────────
+//
+// D3D11VA only ever produces 4:2:0 surfaces (NV12/P010). A stream with any
+// other chroma layout — most notably HEVC Rext 4:4:4 — still opens fine
+// with hwaccel attached, then fails get_format at the first frames and
+// FFmpeg silently falls back to SOFTWARE decode while keeping the hardware
+// path's single-thread pin (Open() pins thread_count=1 for hwaccel).
+// Measured 2026-10-17 on a 3840x1752 HEVC Rext clip: SW decode ran at
+// 92-121 ms/frame (~8-11 fps) pinned to one thread vs 21 ms/frame with 8
+// threads. Skipping the doomed attempt up front keeps the software path on
+// auto threads.
+//
+// Unknown formats (AV_PIX_FMT_NONE, missing descriptor) keep the status
+// quo and attempt hardware: the failure direction is "try", never
+// "refuse" (same rule as HwProfileSupport::UnknownCodec).
+inline bool D3d11vaCanDecodeChroma(AVPixelFormat fmt) {
+    if (fmt == AV_PIX_FMT_NONE) return true;
+    const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(fmt);
+    if (!d) return true;
+    return d->log2_chroma_w == 1 && d->log2_chroma_h == 1;
+}
+
+// ─── swscale colorimetry policy (pure, unit-testable) ───────────────────
+//
+// Every SwsContext creation must apply the source matrix and range;
+// contexts left on swscale defaults convert BT.709 sources with the
+// BT.601 matrix (deadpool tint, measured 2026-10-16). The cache key
+// carries format, bit depth, matrix and range so a context created before
+// colorimetry was known can never be reused once it is known.
+
+struct SwsColorParams {
+    int srcCsp;
+    int srcRange;
+    int dstCsp;
+    int dstRange;
+};
+
+inline SwsColorParams SwsColorParamsFor(VideoColorInfo::Matrix matrix,
+                                        bool srcFullRange) {
+    const int csp = (matrix == VideoColorInfo::Matrix::BT601)
+                        ? SWS_CS_SMPTE170M
+                        : (matrix == VideoColorInfo::Matrix::BT2020)
+                              ? SWS_CS_BT2020
+                              : SWS_CS_ITU709;
+    // Destination: full-range RGB in the SOURCE primaries, no gamut
+    // conversion. The pixel shader consumes SW-pool bytes as sRGB-encoded
+    // full-range RGB (SrgbToLinear, no range expansion).
+    return {csp, srcFullRange ? 1 : 0, csp, 1};
+}
+
+struct SwsCacheKey {
+    AVPixelFormat srcFormat = AV_PIX_FMT_NONE;
+    bool sixteenBit = false;
+    int csp = 0;
+    int srcRange = 0;
+};
+
+inline bool SwsCacheHit(const SwsCacheKey& have, const SwsCacheKey& want) {
+    return have.srcFormat == want.srcFormat &&
+           have.sixteenBit == want.sixteenBit && have.csp == want.csp &&
+           have.srcRange == want.srcRange;
+}
+
 // ─── Source frame-rate resolution (pure, unit-testable) ────────────────
 //
 // The container-declared rate (r_frame_rate) can disagree with the actual
@@ -405,6 +470,11 @@ private:
     bool SeekInternal(double seconds);
     VideoColorInfo ResolveColorInfo() const;
     bool EnsurePool(UINT width, UINT height, DXGI_FORMAT format);
+    /// Create/reuse the software-conversion context. ALWAYS applies the
+    /// resolved source matrix/range via sws_setColorspaceDetails; the cache
+    /// key includes colorimetry, so a context created before colorimetry
+    /// was known (Open/SwitchStream preset) is never reused verbatim.
+    bool EnsureSws(int w, int h, AVPixelFormat srcFormat, bool sixteenBit);
     bool ConvertAndSignal(VideoFrame& outFrame);
     bool ConvertSoftware(VideoFrame& outFrame);
 
@@ -523,7 +593,10 @@ private:
 
     // ─── Colorimetry (last resolved from a decoded frame) ───────────────
     VideoColorInfo m_colorInfo;
-    bool m_sws16bit = false;  // swscale target is RGBA64 (HDR software path)
+    // What the current m_sws context was created for: format, bit depth,
+    // matrix, range. A context whose key differs from the wanted one is
+    // recreated with sws_setColorspaceDetails applied.
+    SwsCacheKey m_swsKey;
 
     // ─── Telemetry ──────────────────────────────────────────────────────
     mutable std::atomic<uint64_t> m_framesDecoded{0};
