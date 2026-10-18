@@ -316,12 +316,79 @@ struct SwsCacheKey {
     bool sixteenBit = false;
     int csp = 0;
     int srcRange = 0;
+    int width = 0;
+    int height = 0;
 };
 
 inline bool SwsCacheHit(const SwsCacheKey& have, const SwsCacheKey& want) {
     return have.srcFormat == want.srcFormat &&
            have.sixteenBit == want.sixteenBit && have.csp == want.csp &&
-           have.srcRange == want.srcRange;
+           have.srcRange == want.srcRange && have.width == want.width &&
+           have.height == want.height;
+}
+
+// ─── Parallel conversion strips (FIX B, pure, unit-testable) ────────────
+//
+// swscale has no SIMD fast path for 4:4:4 10-bit → BGRA (~37-47 ms/frame
+// at 4K; the 24 fps budget is 41.7 ms). Conversion is split into one
+// horizontal strip per lane, each lane running its own identically
+// configured SwsContext over its strip as if it were a whole frame
+// (srcSliceY = 0, pre-offset pointers) — swscale rejects mid-frame slice
+// starts on fresh contexts ("Slices start in the middle!"), while a strip
+// beginning at row 0 is always a legal frame start. Bit-exactness against
+// full-frame conversion is required and pinned by the parity tests; it
+// holds for sources without vertical chroma subsampling, which is exactly
+// the expensive no-SIMD case (see SwsParallelStripsAllowed).
+
+struct SwsSlice {
+    int y;     // first luma row (inclusive)
+    int rows;  // number of luma rows
+};
+
+/// Split `height` luma rows into at most `lanes` strips for parallel
+/// conversion. The final strip absorbs the remainder; every strip has
+/// >= 1 row.
+inline std::vector<SwsSlice> PlanSwsSlices(int height, int lanes) {
+    std::vector<SwsSlice> out;
+    if (height <= 0) return out;
+    if (lanes < 1) lanes = 1;
+    if (lanes > height) lanes = height;
+    const int base = height / lanes;
+    int y = 0;
+    for (int i = 0; i + 1 < lanes; ++i) {
+        out.push_back(SwsSlice{y, base});
+        y += base;
+    }
+    out.push_back(SwsSlice{y, height - y});
+    return out;
+}
+
+/// Parallel strips are bit-exact only for sources without VERTICAL chroma
+/// subsampling. Measured 2026-10-18 (FFmpeg 8): on 4:2:0 10-bit the two
+/// luma rows straddling every strip boundary deviate from the full-frame
+/// result, so 4:2:0/4:2:2-style sources keep swscale's fast single-context
+/// converters. 4:4:4 10-bit — the format with no SIMD fast path — and
+/// 4:2:2 (horizontal-only subsampling) are covered by parity tests.
+inline bool SwsParallelStripsAllowed(AVPixelFormat fmt) {
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(fmt);
+    return desc != nullptr && desc->log2_chroma_h == 0;
+}
+
+/// Source-plane pointers for one luma-row slice: planes 1/2 (chroma for
+/// planar YUV; semi-planar follows the same rule) advance by
+/// (sliceY >> log2_chroma_h) rows, plane 0 by sliceY rows.
+inline void SliceSourcePointers(uint8_t* const data[4],
+                                const int linesize[4], int sliceY,
+                                const AVPixFmtDescriptor* desc,
+                                uint8_t* out[4]) {
+    for (int p = 0; p < 4; ++p) {
+        out[p] = nullptr;
+        if (!data[p]) continue;
+        const int vsub =
+            (p == 1 || p == 2) ? (desc ? desc->log2_chroma_h : 0) : 0;
+        out[p] = data[p] + static_cast<size_t>(sliceY >> vsub) *
+                               static_cast<size_t>(linesize[p]);
+    }
 }
 
 // ─── Source frame-rate resolution (pure, unit-testable) ────────────────
@@ -475,6 +542,15 @@ private:
     /// key includes colorimetry, so a context created before colorimetry
     /// was known (Open/SwitchStream preset) is never reused verbatim.
     bool EnsureSws(int w, int h, AVPixelFormat srcFormat, bool sixteenBit);
+    /// Lane contexts for parallel slice conversion (FIX B): `lanes`
+    /// contexts, all with the same format/colorimetry/size. Same key
+    /// discipline as EnsureSws — anything stale is recreated, and any
+    /// creation failure frees all lanes and reports false.
+    bool EnsureSwsLanes(int lanes, int w, int h, AVPixelFormat srcFormat,
+                        bool sixteenBit);
+    /// Convert via PlanSwsSlices lanes; false = caller falls back to the
+    /// single-context sws_scale (correct, slower).
+    bool TryConvertParallel(AVFrame* srcFrame, AVPixelFormat frameFormat);
     bool ConvertAndSignal(VideoFrame& outFrame);
     bool ConvertSoftware(VideoFrame& outFrame);
 
@@ -486,6 +562,9 @@ private:
     AVFrame*         m_swFrame     = nullptr;
     AVPacket*        m_pkt         = nullptr;
     SwsContext*      m_sws         = nullptr;
+    // Lane contexts for parallel slice conversion (FIX B). Same cache-key
+    // discipline as m_sws: format + bit depth + colorimetry + size.
+    std::vector<SwsContext*> m_swsLanes;
     int  m_videoStreamIndex        = -1;
     AVStream* m_stream             = nullptr;
     bool m_pktPending              = false;
@@ -594,9 +673,11 @@ private:
     // ─── Colorimetry (last resolved from a decoded frame) ───────────────
     VideoColorInfo m_colorInfo;
     // What the current m_sws context was created for: format, bit depth,
-    // matrix, range. A context whose key differs from the wanted one is
-    // recreated with sws_setColorspaceDetails applied.
+    // matrix, range, size. A context whose key differs from the wanted one
+    // is recreated with sws_setColorspaceDetails applied. m_swsLaneKey is
+    // the same for the parallel lane contexts (m_swsLanes).
     SwsCacheKey m_swsKey;
+    SwsCacheKey m_swsLaneKey;
 
     // ─── Telemetry ──────────────────────────────────────────────────────
     mutable std::atomic<uint64_t> m_framesDecoded{0};

@@ -20,6 +20,7 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <thread>
 #include <vector>
 
 namespace rex::wallpaper {
@@ -494,6 +495,11 @@ void FfmpegVideoDecoder::Close() {
         sws_freeContext(m_sws);
         m_sws = nullptr;
     }
+    for (SwsContext* lane : m_swsLanes) {
+        sws_freeContext(lane);
+    }
+    m_swsLanes.clear();
+    m_swsLaneKey = SwsCacheKey{};
 
     m_videoStreamIndex = -1;
     m_stream = nullptr;
@@ -1333,7 +1339,7 @@ bool FfmpegVideoDecoder::EnsureSws(int w, int h, AVPixelFormat srcFormat,
                                    bool sixteenBit) {
     const VideoColorInfo info = ResolveColorInfo();
     const SwsColorParams p = SwsColorParamsFor(info.yuvMatrix, info.fullRange);
-    const SwsCacheKey want{srcFormat, sixteenBit, p.srcCsp, p.srcRange};
+    const SwsCacheKey want{srcFormat, sixteenBit, p.srcCsp, p.srcRange, w, h};
     if (m_sws != nullptr && SwsCacheHit(m_swsKey, want)) {
         return true;
     }
@@ -1353,6 +1359,101 @@ bool FfmpegVideoDecoder::EnsureSws(int w, int h, AVPixelFormat srcFormat,
                              1 << 16, 1 << 16);
     m_swsKey = want;
     return true;
+}
+
+bool FfmpegVideoDecoder::EnsureSwsLanes(int lanes, int w, int h,
+                                        AVPixelFormat srcFormat,
+                                        bool sixteenBit) {
+    if (lanes <= 1) return false;
+    const VideoColorInfo info = ResolveColorInfo();
+    const SwsColorParams p = SwsColorParamsFor(info.yuvMatrix, info.fullRange);
+    const SwsCacheKey want{srcFormat, sixteenBit, p.srcCsp, p.srcRange, w, h};
+    if (static_cast<int>(m_swsLanes.size()) == lanes &&
+        SwsCacheHit(m_swsLaneKey, want)) {
+        return true;
+    }
+    for (SwsContext* lane : m_swsLanes) {
+        sws_freeContext(lane);
+    }
+    m_swsLanes.clear();
+    m_swsLaneKey = SwsCacheKey{};
+    const AVPixelFormat dstFormat =
+        sixteenBit ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_BGRA;
+    m_swsLanes.reserve(static_cast<size_t>(lanes));
+    for (int i = 0; i < lanes; ++i) {
+        SwsContext* lane = sws_getContext(w, h, srcFormat, w, h, dstFormat,
+                                          SWS_BILINEAR, nullptr, nullptr,
+                                          nullptr);
+        if (!lane) break;
+        sws_setColorspaceDetails(lane, sws_getCoefficients(p.srcCsp),
+                                 p.srcRange, sws_getCoefficients(p.dstCsp),
+                                 p.dstRange, 0, 1 << 16, 1 << 16);
+        m_swsLanes.push_back(lane);
+    }
+    if (static_cast<int>(m_swsLanes.size()) != lanes) {
+        for (SwsContext* lane : m_swsLanes) {
+            sws_freeContext(lane);
+        }
+        m_swsLanes.clear();
+        return false;
+    }
+    m_swsLaneKey = want;
+    return true;
+}
+
+bool FfmpegVideoDecoder::TryConvertParallel(AVFrame* srcFrame,
+                                            AVPixelFormat frameFormat) {
+    const int cap = std::min<int>(
+        8,
+        std::max<int>(1, static_cast<int>(std::thread::hardware_concurrency())));
+    if (cap <= 1 || srcFrame->height < cap * 48) {
+        return false;  // small frame: thread spawn cost would dominate
+    }
+    // Bit-exactness of strips is only proven for sources without vertical
+    // chroma subsampling (see SwsParallelStripsAllowed); everything else
+    // stays on the single context, where swscale's SIMD converters shine.
+    if (!SwsParallelStripsAllowed(frameFormat)) {
+        return false;
+    }
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(frameFormat);
+    const auto slices = PlanSwsSlices(srcFrame->height, cap);
+    if (slices.size() < 2) return false;
+    if (!EnsureSwsLanes(static_cast<int>(slices.size()), srcFrame->width,
+                        srcFrame->height, frameFormat, m_hdrContent)) {
+        return false;
+    }
+    const int dstPitch = m_swFrame->linesize[0];
+    const int dstStride[4] = {dstPitch, 0, 0, 0};
+    std::atomic<bool> allOk{true};
+    {
+        std::vector<std::thread> workers;
+        workers.reserve(slices.size());
+        for (size_t i = 0; i < slices.size(); ++i) {
+            workers.emplace_back([&, i]() {
+                const SwsSlice& sl = slices[i];
+                // Strip-as-frame: the pointers are pre-offset to the strip
+                // but srcSliceY stays 0, so each call is a legal frame
+                // start for its lane context; identity sizing means no
+                // filter state crosses strip boundaries.
+                uint8_t* src[4] = {};
+                SliceSourcePointers(srcFrame->data, srcFrame->linesize, sl.y,
+                                    desc, src);
+                uint8_t* dst[4] = {
+                    m_swFrame->data[0] + static_cast<size_t>(sl.y) * dstPitch,
+                    nullptr, nullptr, nullptr};
+                const int ret = sws_scale(m_swsLanes[i], src,
+                                          srcFrame->linesize, 0, sl.rows,
+                                          dst, dstStride);
+                if (ret < 0) {
+                    allOk.store(false, std::memory_order_relaxed);
+                }
+            });
+        }
+        for (std::thread& t : workers) {
+            t.join();
+        }
+    }
+    return allOk.load();
 }
 
 bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
@@ -1415,8 +1516,13 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
         if (dlFrame) av_frame_free(&dlFrame);
         return false;
     }
-    sws_scale(m_sws, srcFrame->data, srcFrame->linesize, 0, srcFrame->height,
-              m_swFrame->data, m_swFrame->linesize);
+    // Parallel slice conversion when it can help (FIX B, 4:4:4 10-bit has
+    // no SIMD path); the single context above stays the always-correct
+    // fallback.
+    if (!TryConvertParallel(srcFrame, frameFormat)) {
+        sws_scale(m_sws, srcFrame->data, srcFrame->linesize, 0,
+                  srcFrame->height, m_swFrame->data, m_swFrame->linesize);
+    }
 
     // Free the download frame now that swscale is done.
     if (dlFrame) av_frame_free(&dlFrame);

@@ -16,6 +16,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 #include <d3d11_4.h>
 
@@ -25,10 +27,13 @@ using rex::wallpaper::CheckHwProfileSupport;
 using rex::wallpaper::D3d11vaCanDecodeChroma;
 using rex::wallpaper::DecodePathUnusable;
 using rex::wallpaper::HwProfileSupport;
+using rex::wallpaper::PlanSwsSlices;
+using rex::wallpaper::SliceSourcePointers;
 using rex::wallpaper::SwsCacheHit;
 using rex::wallpaper::SwsCacheKey;
 using rex::wallpaper::SwsColorParams;
 using rex::wallpaper::SwsColorParamsFor;
+using rex::wallpaper::SwsParallelStripsAllowed;
 using rex::wallpaper::VideoColorInfo;
 
 namespace {
@@ -196,24 +201,227 @@ TEST(SwsColorPolicy, FullRangeSourceFlipsSrcRangeOnly) {
   EXPECT_EQ(p.dstRange, 1);
 }
 
-TEST(SwsColorPolicy, CacheHitRequiresIdenticalColorimetry) {
-  const SwsCacheKey want{AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 0};
+TEST(SwsColorPolicy, CacheHitRequiresIdenticalColorimetryAndSize) {
+  const SwsCacheKey want{AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 0, 3840,
+                         1752};
   EXPECT_TRUE(SwsCacheHit(want, want));
 
   // A context created with different (or default 601) colorimetry must
   // never be reused for a 709 source.
-  EXPECT_FALSE(
-      SwsCacheHit({AV_PIX_FMT_YUV444P10LE, false, SWS_CS_SMPTE170M, 0}, want));
-  EXPECT_FALSE(
-      SwsCacheHit({AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 1}, want));
-  EXPECT_FALSE(
-      SwsCacheHit({AV_PIX_FMT_YUV444P10LE, true, SWS_CS_ITU709, 0}, want));
-  EXPECT_FALSE(
-      SwsCacheHit({AV_PIX_FMT_YUV420P10LE, false, SWS_CS_ITU709, 0}, want));
+  EXPECT_FALSE(SwsCacheHit(
+      {AV_PIX_FMT_YUV444P10LE, false, SWS_CS_SMPTE170M, 0, 3840, 1752}, want));
+  EXPECT_FALSE(SwsCacheHit(
+      {AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 1, 3840, 1752}, want));
+  EXPECT_FALSE(SwsCacheHit(
+      {AV_PIX_FMT_YUV444P10LE, true, SWS_CS_ITU709, 0, 3840, 1752}, want));
+  EXPECT_FALSE(SwsCacheHit(
+      {AV_PIX_FMT_YUV420P10LE, false, SWS_CS_ITU709, 0, 3840, 1752}, want));
+
+  // Same format + colorimetry but a different resolution (stream switch)
+  // must recreate too — swscale contexts hold fixed dimensions.
+  EXPECT_FALSE(SwsCacheHit(
+      {AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 0, 1920, 1080}, want));
 }
 
 TEST(SwsColorPolicy, DefaultKeyNeverHits) {
   // Default-constructed key == the state before any context was created.
-  const SwsCacheKey want{AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 0};
+  const SwsCacheKey want{AV_PIX_FMT_YUV444P10LE, false, SWS_CS_ITU709, 0, 3840,
+                         1752};
   EXPECT_FALSE(SwsCacheHit(SwsCacheKey{}, want));
+}
+
+// ─── Parallel conversion strips (FIX B, 2026-10-18) ─────────────────────
+//
+// 4:4:4 10-bit → BGRA has no SIMD fast path in swscale (~37-47 ms/frame at
+// 4K; the 24 fps budget is 41.7 ms). Conversion is split into horizontal
+// strips, one SwsContext per strip, each converting its strip as if it
+// were a whole frame. The split is only valid if strip conversion is
+// bit-identical to full-frame conversion — asserted here on real swscale
+// for 4:4:4 and 4:2:2 10-bit (the eligible formats; 4:2:0 measured NOT
+// bit-exact at strip boundaries, hence SwsParallelStripsAllowed).
+
+namespace {
+
+// Deterministic 10-bit pattern plane (no RNG): gradient + modest texture.
+std::vector<uint16_t> MakePatternPlane10(int w, int h, uint16_t base) {
+  std::vector<uint16_t> plane(static_cast<size_t>(w) * h);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      plane[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>(
+          (base + static_cast<unsigned>(x) * 7 +
+           static_cast<unsigned>(y) * 13 +
+           (static_cast<unsigned>(x) * static_cast<unsigned>(y) & 63u)) &
+          1023u);
+    }
+  }
+  return plane;
+}
+
+SwsContext* MakeLaneContext(int w, int h, AVPixelFormat srcFmt) {
+  SwsContext* c = sws_getContext(w, h, srcFmt, w, h, AV_PIX_FMT_BGRA,
+                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
+  if (c) {
+    sws_setColorspaceDetails(c, sws_getCoefficients(SWS_CS_ITU709), 0,
+                             sws_getCoefficients(SWS_CS_ITU709), 1, 0, 1 << 16,
+                             1 << 16);
+  }
+  return c;
+}
+
+}  // namespace
+
+TEST(SwsSlicePlan, SplitsRemainderOverLastStrip) {
+  const auto s = PlanSwsSlices(10, 3);  // 3 + 3 + 4
+  ASSERT_EQ(s.size(), 3u);
+  EXPECT_EQ(s[0].y, 0);
+  EXPECT_EQ(s[0].rows, 3);
+  EXPECT_EQ(s[1].y, 3);
+  EXPECT_EQ(s[1].rows, 3);
+  EXPECT_EQ(s[2].y, 6);
+  EXPECT_EQ(s[2].rows, 4);
+}
+
+TEST(SwsParallelPolicy, VerticalChromaSubsamplingRefused) {
+  // 4:2:0 10-bit strips are NOT bit-exact (measured 2026-10-18: the two
+  // luma rows straddling every strip boundary deviate from full-frame);
+  // those sources stay on swscale's fast single-context converters.
+  EXPECT_FALSE(SwsParallelStripsAllowed(AV_PIX_FMT_YUV420P));
+  EXPECT_FALSE(SwsParallelStripsAllowed(AV_PIX_FMT_YUV420P10LE));
+  EXPECT_FALSE(SwsParallelStripsAllowed(AV_PIX_FMT_NV12));
+  EXPECT_FALSE(SwsParallelStripsAllowed(AV_PIX_FMT_P010LE));
+  EXPECT_FALSE(SwsParallelStripsAllowed(AV_PIX_FMT_NONE));
+
+  // No vertical subsampling → strips bit-exact (see the parity tests).
+  EXPECT_TRUE(SwsParallelStripsAllowed(AV_PIX_FMT_YUV444P10LE));
+  EXPECT_TRUE(SwsParallelStripsAllowed(AV_PIX_FMT_YUV444P));
+  EXPECT_TRUE(SwsParallelStripsAllowed(AV_PIX_FMT_YUV422P10LE));
+  EXPECT_TRUE(SwsParallelStripsAllowed(AV_PIX_FMT_YUV422P));
+  EXPECT_TRUE(SwsParallelStripsAllowed(AV_PIX_FMT_GBRP));
+  EXPECT_TRUE(SwsParallelStripsAllowed(AV_PIX_FMT_BGRA));
+}
+
+TEST(SwsSlicePlan, CoversEveryRowExactlyOnce) {
+  for (const int h : {1, 5, 64, 1080, 1752}) {
+    for (const int lanes : {1, 2, 3, 8}) {
+      const auto s = PlanSwsSlices(h, lanes);
+      ASSERT_FALSE(s.empty());
+      EXPECT_LE(static_cast<int>(s.size()), lanes);
+      int next = 0;
+      for (const auto& sl : s) {
+        EXPECT_EQ(sl.y, next);
+        EXPECT_GE(sl.rows, 1);
+        next += sl.rows;
+      }
+      EXPECT_EQ(next, h);
+    }
+  }
+}
+
+TEST(SwsSliceParity, Sliced444p10ToBgraIsBitExact) {
+  // 385 rows / 4 lanes → 96-row strips plus a 97-row tail.
+  constexpr int kWidth = 640;
+  constexpr int kHeight = 385;
+  auto y = MakePatternPlane10(kWidth, kHeight, 64);
+  auto u = MakePatternPlane10(kWidth, kHeight, 480);
+  auto v = MakePatternPlane10(kWidth, kHeight, 900);
+  uint8_t* src[4] = {reinterpret_cast<uint8_t*>(y.data()),
+                     reinterpret_cast<uint8_t*>(u.data()),
+                     reinterpret_cast<uint8_t*>(v.data()), nullptr};
+  const int srcStride[4] = {kWidth * 2, kWidth * 2, kWidth * 2, 0};
+  const int dstPitch = kWidth * 4;
+  const int dstStride[4] = {dstPitch, 0, 0, 0};
+
+  std::vector<uint8_t> full(static_cast<size_t>(dstPitch) * kHeight);
+  {
+    SwsContext* c = MakeLaneContext(kWidth, kHeight, AV_PIX_FMT_YUV444P10LE);
+    ASSERT_NE(c, nullptr);
+    uint8_t* d[4] = {full.data(), nullptr, nullptr, nullptr};
+    ASSERT_GT(sws_scale(c, src, srcStride, 0, kHeight, d, dstStride), 0);
+    sws_freeContext(c);
+  }
+
+  const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(AV_PIX_FMT_YUV444P10LE);
+  const auto slices = PlanSwsSlices(kHeight, 4);  // 96 x3 + 97
+  ASSERT_GE(slices.size(), 2u);
+  // Lane contexts are created once and reused across rounds exactly like
+  // the engine reuses them across frames; any per-round state carry-over
+  // in swscale would surface as a round-2 mismatch.
+  std::vector<SwsContext*> lanes;
+  for (size_t i = 0; i < slices.size(); ++i) {
+    SwsContext* c = MakeLaneContext(kWidth, kHeight, AV_PIX_FMT_YUV444P10LE);
+    ASSERT_NE(c, nullptr);
+    lanes.push_back(c);
+  }
+  for (int round = 0; round < 2; ++round) {
+    std::vector<uint8_t> sliced(full.size(), 0xAB);  // poisons missed rows
+    for (size_t i = 0; i < slices.size(); ++i) {
+      const auto& sl = slices[i];
+      uint8_t* sv[4] = {};
+      SliceSourcePointers(src, srcStride, sl.y, desc, sv);
+      uint8_t* dv[4] = {sliced.data() + static_cast<size_t>(sl.y) * dstPitch,
+                        nullptr, nullptr, nullptr};
+      // Strip-as-frame: pointers offset to the strip, srcSliceY stays 0.
+      ASSERT_GT(
+          sws_scale(lanes[i], sv, srcStride, 0, sl.rows, dv, dstStride), 0);
+    }
+    EXPECT_EQ(std::memcmp(full.data(), sliced.data(), full.size()), 0)
+        << "round " << round;
+  }
+  for (SwsContext* c : lanes) {
+    sws_freeContext(c);
+  }
+}
+
+TEST(SwsSliceParity, Sliced422p10ToBgraIsBitExact) {
+  // 385 rows / 4 lanes → 96-row strips plus a 97-row tail. No vertical
+  // chroma subsampling: chroma planes advance one row per luma row.
+  constexpr int kWidth = 640;
+  constexpr int kHeight = 385;
+  constexpr int kCw = kWidth / 2;
+  auto y = MakePatternPlane10(kWidth, kHeight, 64);
+  auto u = MakePatternPlane10(kCw, kHeight, 480);
+  auto v = MakePatternPlane10(kCw, kHeight, 900);
+  uint8_t* src[4] = {reinterpret_cast<uint8_t*>(y.data()),
+                     reinterpret_cast<uint8_t*>(u.data()),
+                     reinterpret_cast<uint8_t*>(v.data()), nullptr};
+  const int srcStride[4] = {kWidth * 2, kCw * 2, kCw * 2, 0};
+  const int dstPitch = kWidth * 4;
+  const int dstStride[4] = {dstPitch, 0, 0, 0};
+
+  std::vector<uint8_t> full(static_cast<size_t>(dstPitch) * kHeight);
+  {
+    SwsContext* c = MakeLaneContext(kWidth, kHeight, AV_PIX_FMT_YUV422P10LE);
+    ASSERT_NE(c, nullptr);
+    uint8_t* d[4] = {full.data(), nullptr, nullptr, nullptr};
+    ASSERT_GT(sws_scale(c, src, srcStride, 0, kHeight, d, dstStride), 0);
+    sws_freeContext(c);
+  }
+
+  const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(AV_PIX_FMT_YUV422P10LE);
+  const auto slices = PlanSwsSlices(kHeight, 4);  // 96 x3 + 97
+  ASSERT_GE(slices.size(), 2u);
+  std::vector<SwsContext*> lanes;
+  for (size_t i = 0; i < slices.size(); ++i) {
+    SwsContext* c = MakeLaneContext(kWidth, kHeight, AV_PIX_FMT_YUV422P10LE);
+    ASSERT_NE(c, nullptr);
+    lanes.push_back(c);
+  }
+  for (int round = 0; round < 2; ++round) {
+    std::vector<uint8_t> sliced(full.size(), 0xAB);
+    for (size_t i = 0; i < slices.size(); ++i) {
+      const auto& sl = slices[i];
+      uint8_t* sv[4] = {};
+      SliceSourcePointers(src, srcStride, sl.y, desc, sv);
+      uint8_t* dv[4] = {sliced.data() + static_cast<size_t>(sl.y) * dstPitch,
+                        nullptr, nullptr, nullptr};
+      // Strip-as-frame: pointers offset to the strip, srcSliceY stays 0.
+      ASSERT_GT(
+          sws_scale(lanes[i], sv, srcStride, 0, sl.rows, dv, dstStride), 0);
+    }
+    EXPECT_EQ(std::memcmp(full.data(), sliced.data(), full.size()), 0)
+        << "round " << round;
+  }
+  for (SwsContext* c : lanes) {
+    sws_freeContext(c);
+  }
 }

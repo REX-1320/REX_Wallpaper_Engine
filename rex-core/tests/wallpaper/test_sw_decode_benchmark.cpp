@@ -20,6 +20,8 @@
 
 #include <gtest/gtest.h>
 
+#include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -31,7 +33,11 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
+
+using rex::wallpaper::PlanSwsSlices;
+using rex::wallpaper::SliceSourcePointers;
 
 namespace {
 
@@ -191,4 +197,114 @@ TEST(SoftwareDecodeBenchmark, AutoThreadsAreActuallyConfigured) {
         avcodec_free_context(&c);
         GTEST_SKIP() << "could not open a reference H.264 context";
     }
+}
+
+// ─── Parallel strip conversion benchmark (FIX B, 2026-10-18) ────────────
+//
+// 4:4:4 10-bit → BGRA has no SIMD fast path in swscale (~37-47 ms/frame at
+// 4K single-context). The engine converts one strip per lane, each strip
+// handled by its own identically configured context (bit-exactness pinned
+// in test_decode_fallback.cpp). This reports the measured wall-clock
+// difference on synthetic 4K 4:4:4 10-bit planes. Set REX_BENCH_SWS=1 to
+// run; skipped by default like the other benchmarks.
+
+TEST(SwsStripBenchmark, SingleContextVsStripLanes444p10) {
+    if (!std::getenv("REX_BENCH_SWS")) {
+        GTEST_SKIP() << "set REX_BENCH_SWS=1 to run this benchmark";
+    }
+    constexpr int kWidth = 3840;
+    constexpr int kHeight = 1752;  // the Rext clip geometry
+    constexpr int kRounds = 3;
+    constexpr int kLanes = 8;
+
+    std::vector<uint16_t> y(static_cast<size_t>(kWidth) * kHeight);
+    std::vector<uint16_t> u(y.size());
+    std::vector<uint16_t> v(y.size());
+    for (size_t i = 0; i < y.size(); ++i) {
+        y[i] = static_cast<uint16_t>((i * 7 + 64) & 1023);
+        u[i] = static_cast<uint16_t>((i * 13 + 480) & 1023);
+        v[i] = static_cast<uint16_t>((i * 29 + 900) & 1023);
+    }
+    uint8_t* src[4] = {reinterpret_cast<uint8_t*>(y.data()),
+                       reinterpret_cast<uint8_t*>(u.data()),
+                       reinterpret_cast<uint8_t*>(v.data()), nullptr};
+    const int srcStride[4] = {kWidth * 2, kWidth * 2, kWidth * 2, 0};
+    const int dstPitch = kWidth * 4;
+    const int dstStride[4] = {dstPitch, 0, 0, 0};
+    std::vector<uint8_t> dst(static_cast<size_t>(dstPitch) * kHeight);
+
+    auto makeCtx = [] {
+        SwsContext* c = sws_getContext(kWidth, kHeight, AV_PIX_FMT_YUV444P10LE,
+                                       kWidth, kHeight, AV_PIX_FMT_BGRA,
+                                       SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (c) {
+            sws_setColorspaceDetails(c, sws_getCoefficients(SWS_CS_ITU709), 0,
+                                     sws_getCoefficients(SWS_CS_ITU709), 1, 0,
+                                     1 << 16, 1 << 16);
+        }
+        return c;
+    };
+
+    double singleMs = 0.0;
+    {
+        SwsContext* c = makeCtx();
+        ASSERT_NE(c, nullptr);
+        uint8_t* d[4] = {dst.data(), nullptr, nullptr, nullptr};
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < kRounds; ++r) {
+            sws_scale(c, src, srcStride, 0, kHeight, d, dstStride);
+        }
+        singleMs = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - t0)
+                       .count() /
+                   kRounds;
+        sws_freeContext(c);
+    }
+
+    const auto strips = PlanSwsSlices(kHeight, kLanes);
+    std::vector<SwsContext*> lanes;
+    for (size_t i = 0; i < strips.size(); ++i) {
+        SwsContext* c = makeCtx();
+        ASSERT_NE(c, nullptr);
+        lanes.push_back(c);
+    }
+    const AVPixFmtDescriptor* desc =
+        av_pix_fmt_desc_get(AV_PIX_FMT_YUV444P10LE);
+    double stripMs = 0.0;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < kRounds; ++r) {
+            std::vector<std::thread> workers;
+            workers.reserve(strips.size());
+            for (size_t i = 0; i < strips.size(); ++i) {
+                workers.emplace_back([&, i]() {
+                    const auto& sl = strips[i];
+                    uint8_t* sv[4] = {};
+                    SliceSourcePointers(src, srcStride, sl.y, desc, sv);
+                    uint8_t* dv[4] = {dst.data() + static_cast<size_t>(sl.y) *
+                                                     dstPitch,
+                                      nullptr, nullptr, nullptr};
+                    sws_scale(lanes[i], sv, srcStride, 0, sl.rows, dv,
+                              dstStride);
+                });
+            }
+            for (std::thread& t : workers) {
+                t.join();
+            }
+        }
+        stripMs = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count() /
+                  kRounds;
+    }
+    for (SwsContext* c : lanes) {
+        sws_freeContext(c);
+    }
+
+    std::printf(
+        "[SwsStripBenchmark] 4K 444p10 -> BGRA, %d lanes\n"
+        "  single context : %.2f ms/frame\n"
+        "  strip lanes    : %.2f ms/frame\n"
+        "  speedup        = %.2fx\n",
+        kLanes, singleMs, stripMs, stripMs > 0 ? singleMs / stripMs : 0.0);
 }
