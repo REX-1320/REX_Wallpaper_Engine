@@ -6,6 +6,7 @@
 
 #include <atomic>                             
 #include <chrono>                             
+#include <condition_variable>                 
 #include <mutex>                              
 #include <memory>                             
 #include <thread>
@@ -141,6 +142,11 @@ private:
     shared::UUID m_sessionId;
 
     mutable std::mutex m_mutex;
+    // Shutdown handshake (audit 2026-10-17, #7): the first Shutdown()
+    // caller owns the teardown; concurrent callers and the destructor
+    // wait on this before touching members. Notified at the end of
+    // Shutdown, under m_mutex, when the state flips to Uninitialized.
+    std::condition_variable m_shutdownCv;
     // Cross-thread playback-position clock (audit 2026-10-17, #3).
     // Replaces a shared::Stopwatch the render thread read unguarded; see
     // PositionClock.hpp for the publication rules. The base lives inside
@@ -267,6 +273,15 @@ private:
     // frame; a stale-false skips one re-present. The struct itself is
     // render-thread-only.
     std::atomic<bool> m_hasVideoFrame{false};
+    // Bumped under m_mutex whenever the video backend's frames become
+    // invalid (UnloadScene / Stop / LoadScene — the recovery reload goes
+    // through LoadScene, and the swap itself runs on the render thread, so
+    // no in-flight pass exists there). The render thread snapshots the
+    // epoch with the scene and re-checks it after BeginFrame before
+    // drawing, so a frame taken from Tick() is never drawn across a
+    // teardown that may already have released its pool handles
+    // (audit 2026-10-17, #6).
+    std::atomic<uint64_t> m_videoEpoch{0};
     std::atomic<uint64_t> m_uniqueVideoFrames{0};
     std::atomic<uint64_t> m_repeatedVideoFrames{0};
     // Cached display refresh for the cadence controller (Phase 3):

@@ -92,7 +92,19 @@ Engine::Engine() {
 }
 
 Engine::~Engine() {
-    if (m_state != EngineState::Uninitialized) {
+    // Audit 2026-10-17, #7: if another thread is mid-Shutdown, wait for it
+    // before touching members — the teardown mutates and destroys exactly
+    // what this destructor would otherwise race. A state re-check alone
+    // would not be enough: the state stays ShuttingDown for the whole
+    // teardown window (render-thread join, backend teardown).
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_shutdownCv.wait(lock, [this] {
+            return m_state.load(std::memory_order_acquire)
+                   != EngineState::ShuttingDown;
+        });
+    }
+    if (m_state.load(std::memory_order_acquire) != EngineState::Uninitialized) {
         Shutdown();
     }
 }
@@ -223,7 +235,7 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
 
 shared::Result<void> Engine::Shutdown() {
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::mutex> lock(m_mutex);
 
         if (m_state == EngineState::Uninitialized) {
             // Defensive: clean up anything that may have been allocated during
@@ -233,6 +245,23 @@ shared::Result<void> Engine::Shutdown() {
                 m_desktopHost.reset();
             }
             m_renderer.reset();
+            return shared::Result<void>();
+        }
+
+        if (m_state == EngineState::ShuttingDown) {
+            // Audit 2026-10-17, #7: a second Shutdown used to fall through
+            // and re-run the teardown — a double StopMonitor/Release and a
+            // second join of the same std::thread (UB). The first caller
+            // owns the teardown; this one waits for it to finish. Reporting
+            // success afterwards is truthful: the engine really is shut
+            // down. cv.wait releases the mutex, so the owner can always
+            // complete (it only re-takes the lock at the very end).
+            REX_LOG_INFO("Engine", "Shutdown: waiting for in-progress shutdown");
+            m_shutdownCv.wait(lock, [this] {
+                return m_state.load(std::memory_order_acquire)
+                       != EngineState::ShuttingDown;
+            });
+            REX_LOG_INFO("Engine", "Shutdown: in-progress shutdown finished");
             return shared::Result<void>();
         }
 
@@ -277,6 +306,12 @@ shared::Result<void> Engine::Shutdown() {
     m_clock.Reset();
 
     SetState(EngineState::Uninitialized);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        // Wake concurrent Shutdown callers / the destructor waiting for
+        // this teardown to finish (audit 2026-10-17, #7).
+        m_shutdownCv.notify_all();
+    }
     REX_LOG_INFO("Engine", "Shutdown complete");
     return shared::Result<void>();
 }
@@ -595,7 +630,13 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
     // Push the transform (rotation/flip) to the renderer and compositors.
     ApplyTransform();
 
-    // Drop any GPU frames from a previous video scene.
+    // Drop any GPU frames from a previous video scene. The flag clear plus
+    // the epoch bump (audit 2026-10-17, #6) disown the cadence re-present
+    // cache and any frame the render thread is still holding from the old
+    // scene — the previous video must not flash over the new content
+    // before its first frame arrives.
+    m_hasVideoFrame.store(false, std::memory_order_release);
+    m_videoEpoch.fetch_add(1, std::memory_order_acq_rel);
     if (m_renderer) {
         m_renderer->ClearVideoFrame();
     }
@@ -630,6 +671,10 @@ shared::Result<void> Engine::UnloadScene() {
     }
     // Phase 3: no scene, no cached re-present.
     m_hasVideoFrame.store(false, std::memory_order_release);
+    // Audit 2026-10-17, #6: the scene just changed; any frame the render
+    // thread is holding belongs to the old (closed) decoder and must not
+    // be drawn past this point.
+    m_videoEpoch.fetch_add(1, std::memory_order_acq_rel);
 
     if (m_audioCapture) {
         m_audioCapture->Stop();
@@ -666,6 +711,22 @@ shared::Result<void> Engine::UnloadScene() {
 
 shared::Result<void> Engine::Play() {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Audit 2026-10-17, #8 — Play transition table. Legal from:
+    //   Initialized (fresh scene load), Stopped (replay / Stop→Play),
+    //   Paused (resume), Running (idempotent restart of the clock).
+    // Rejected from:
+    //   Uninitialized (backend torn down — nothing to play on),
+    //   ShuttingDown (teardown owns the backends under the released lock),
+    //   Error (device-loss recovery owns the lifecycle; its own re-play
+    //   runs through Initialized→Stopped once the new backend is up, so
+    //   rejecting Play here never blocks recovery itself).
+    if (m_state == EngineState::Uninitialized
+        || m_state == EngineState::ShuttingDown
+        || m_state == EngineState::Error) {
+        return shared::Result<void>(shared::ErrorCode::InvalidState,
+                                    "Engine is not ready to play");
+    }
 
     if (m_currentScene.sourcePath.empty()) {
         return shared::Result<void>(shared::ErrorCode::InvalidState, "No scene loaded");
@@ -724,6 +785,17 @@ shared::Result<void> Engine::Pause() {
 shared::Result<void> Engine::Stop() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    // Audit 2026-10-17, #8 — Stop is a timeline reset, legal from any live
+    // state (Running/Paused/Stopped/Initialized; idempotent) but rejected
+    // from Uninitialized (no backend exists) and ShuttingDown (teardown
+    // owns the backends; a "successful" stop would stamp Stopped onto a
+    // dying object).
+    if (m_state == EngineState::Uninitialized
+        || m_state == EngineState::ShuttingDown) {
+        return shared::Result<void>(shared::ErrorCode::InvalidState,
+                                    "Engine is not running");
+    }
+
     REX_LOG_INFO("Engine", "Stop requested");
 
     if (m_videoManager) {
@@ -736,6 +808,9 @@ shared::Result<void> Engine::Stop() {
     // Phase 3: stopped video must not keep re-presenting its last frame
     // at cadence (a stale wallpaper behind the clear color).
     m_hasVideoFrame.store(false, std::memory_order_release);
+    // Audit 2026-10-17, #6: invalidate any frame the render thread is
+    // still holding from before this stop.
+    m_videoEpoch.fetch_add(1, std::memory_order_acq_rel);
     SetState(EngineState::Stopped);
     m_clock.Reset();
     // User-driven stop: a later auto-resume must not override it.
@@ -1886,7 +1961,16 @@ void Engine::RenderLoop() {
             // content actually changed. Without this, the loop re-rendered
             // identical frames at ~refresh rate — burning 36-55% GPU when
             // the decoder ran slower than the display.
-            const VideoFrame* pending = nullptr;
+            // Audit 2026-10-17, #6: consume the scheduler's frame by VALUE.
+            // Tick() returns a pointer into the scheduler's ring — memory-
+            // stable across Clear(), but the command thread may Close() the
+            // decoder (UnloadScene/Stop/LoadScene) at any point after the
+            // call. Holding the pointer across the dirty-gate/BeginFrame
+            // window (up to a frame period) risks drawing a frame whose
+            // pool handles were already released; the epoch check after
+            // BeginFrame drops the copy if a teardown ran in between.
+            VideoFrame pendingFrame{};
+            bool hasPending = false;
             // Snapshot the command-thread-owned scene/capture state under a
             // short lock. LoadScene/UnloadScene/Stop assign m_currentScene,
             // m_hotReloadPath and m_audioCapture under m_mutex while this
@@ -1898,18 +1982,27 @@ void Engine::RenderLoop() {
             std::string renderHotReloadPath;
             std::filesystem::file_time_type renderHotReloadLastWrite{};
             std::shared_ptr<AudioCapture> renderAudioCapture;
+            uint64_t renderEpoch = 0;
             {
                 std::lock_guard<std::mutex> snapshotLock(m_mutex);
                 renderSceneType = m_currentScene.type;
                 renderHotReloadPath = m_hotReloadPath;
                 renderHotReloadLastWrite = m_hotReloadLastWrite;
                 renderAudioCapture = m_audioCapture;
+                // Same lock as the scene snapshot: every teardown that
+                // bumps the epoch also clears/changes the scene under this
+                // mutex, so scene and epoch are always observed as a pair
+                // (audit 2026-10-17, #6).
+                renderEpoch = m_videoEpoch.load(std::memory_order_relaxed);
             }
             if (m_state == EngineState::Running && m_videoManager
                 && m_videoManager->IsOpen()
                 && renderSceneType == "video") {
-                pending = m_videoManager->Tick(GetPosition());
-                if (pending && !(pending->valid)) pending = nullptr;
+                const VideoFrame* ticked = m_videoManager->Tick(GetPosition());
+                if (ticked && ticked->valid) {
+                    pendingFrame = *ticked;
+                    hasPending = true;
+                }
             }
 
             // ── Hot-reload: detect static image changes ──────────────
@@ -1994,7 +2087,7 @@ void Engine::RenderLoop() {
                 }
             }
             if (isVideoScene) {
-                if (!pending && !m_hasVideoFrame.load(std::memory_order_acquire)
+                if (!hasPending && !m_hasVideoFrame.load(std::memory_order_acquire)
                     && !m_frameDirty.load(std::memory_order_acquire)) {
                     m_frameCount.fetch_add(1, std::memory_order_relaxed);
                     if (m_occlusion.IsParked()) {
@@ -2006,7 +2099,7 @@ void Engine::RenderLoop() {
                     }
                     continue;
                 }
-            } else if (!pending && !m_frameDirty.load(std::memory_order_acquire)) {
+            } else if (!hasPending && !m_frameDirty.load(std::memory_order_acquire)) {
                 // P2-16: spectrum sampling below must keep running for
                 // audio-reactive scenes — with no video frame and a clean
                 // flag the gate would otherwise freeze the visualization.
@@ -2030,21 +2123,28 @@ void Engine::RenderLoop() {
             }
             const auto beginFrameEnd = high_resolution_clock::now();
 
-            if (pending && m_renderer) {
-                m_renderer->DrawVideoFrame(*pending,
+            // Audit 2026-10-17, #6: a teardown (UnloadScene/Stop/LoadScene)
+            // may have run between the snapshot above and here — its frames
+            // and pool handles are dead. Drop both the pending frame and the
+            // re-present cache for this pass; the next scene repaints.
+            const bool framesAlive =
+                m_videoEpoch.load(std::memory_order_acquire) == renderEpoch;
+
+            if (hasPending && framesAlive && m_renderer) {
+                m_renderer->DrawVideoFrame(pendingFrame,
                                            m_videoManager->GetSharedFence());
                 if (IsMultiMonitorMode()) {
                     // Same decoded frame to every monitor compositor.
-                    m_videoManager->PresentToAllMonitors(*pending);
+                    m_videoManager->PresentToAllMonitors(pendingFrame);
                 }
                 // Phase 3: cache for cadence re-presents; count the unique.
-                m_cachedVideoFrame = *pending;
+                m_cachedVideoFrame = pendingFrame;
                 m_hasVideoFrame.store(true, std::memory_order_release);
                 m_uniqueVideoFrames.fetch_add(1, std::memory_order_relaxed);
                 // New pixels fully handled this pass — disarm any setter-
                 // sourced dirty so we don't double-present.
                 m_frameDirty.store(false, std::memory_order_release);
-            } else if (isVideoScene && m_renderer && m_videoManager
+            } else if (framesAlive && isVideoScene && m_renderer && m_videoManager
                        && m_hasVideoFrame.load(std::memory_order_acquire)) {
                 // Phase 3: nothing new due — re-draw the cached frame at
                 // wall cadence. The slot fence is monotonic, so waiting on
@@ -2089,8 +2189,8 @@ void Engine::RenderLoop() {
             // so the decode thread may reuse that slot. The renderer's
             // GPU-side fence wait already guarantees it has finished READING
             // before this point; this only transfers ownership back.
-            if (pending && m_videoManager) {
-                m_videoManager->NotifyFrameConsumed(pending->frameIndex);
+            if (hasPending && framesAlive && m_videoManager) {
+                m_videoManager->NotifyFrameConsumed(pendingFrame.frameIndex);
             }
 
             // R2: whatever just presented is now on screen — disarm the
@@ -2203,7 +2303,7 @@ void Engine::RenderLoop() {
                 ps.dwell = m_renderer
                                ? static_cast<int>(m_renderer->LastDwell() + 0.5)
                                : 0;
-                ps.presentedNew = pending ? 1 : 0;
+                ps.presentedNew = (hasPending && framesAlive) ? 1 : 0;
                 ps.deadlineMiss =
                     (gapMs > 0.0 && targetMs > 0.0 && gapMs > 1.5 * targetMs)
                         ? 1

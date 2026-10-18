@@ -67,6 +67,16 @@ TEST(EngineTest, ShutdownWithoutInitializeSucceeds) {
     EXPECT_TRUE(engine->Shutdown().IsSuccess());
 }
 
+TEST(EngineTest, StopWithoutInitializeRejected) {
+    // Audit 2026-10-17, #8: Stop()/Play() on a torn-down engine used to
+    // "succeed" (Stop stamped Stopped onto an uninitialized object — or
+    // onto an object whose Shutdown ran concurrently).
+    auto engine = CreateWallpaperEngine();
+    EXPECT_TRUE(engine->Stop().IsError());
+    EXPECT_TRUE(engine->Play().IsError());
+    EXPECT_EQ(engine->GetState(), EngineState::Uninitialized);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Scene Loading Tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -201,6 +211,25 @@ TEST(EngineTest, PlayBeforeLoadReturnsError) {
     EXPECT_TRUE(engine->Play().IsError());
 
     engine->Shutdown();
+}
+
+TEST(EngineTest, PlayStopRejectedAfterShutdown) {
+    auto engine = CreateWallpaperEngine();
+    ASSERT_TRUE(engine->Initialize(WallpaperConfig{}).IsSuccess());
+
+    SceneInfo scene;
+    scene.id = "post-shutdown";
+    scene.sourcePath = "test.jpg";
+    engine->LoadScene(scene);
+
+    ASSERT_TRUE(engine->Shutdown().IsSuccess());
+    EXPECT_EQ(engine->GetState(), EngineState::Uninitialized);
+
+    // Both commands must refuse rather than resurrect state onto dead
+    // backends (audit 2026-10-17, #8).
+    EXPECT_TRUE(engine->Play().IsError());
+    EXPECT_TRUE(engine->Stop().IsError());
+    EXPECT_EQ(engine->GetState(), EngineState::Uninitialized);
 }
 
 TEST(EngineTest, PlayPauseStopCycle) {
@@ -423,6 +452,40 @@ TEST(EngineStressTest, CreateAndDestroyMany) {
         EXPECT_TRUE(engine->Initialize(config).IsSuccess());
         EXPECT_TRUE(engine->Shutdown().IsSuccess());
     }
+}
+
+TEST(EngineStressTest, ConcurrentShutdownIsSafe) {
+    // Audit 2026-10-17, #7: a second Shutdown() used to fall through and
+    // re-run the teardown — double StopMonitor/Release and a second join
+    // of the same std::thread (UB). The late caller now waits for the
+    // first teardown to finish; both must report success.
+    auto engine = CreateWallpaperEngine();
+    ASSERT_TRUE(engine->Initialize(WallpaperConfig{}).IsSuccess());
+
+    std::atomic<int> ready{0};
+    std::atomic<bool> firstOk{false};
+    std::atomic<bool> lateOk{false};
+    auto callShutdown = [&](std::atomic<bool>& ok, bool late) {
+        ready.fetch_add(1, std::memory_order_release);
+        while (ready.load(std::memory_order_acquire) < 2) {
+            std::this_thread::yield();
+        }
+        // The late caller arrives while the first is mid-teardown (the
+        // render-thread join keeps that window open well past 2 ms).
+        if (late) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        ok.store(engine->Shutdown().IsSuccess(), std::memory_order_release);
+    };
+
+    std::thread first(callShutdown, std::ref(firstOk), false);
+    std::thread late(callShutdown, std::ref(lateOk), true);
+    first.join();
+    late.join();
+
+    EXPECT_TRUE(firstOk.load());
+    EXPECT_TRUE(lateOk.load());
+    EXPECT_EQ(engine->GetState(), EngineState::Uninitialized);
 }
 
 TEST(EngineStressTest, LoadManyScenes) {
