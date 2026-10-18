@@ -130,7 +130,6 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     // disarm the burst gate — the playhead starts WITH the content, so pace
     // 1x until the first consume (see DecoderThread pacing).
     m_scheduler.Clear();
-    m_scheduler.ResetPresentationClock();
 
     // ── Prewarm (items 5+6): decode + publish the first frame HERE ─────
     // Two wins: the surface pool is built synchronously inside Open()
@@ -259,7 +258,6 @@ void VideoPlaybackController::Stop() {
         if (m_open.load(std::memory_order_acquire) && m_decoder) {
             m_decoder->Seek(0.0);
             m_scheduler.Clear();
-            m_scheduler.ResetPresentationClock();
             m_lastPublishedPts = 0.0;
             ++m_decodeGeneration;
             m_position.store(0.0, std::memory_order_release);
@@ -346,7 +344,6 @@ shared::Result<void> VideoPlaybackController::Seek(double seconds) {
     // P1-5: drop the pre-seek frame so the renderer never presents it;
     // the first post-seek frame re-arms the discontinuity detector.
     m_scheduler.Clear();
-    m_scheduler.ResetPresentationClock();
     m_lastPublishedPts = seconds;
     {
         // P0-2: the PTS jump across the seek must not read as a rate spike.
@@ -572,7 +569,6 @@ void VideoPlaybackController::DecoderThread() {
                                      "framePts={:.3f} -> scheduler Clear",
                                      m_lastPublishedPts, frame.pts);
                         m_scheduler.Clear();
-                        m_scheduler.ResetPresentationClock();
                         {
                             // P0-2: the content clock's watermark belongs to
                             // the old epoch - reseed it with the new stream,

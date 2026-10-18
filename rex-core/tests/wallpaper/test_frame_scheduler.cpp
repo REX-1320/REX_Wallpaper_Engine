@@ -428,5 +428,135 @@ TEST(FrameSchedulerPrimeTest, DisarmHoldsBufferButDropsSprint) {
     EXPECT_TRUE(s.IsPrimed());
 }
 
+// ── Audit 2026-10-17, §5.4 #4: Clear vs a concurrently ticking consumer ──
+
+TEST(FrameSchedulerClearRaceTest, ClearSuppressesUntilNextPush) {
+    // Deterministic contract: after Clear and with no further pushes the
+    // ring is empty (PendingCount 0, Tick nullptr) and the burst gate is
+    // disarmed — no matter how many Ticks pass. Post-clear pushes are
+    // consumable and re-arm the gate.
+    FrameScheduler s;
+    for (int i = 0; i < 4; ++i) {
+        VideoFrame f{};
+        f.valid = true;
+        f.slot = static_cast<uint32_t>(i % 8);
+        f.frameIndex = static_cast<uint64_t>(i + 1);
+        f.pts = i * 0.02;
+        s.Push(f);
+    }
+    ASSERT_NE(s.Tick(0.1), nullptr);
+    s.Clear();
+    EXPECT_EQ(s.PendingCount(), 0u);
+    EXPECT_FALSE(s.IsPrimed());
+    EXPECT_EQ(s.Tick(1e9), nullptr)
+        << "no pre-clear frame may reappear after Clear";
+    EXPECT_EQ(s.Tick(1e9), nullptr);
+
+    VideoFrame nf{};
+    nf.valid = true;
+    nf.slot = 0;
+    nf.frameIndex = 99;
+    nf.pts = 0.0;
+    s.Push(nf);
+    EXPECT_EQ(s.PendingCount(), 1u);
+    ASSERT_NE(s.Tick(0.0), nullptr);
+    EXPECT_TRUE(s.IsPrimed());  // consume in the CURRENT epoch re-arms
+}
+
+TEST(FrameSchedulerClearRaceTest, RacingTickCannotRollBackClear) {
+    // The reported defect: a Tick whose scan straddled a Clear() stored its
+    // stale watermark AFTER the Clear's re-baseline — "un-clearing" the
+    // ring (pre-clear frames consumable again) and re-arming the burst
+    // gate. The commit is now forward-only and the gate epoch-paired, so
+    // once the last Clear and the racing consumer have both settled, the
+    // ring must be empty and the gate disarmed.
+    for (int round = 0; round < 40; ++round) {
+        FrameScheduler s;
+        std::atomic<bool> stop{false};
+        std::thread ticker([&]() {
+            double t = 0.0;
+            while (!stop.load(std::memory_order_acquire)) {
+                s.Tick(t);
+                // Sweep the full PTS range the round publishes (up to
+                // ~5.1 s) so the ticker is mid-scan — not starved — for
+                // every Clear, including the final one whose rollback
+                // would otherwise be masked by a later re-baseline.
+                t += 0.05;
+                if (t > 5.5) {
+                    t = 0.0;
+                }
+            }
+        });
+        for (int i = 0; i < 64; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                VideoFrame f{};
+                f.valid = true;
+                f.slot = static_cast<uint32_t>((i * 4 + j) % 8);
+                f.frameIndex = static_cast<uint64_t>(i * 4 + j + 1);
+                f.pts = i * 0.08 + j * 0.02;
+                s.Push(f);
+            }
+            s.Clear();  // seek/loop-wrap shaped: re-baseline every burst
+        }
+        stop.store(true, std::memory_order_release);
+        ticker.join();
+
+        EXPECT_EQ(s.PendingCount(), 0u)
+            << "round " << round
+            << ": clear re-baseline must never be rolled back";
+        EXPECT_FALSE(s.IsPrimed())
+            << "round " << round << ": burst gate must stay disarmed after Clear";
+        EXPECT_EQ(s.Tick(1e9), nullptr)
+            << "round " << round << ": no pre-clear frame may reappear after Clear";
+    }
+}
+
+TEST(FrameSchedulerClearRaceTest, ClearInsideTickScanIsSuppressed) {
+    // Deterministic interleave for the §5.4 #4 defect: the hook fires on
+    // the consumer thread after the scan has selected a frame and before
+    // the commit — exactly the window in which a Clear() from the
+    // command/decode thread used to be rolled back by the unconditional
+    // store. The selection made from pre-clear state must be suppressed,
+    // and Clear's re-baseline must stand.
+    FrameScheduler s;
+    for (int i = 0; i < 3; ++i) {
+        VideoFrame f{};
+        f.valid = true;
+        f.slot = static_cast<uint32_t>(i);
+        f.frameIndex = static_cast<uint64_t>(i + 1);
+        f.pts = i * 0.02;  // due at target 0.05
+        s.Push(f);
+    }
+    VideoFrame futureFrame{};
+    futureFrame.valid = true;
+    futureFrame.slot = 3;
+    futureFrame.frameIndex = 4;
+    // Never due at target 0.05: the scan must select frame 3, not the
+    // newest write, so the commit straddles the Clear below.
+    futureFrame.pts = 100.0;
+    s.Push(futureFrame);
+
+    FrameScheduler* target = &s;
+    s.SetTestBeforeCommitHook(
+        [](void* ctx) { static_cast<FrameScheduler*>(ctx)->Clear(); }, target);
+
+    const VideoFrame* f = s.Tick(0.05);
+    EXPECT_EQ(f, nullptr)
+        << "a commit that straddled a Clear must be suppressed";
+    EXPECT_EQ(s.PendingCount(), 0u) << "Clear's re-baseline must stand";
+    EXPECT_FALSE(s.IsPrimed()) << "the burst gate must stay disarmed";
+
+    s.SetTestBeforeCommitHook(nullptr, nullptr);
+    // The scheduler keeps working normally after the injected race.
+    VideoFrame next{};
+    next.valid = true;
+    next.slot = 0;
+    next.frameIndex = 5;
+    next.pts = 0.03;
+    s.Push(next);
+    ASSERT_NE(s.Tick(0.05), nullptr);
+    EXPECT_TRUE(s.IsPrimed());
+}
+
 } // namespace
 } // namespace rex::wallpaper

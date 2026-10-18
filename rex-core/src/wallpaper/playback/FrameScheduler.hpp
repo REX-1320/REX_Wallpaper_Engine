@@ -13,7 +13,9 @@ namespace rex::wallpaper {
 // ─── FrameScheduler ─────────────────────────────────────────────────────
 //
 // SPSC ring of GPU-backed VideoFrames. Exactly one producer (decode thread)
-// calls Push(); exactly one consumer (render thread) calls Tick().
+// calls Push(); exactly one consumer (render thread) calls Tick(). Clear()
+// and DisarmPrime() are the multi-thread entry points (seek / loop wrap /
+// teardown / resume — see the concurrency contract below).
 //
 // ─── Semantics ──────────────────────────────────────────────────────────
 //
@@ -26,17 +28,28 @@ namespace rex::wallpaper {
 //
 // Frame slots are a stable ring array and the underlying pool textures are
 // owned by the decoder for the process lifetime, so the returned pointer
-// stays valid and no handles are ever closed here. GPU content safety is
-// guaranteed by the D3D11->D3D12 fence: the consumer must wait on
-// GetSlotFence(frame.slot) before sampling (see FfmpegVideoDecoder).
+// stays memory-valid and no handles are ever closed here. The CONTENT is
+// only guaranteed until the producer completes kNumSlots further pushes:
+// a consumer that holds a frame across a longer delay must copy it (the
+// engine consumes frames BY VALUE at the Tick seam for exactly this reason
+// — audit 2026-10-17, §5.4 #14). GPU content safety is guaranteed by the
+// D3D11->D3D12 fence: the consumer must wait on GetSlotFence(frame.slot)
+// before sampling (see FfmpegVideoDecoder).
 //
-// ─── SPSC guarantee ─────────────────────────────────────────────────────
+// ─── Concurrency contract ───────────────────────────────────────────────
 //
-// Producer writes slot (wc % N), consumer reads slot ((wc - 1) % N); with
-// the single-producer/single-consumer invariant these are always distinct
-// indices, so no mutex is needed — only acquire/release atomics on the
-// write count. If multiple producers or consumers are ever added, this
-// class MUST be redesigned.
+// Producer vs consumer: slot indices are distinct as long as the producer
+// has not lapped the consumer by kNumSlots writes; the write count
+// publishes via release/acquire. If multiple producers or consumers are
+// ever added, this class MUST be redesigned.
+//
+// Clear() may run on the command or decode thread WHILE the consumer ticks
+// (seek, loop wrap, teardown). The audit-2026-10-17 §5.4 #4 failure modes
+// are closed structurally, not by luck: the consumed watermark can never
+// move backwards (a Clear's re-baseline used to be overwritten by a racing
+// Tick's stale commit — the "un-clear"), and the burst gate is epoch-paired
+// inside the SAME atomic as the watermark, so a Clear can never be re-armed
+// by a racing consume.
 
 class FrameScheduler {
 public:
@@ -46,9 +59,11 @@ public:
     /// fractional rates like 59.94).
     static constexpr double kSelectToleranceSec = 0.008;
 
-    /// Producer: publish a frame. Overwrites the oldest unpublished slot;
-    /// that slot is only read by the consumer after it has already moved
-    /// past it, so no torn reads are possible.
+    /// Producer: publish a frame. Overwrites the oldest unpublished slot.
+    /// The consumer copies the selected frame out of the ring at the Tick
+    /// seam, so a later overwrite cannot tear a selection in progress —
+    /// only a consumer that STORES the returned pointer past kNumSlots
+    /// further pushes sees newer content in it (see class doc).
     void Push(const VideoFrame& frame);
 
     /// Consumer: returns the newest published frame due at targetPts
@@ -67,19 +82,12 @@ public:
     /// Drop any unpublished frame (P1-5 / R10). Called on seek, loop wrap
     /// and recovery resume so a pre-seek frame is never presented: after
     /// Clear, Tick returns nullptr until the next Push. Safe from any
-    /// thread (Seek/command thread, decode thread); the consumer stays
-    /// lock-free.
+    /// thread (Seek/command thread, decode thread) against a concurrently
+    /// ticking consumer — the epoch bump and the watermark re-baseline are
+    /// published in ONE atomic (audit §5.4 #4).
     void Clear();
 
     size_t GetNumSlots() const { return kNumSlots; }
-
-    /// Re-seed the monotonic presentation clock after a seek, loop wrap or
-    /// recovery. MUST accompany Clear() on those events: PTS restarts near
-    /// zero after a wrap, so without this the monotonic guard in Tick would
-    /// reject every post-wrap frame and the wallpaper would freeze.
-    void ResetPresentationClock() {
-        m_lastPresentedPts = -std::numeric_limits<double>::infinity();
-    }
 
     /// Ticks where nothing was due and the previous frame was retained. With a
     /// decode-ahead reserve this is the NORMAL steady state (the reserve holds
@@ -92,7 +100,8 @@ public:
     /// Clamped to the ring size: anything older was overwritten unseen.
     size_t PendingCount() const {
         const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
-        const uint64_t lc = m_lastConsumedWrite.load(std::memory_order_acquire);
+        const uint64_t lc =
+            m_watermark.load(std::memory_order_acquire) & kWatermarkMask;
         if (wc <= lc) return 0;
         const uint64_t pending = wc - lc;
         return static_cast<size_t>(pending > kNumSlots ? kNumSlots : pending);
@@ -103,39 +112,74 @@ public:
     /// fresh (post-seek/wrap/load) ring only manufactures skips — the
     /// playhead starts WITH the content (wallpaper has no lip-sync to
     /// keep), so pace 1x until the first consume, then burst if behind.
+    /// Epoch-paired with the watermark, so a racing Clear can never
+    /// re-arm the gate (audit §5.4 #4).
     bool IsPrimed() const {
-        return m_primed.load(std::memory_order_acquire);
+        const uint64_t epoch =
+            m_watermark.load(std::memory_order_acquire) >> kWatermarkBits;
+        return m_primedEpoch.load(std::memory_order_acquire) == epoch;
     }
 
     /// Disarm the burst gate WITHOUT dropping buffered frames (resume
     /// path): pace 1x until the next consume re-arms. Unlike Clear, the
     /// pre-pause frames stay consumable — only the sprint is held off.
     void DisarmPrime() {
-        m_primed.store(false, std::memory_order_release);
+        m_primedEpoch.store(kNeverPrimed, std::memory_order_release);
+    }
+
+    /// Test-only fault-injection seam (audit 2026-10-17, §5.4 #4/#10):
+    /// invoked on the consumer thread immediately after a selection and
+    /// BEFORE the watermark commit, so tests can inject a Clear() with a
+    /// deterministic interleave — timing-based racing is not reliable on
+    /// every machine. Always null in production; one predictable branch
+    /// per presented frame.
+    using BeforeCommitHook = void (*)(void*);
+    void SetTestBeforeCommitHook(BeforeCommitHook hook, void* ctx) {
+        m_testHook = hook;
+        m_testHookCtx = ctx;
     }
 
 private:
+    // Consumed watermark + clear epoch, packed into ONE atomic
+    // (audit 2026-10-17, §5.4 #4). Bits 63..40: clear epoch, bumped by
+    // Clear() from any thread. Bits 39..0: consumed write-count watermark,
+    // monotonically non-decreasing — every writer moves it forward-only.
+    // The packing gives the pair a single modification order: a Tick
+    // commit and a concurrent Clear can never interleave into a torn state
+    // (new epoch with the old watermark, or a watermark rolled back past
+    // the re-baseline). 2^40 pushes outlive any session; epoch
+    // wrap-around is harmless because only same-instant values are ever
+    // compared (a Tick lives microseconds).
+    static constexpr unsigned kWatermarkBits = 40;
+    static constexpr uint64_t kWatermarkMask =
+        (uint64_t{1} << kWatermarkBits) - 1;
+    // Sentinel for "no consume in the current epoch" (fresh scheduler /
+    // DisarmPrime). No real epoch ever reaches it within a tick's lifetime.
+    static constexpr uint64_t kNeverPrimed =
+        std::numeric_limits<uint64_t>::max();
+
+    std::atomic<uint64_t> m_watermark{0};
+
     std::array<VideoFrame, kNumSlots> m_slots{};
     std::atomic<uint64_t> m_writeCount{0};
-    // Last consumed write. Written by the consumer in Tick AND by Clear
-    // from other threads — hence atomic (was consumer-local plain uint64).
-    std::atomic<uint64_t> m_lastConsumedWrite{0};
     // Cumulative drops, consumer-written (see Tick), read by telemetry.
     std::atomic<uint64_t> m_dropped{0};
     // High-water mark for vanished-write accounting (see Tick): each
     // overwritten-unseen write is counted at most once, no matter how
-    // many starved Ticks observe the same stale gap. Reset by Clear
-    // alongside the consumed write.
+    // many starved Ticks observe the same stale gap. Every writer moves
+    // it forward-only (CAS-max); Clear re-baselines it to the write count.
     std::atomic<uint64_t> m_countedThrough{0};
-    // PTS of the most recently presented frame (consumer-only). Enforces
-    // monotonic presentation: a frame older than this is never presented.
-    // Seeded to -inf by ResetPresentationClock after seek / loop wrap.
-    double m_lastPresentedPts{-std::numeric_limits<double>::infinity()};
-    // Consumer has taken a frame since the last Clear (see IsPrimed).
-    // Set by Tick, cleared by Clear, read by the decode thread.
-    std::atomic<bool> m_primed{false};
+    // Epoch of the last COMMITTED consume (see IsPrimed): armed iff it
+    // equals the watermark's current epoch. Tick stores the epoch its
+    // commit carried; Clear needs no store — the epoch bump alone
+    // disarms.
+    std::atomic<uint64_t> m_primedEpoch{kNeverPrimed};
     // Ticks that found nothing due (frame retained). Normal with a reserve.
     std::atomic<uint64_t> m_starvedTicks{0};
+    // Test-only seam state (see SetTestBeforeCommitHook); written once by
+    // a test before any concurrent use, never touched in production.
+    BeforeCommitHook m_testHook = nullptr;
+    void* m_testHookCtx = nullptr;
 };
 
 } // namespace rex::wallpaper

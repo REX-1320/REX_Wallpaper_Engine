@@ -132,9 +132,8 @@ TEST(FrameSchedulerSelect, ClearSuppressesStaleFramesUntilRepublished) {
     for (int i = 0; i < 3; ++i) s.Push(MakeFrame(i, i * kFrame24));
     ASSERT_NE(s.Tick(kFrame24), nullptr);
 
-    // Loop wrap: Clear + clock reset, as the controller does.
+    // Loop wrap: Clear re-baselines the ring, as the controller does.
     s.Clear();
-    s.ResetPresentationClock();
     EXPECT_EQ(s.Tick(kFrame24), nullptr)
         << "no pre-wrap frame may be presented after Clear";
 
@@ -143,7 +142,7 @@ TEST(FrameSchedulerSelect, ClearSuppressesStaleFramesUntilRepublished) {
     s.Push(MakeFrame(101, kFrame24));
     const VideoFrame* f = s.Tick(kFrame24);
     ASSERT_NE(f, nullptr)
-        << "post-wrap frames must not be rejected by the monotonic guard";
+        << "post-wrap frames must not be rejected as stale";
     EXPECT_NEAR(f->pts, kFrame24, 1e-9);
 }
 

@@ -31,7 +31,8 @@ void FrameScheduler::Push(const VideoFrame& frame) {
 
 const VideoFrame* FrameScheduler::Tick(double targetPts) {
     const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
-    const uint64_t lc = m_lastConsumedWrite.load(std::memory_order_acquire);
+    const uint64_t lc =
+        m_watermark.load(std::memory_order_acquire) & kWatermarkMask;
     if (wc == 0 || wc == lc) {
         return nullptr;
     }
@@ -42,18 +43,28 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
     // frames, proven live 2026-10-07).
     uint64_t start = lc + 1;
     const uint64_t oldestIntact = wc > kNumSlots ? wc - kNumSlots + 1 : 1;
-    const uint64_t countedThrough =
-        m_countedThrough.load(std::memory_order_acquire);
+    uint64_t countedThrough = m_countedThrough.load(std::memory_order_acquire);
     if (oldestIntact > countedThrough) {
         // Vanished and never accounted: (lo, oldestIntact). Write
         // oldestIntact itself is still intact. Each write counted once
         // via the high-water mark no matter how many starved Ticks pass.
+        // (The delta is telemetry; under a Clear race the mark stays
+        // forward-only and the re-baseline makes stale math moot.)
         const uint64_t lo = countedThrough > lc ? countedThrough : lc;
         if (oldestIntact > lo + 1) {
             m_dropped.fetch_add(oldestIntact - lo - 1,
                                 std::memory_order_relaxed);
         }
-        m_countedThrough.store(oldestIntact, std::memory_order_release);
+        // Forward-only CAS-max (audit 2026-10-17, §5.4 #4): a concurrent
+        // Clear() re-baselines the mark to the write count; this stale
+        // Tick must never roll it back.
+        while (countedThrough < oldestIntact) {
+            if (m_countedThrough.compare_exchange_weak(
+                    countedThrough, oldestIntact, std::memory_order_release,
+                    std::memory_order_acquire)) {
+                break;
+            }
+        }
     }
     if (start < oldestIntact) {
         start = oldestIntact;
@@ -117,12 +128,11 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
             if (n <= 8 || (n % 512) == 0) {
                 REX_LOG_WARN(kModule,
                              "starve#{} target={:.3f} limit={:.3f} wc={} lc={} "
-                             "pending={} valid={} ptsRange=[{:.3f}..{:.3f}] "
-                             "lastShown={:.3f}",
+                             "pending={} valid={} ptsRange=[{:.3f}..{:.3f}]",
                              n, targetPts, limit, wc, lc,
                              static_cast<uint64_t>(wc - lc), validCount,
                              validCount ? minValid : 0.0,
-                             validCount ? maxValid : 0.0, m_lastPresentedPts);
+                             validCount ? maxValid : 0.0);
             }
         }
         return nullptr;
@@ -141,23 +151,80 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
     if (skipped) {
         m_dropped.fetch_add(skipped, std::memory_order_relaxed);
     }
-    m_lastPresentedPts = selectedPts;
-    m_lastConsumedWrite.store(selected, std::memory_order_release);
-    m_primed.store(true, std::memory_order_release);
+    // Fault-injection seam for the Clear-vs-Tick tests (no-op in production).
+    if (m_testHook) {
+        m_testHook(m_testHookCtx);
+    }
+    // ── Commit (audit 2026-10-17, §5.4 #4) ─────────────────────────────
+    // Advance the watermark FORWARD-ONLY, carrying the epoch read from the
+    // same atomic. A Clear() that landed across this scan re-baselined the
+    // watermark to (at least) the write count, so this CAS finds
+    // lcNow >= selected and the selection is suppressed. The old code
+    // stored unconditionally: a stale store could land after the Clear's
+    // re-baseline and roll the watermark back ("un-clearing" the ring and
+    // re-presenting pre-seek frames).
+    uint64_t cur = m_watermark.load(std::memory_order_acquire);
+    bool advanced = false;
+    for (;;) {
+        const uint64_t lcNow = cur & kWatermarkMask;
+        if (lcNow >= selected) {
+            break;  // a Clear (or an equal commit) owns the watermark now
+        }
+        const uint64_t next = (cur & ~kWatermarkMask) | selected;
+        if (m_watermark.compare_exchange_weak(cur, next,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+            advanced = true;
+            break;
+        }
+        // CAS failure reloaded `cur`; re-check the guard and retry.
+    }
+    if (!advanced) {
+        // Suppress: this scan straddled a Clear. The post-clear ring is
+        // empty until the producer pushes again; the consumer re-ticks.
+        return nullptr;
+    }
+    // Burst gate: paired with the epoch carried by this commit (the
+    // pre-CAS `cur` value). A later Clear bumps the epoch and disarms the
+    // gate atomically — no separate primed store exists to be re-armed
+    // out of order.
+    m_primedEpoch.store(cur >> kWatermarkBits, std::memory_order_release);
     return &m_slots[(selected - 1) % kNumSlots];
 }
 
 void FrameScheduler::Clear() {
+    // Publish {epoch+1, watermark = max(wc, current low bits)} as ONE
+    // atomic (audit 2026-10-17, §5.4 #4). The packing gives the epoch and
+    // the watermark a single modification order, so a racing Tick either
+    // sees the old pair (and its forward-only commit CAS loses to, or
+    // lands before, this store) or the new pair (and suppresses its stale
+    // selection). The epoch bump is also what disarms the burst gate —
+    // IsPrimed compares against these top bits — so nothing needs to be
+    // stored "after" Clear for the gate to hold.
     const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
-    m_lastConsumedWrite.store(wc, std::memory_order_release);
-    m_countedThrough.store(wc, std::memory_order_release);  // re-baseline
-    m_primed.store(false, std::memory_order_release);  // burst gate: 1x pace
-                                                       // until first consume
-    // Seek / loop wrap / recovery re-bases presentation time. m_lastPresentedPts
-    // is NOT cleared here: after a wrap the new frames' PTS restart near zero,
-    // and the monotonic guard would reject them all. The consumer's next
-    // successful selection re-seeds it (ResetPresentationClock), which the
-    // controller calls on the same events that call Clear().
+    uint64_t cur = m_watermark.load(std::memory_order_acquire);
+    for (;;) {
+        const uint64_t low = cur & kWatermarkMask;
+        const uint64_t target = wc > low ? wc : low;  // never backwards
+        const uint64_t next =
+            (((cur >> kWatermarkBits) + 1) << kWatermarkBits) | target;
+        if (m_watermark.compare_exchange_weak(cur, next,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+            break;
+        }
+        // CAS failure reloaded `cur`; recompute and retry.
+    }
+    // Re-baseline the vanished-write high-water mark too, forward-only:
+    // a concurrent Tick's stale value must never roll it back.
+    uint64_t ct = m_countedThrough.load(std::memory_order_acquire);
+    while (ct < wc) {
+        if (m_countedThrough.compare_exchange_weak(
+                ct, wc, std::memory_order_release,
+                std::memory_order_acquire)) {
+            break;
+        }
+    }
 }
 
 } // namespace rex::wallpaper
