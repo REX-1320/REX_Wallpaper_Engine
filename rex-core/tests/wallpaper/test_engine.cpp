@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include <rex/wallpaper/IWallpaperEngine.hpp>
 
+#include "wallpaper/engine/PositionClock.hpp"
+
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <string>
@@ -707,4 +710,82 @@ TEST(SpeedClockTest, PositionAdvancesAtPlaybackRate) {
     EXPECT_TRUE(engine->Stop().IsSuccess());
     EXPECT_TRUE(engine->UnloadScene().IsSuccess());
     engine->Shutdown();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Position clock (audit 2026-10-17, #3 — cross-thread position state)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(PositionClockTest, StartsAtZeroAndAdvancesWithRate) {
+    PositionClock clock;
+    clock.Start(100.0);
+    EXPECT_TRUE(clock.Running());
+    EXPECT_DOUBLE_EQ(clock.Position(105.0, 1.0), 5.0);
+    EXPECT_DOUBLE_EQ(clock.Position(105.0, 2.0), 10.0);
+}
+
+TEST(PositionClockTest, FoldBanksElapsedAndStops) {
+    PositionClock clock;
+    clock.SetBase(3.0);
+    clock.Start(100.0);
+    EXPECT_DOUBLE_EQ(clock.Fold(110.0, 2.0), 23.0);  // 3 + 10 s at 2x
+    EXPECT_FALSE(clock.Running());
+    // Frozen after the fold: later reads ignore time and rate.
+    EXPECT_DOUBLE_EQ(clock.Position(200.0, 1.0), 23.0);
+    EXPECT_DOUBLE_EQ(clock.Position(200.0, 4.0), 23.0);
+}
+
+TEST(PositionClockTest, ResumeIsContinuousAcrossPause) {
+    PositionClock clock;
+    clock.Start(100.0);
+    clock.Fold(110.0, 1.0);  // bank 10 s
+    clock.Start(120.0);      // 10 s paused: not counted
+    EXPECT_DOUBLE_EQ(clock.Position(125.0, 1.0), 15.0);
+}
+
+TEST(PositionClockTest, ResetKeepsBaseAndStops) {
+    PositionClock clock;
+    clock.SetBase(7.0);
+    clock.Start(100.0);
+    clock.Reset();
+    EXPECT_FALSE(clock.Running());
+    EXPECT_DOUBLE_EQ(clock.Position(150.0, 1.0), 7.0);
+}
+
+TEST(PositionClockTest, ConcurrentFoldsNeverDoubleCount) {
+    // A user Pause racing an occlusion park must bank the lapse once: the
+    // transition lock serializes read-fold-store and the loser observes
+    // running == false. (Unserialized, the second fold could re-read the
+    // pre-fold base and add the same lapse again.)
+    for (int round = 0; round < 50; ++round) {
+        PositionClock clock;
+        clock.Start(0.0);
+        std::thread a([&clock] { clock.Fold(1.0, 1.0); });
+        std::thread b([&clock] { clock.Fold(1.0, 1.0); });
+        a.join();
+        b.join();
+        EXPECT_DOUBLE_EQ(clock.Position(2.0, 1.0), 1.0) << "round " << round;
+    }
+}
+
+TEST(PositionClockTest, ReaderSeesBoundedPositionWhileWriterTransitions) {
+    // Render-thread reads race command-thread transitions; a snapshot must
+    // never mix fields into an out-of-range position (e.g. new base with
+    // stale running=true). Invariant for this writer loop: 0 <= pos <= 1.
+    PositionClock clock;
+    std::atomic<bool> done{false};
+    std::thread writer([&clock, &done] {
+        for (int i = 0; i < 2000; ++i) {
+            clock.SetBase(0.0);
+            clock.Start(0.0);
+            clock.Fold(1.0, 1.0);
+        }
+        done.store(true, std::memory_order_release);
+    });
+    while (!done.load(std::memory_order_acquire)) {
+        const double pos = clock.Position(1.0, 1.0);
+        EXPECT_GE(pos, 0.0);
+        EXPECT_LE(pos, 1.0000001);
+    }
+    writer.join();
 }

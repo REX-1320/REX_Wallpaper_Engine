@@ -3,7 +3,6 @@
 #include <rex/wallpaper/IWallpaperEngine.hpp>
 #include <shared/Logger.hpp>
 #include <shared/UUID.hpp>
-#include <shared/Stopwatch.hpp>
 
 #include <atomic>                             
 #include <chrono>                             
@@ -17,6 +16,7 @@
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "wallpaper/video/VideoManager.hpp"
 #include "wallpaper/engine/OcclusionPolicy.hpp"
+#include "wallpaper/engine/PositionClock.hpp"
 #include "wallpaper/playback/StageTimer.hpp"
 #include <shared/PacingServo.hpp>
 #include "wallpaper/audio/AudioCapture.hpp"
@@ -36,7 +36,13 @@ public:
 
     shared::Result<void> LoadScene(const SceneInfo& scene) override;
     shared::Result<void> UnloadScene() override;
-    SceneInfo GetCurrentScene() const override { return m_currentScene; }
+    // Copied under m_mutex: the render thread rewrites m_currentScene
+    // (recovery-driven LoadScene runs on it) while command/telemetry
+    // threads read it (audit 2026-10-17, #4).
+    SceneInfo GetCurrentScene() const override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_currentScene;
+    }
 
     shared::Result<void> Play() override;
     shared::Result<void> Pause() override;
@@ -47,7 +53,10 @@ public:
 
     shared::Result<void> AssignMonitor(const std::string& monitorId) override;
     shared::Result<void> ClearMonitor() override;
-    MonitorInfo GetCurrentMonitor() const override { return m_currentMonitor; }
+    MonitorInfo GetCurrentMonitor() const override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_currentMonitor;
+    }
     std::vector<MonitorInfo> EnumerateMonitors() const override;
 
     shared::Result<void> SetFillMode(FillMode mode) override;
@@ -132,8 +141,15 @@ private:
     shared::UUID m_sessionId;
 
     mutable std::mutex m_mutex;
-    shared::Stopwatch m_stopwatch;
-    double m_currentPosition = 0.0;
+    // Cross-thread playback-position clock (audit 2026-10-17, #3).
+    // Replaces a shared::Stopwatch the render thread read unguarded; see
+    // PositionClock.hpp for the publication rules. The base lives inside
+    // the clock (folded on every pause/park; zeroed with m_currentPosition).
+    PositionClock m_clock;
+    // Last position published by Update on the render thread; read by
+    // GetPosition/DumpStats under m_mutex — atomic so the unlocked render
+    // write is race-free.
+    std::atomic<double> m_currentPosition{0.0};
 
     // ─── Render cadence (P2-15): cached decoder fps, render-thread only.
     // Refreshed at most twice/sec (telemetry does ring math); PaceLoop
@@ -142,9 +158,12 @@ private:
     std::chrono::high_resolution_clock::time_point m_cadenceSampledAt{};
 
     // ─── Telemetry ─────────────────────────────────────────────────────
-    double m_frameTime = 0.0;
-    long long m_frameCount = 0;    uint32_t m_recoveryCount = 0;
-    uint32_t m_deviceResetCount = 0;
+    // Render-thread writers, command-thread reader (DumpStats): atomic
+    // snapshot, never a plain pair (audit 2026-10-17, #9).
+    std::atomic<double> m_frameTime{0.0};
+    std::atomic<long long> m_frameCount{0};
+    std::atomic<uint32_t> m_recoveryCount{0};
+    std::atomic<uint32_t> m_deviceResetCount{0};
     int m_lastMonitorCount = 0;
     int m_lastPrimaryWidth = 0;
     int m_lastPrimaryHeight = 0;
@@ -293,13 +312,6 @@ private:
     /// Previous pass start for the occlusion dt (pass spacing, clamped).
     /// Default-epoch on the first pass: dt clamps, never a spurious park.
     std::chrono::high_resolution_clock::time_point m_occlusionPrevStart{};
-    /// Position clock base (seconds). The Stopwatch restarts from zero on
-    /// every Start(), so pause/resume used to rewind the reported position
-    /// while the decoder kept its own PTS. The base is folded forward at
-    /// every pause and zeroed with m_currentPosition; position is always
-    /// base + stopwatch-elapsed. Atomic because the render thread folds it
-    /// while GetPosition() reads it under m_mutex.
-    std::atomic<double> m_positionBase{0.0};
 };
 
 } // namespace rex::wallpaper

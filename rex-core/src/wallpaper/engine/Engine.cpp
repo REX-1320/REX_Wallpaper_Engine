@@ -215,7 +215,7 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
     m_renderThread = std::thread(&Engine::RenderLoop, this);
 
     SetState(EngineState::Initialized);
-    m_stopwatch.Start();
+    m_clock.Start(PositionClock::Now());
 
     REX_LOG_INFO("Engine", "Initialized successfully (session: {})", m_sessionId.ToString().c_str());
     return shared::Result<void>();
@@ -274,7 +274,7 @@ shared::Result<void> Engine::Shutdown() {
 
     m_playing = false;
     m_currentScene = SceneInfo{};
-    m_stopwatch.Stop();
+    m_clock.Reset();
 
     SetState(EngineState::Uninitialized);
     REX_LOG_INFO("Engine", "Shutdown complete");
@@ -409,9 +409,8 @@ shared::Result<void> Engine::HandleDeviceLoss() {
             m_videoManager->Seek(savedPosition);
             // P1-13: re-base the wall clock on the seek target — otherwise
             // the video resumes mid-stream under a ~0 position.
-            m_positionBase.store(savedPosition, std::memory_order_release);
-            m_stopwatch.Reset();
-            m_stopwatch.Start();
+            m_clock.SetBase(savedPosition);
+            m_clock.Start(PositionClock::Now());
         }
     }
 
@@ -461,15 +460,15 @@ shared::Result<void> Engine::LoadScene(const SceneInfo& scene) {
 
     m_scenesLoaded.fetch_add(1, std::memory_order_relaxed);
     m_currentScene = scene;
-    m_currentPosition = 0.0;
-    m_positionBase.store(0.0, std::memory_order_relaxed);
-    // Fresh stream, fresh wall clock: the stopwatch kept running from the
-    // PREVIOUS file, so GetPosition() (= base + elapsed) opened hundreds of
-    // seconds in and the decoder saw a hugely negative lead → catch-up burst
-    // → every apply played fast-forward for seconds ("loads fast", all
-    // files). Restart it here so wall and content start at zero together.
-    m_stopwatch.Reset();
-    m_stopwatch.Start();
+    m_currentPosition.store(0.0, std::memory_order_relaxed);
+    m_clock.SetBase(0.0);
+    // Fresh stream, fresh wall clock: the old stopwatch kept running from
+    // the PREVIOUS file, so GetPosition() (= base + elapsed) opened hundreds
+    // of seconds in and the decoder saw a hugely negative lead → catch-up
+    // burst → every apply played fast-forward for seconds ("loads fast",
+    // all files). Restart the clock here so wall and content start at zero
+    // together.
+    m_clock.Start(PositionClock::Now());
 
     // Activate the renderer adapter for this scene type. Every later
     // SetProperty call is gated by what the adapter supports, so
@@ -644,8 +643,8 @@ shared::Result<void> Engine::UnloadScene() {
     m_adapter.reset();
     m_playing = false;
     m_currentScene = SceneInfo{};
-    m_currentPosition = 0.0;
-    m_positionBase.store(0.0, std::memory_order_relaxed);
+    m_currentPosition.store(0.0, std::memory_order_relaxed);
+    m_clock.SetBase(0.0);
     // P0.1: no scene, nothing to show — hide the layer so an OS-drawn
     // static wallpaper (or the plain desktop) shows through instead of a
     // frozen video frame. Stop() intentionally does NOT hide (the frozen
@@ -680,7 +679,7 @@ shared::Result<void> Engine::Play() {
 
     m_playing = true;
     SetState(EngineState::Running);
-    m_stopwatch.Start();
+    m_clock.Start(PositionClock::Now());
 
     // P16: arm the first present after (re)starting playback.
     m_frameDirty.store(true, std::memory_order_release);
@@ -713,11 +712,7 @@ shared::Result<void> Engine::Pause() {
     // from zero, so without this every pause/resume rewound the reported
     // position while the decoder kept playing from its own PTS. Scaled by
     // the playback rate (Phase 4) so pause at 2x banks 2x time.
-    m_positionBase.store(m_positionBase.load(std::memory_order_relaxed) +
-                         m_stopwatch.ElapsedSeconds() *
-                             m_speed.load(std::memory_order_relaxed),
-                         std::memory_order_relaxed);
-    m_stopwatch.Reset();
+    m_clock.Fold(PositionClock::Now(), m_speed.load(std::memory_order_relaxed));
     // User-driven pause: a later auto-resume must not override it.
     m_autoPaused.store(false, std::memory_order_release);
     // A user pause disowns any occlusion park (stale parked flag + timer).
@@ -736,13 +731,13 @@ shared::Result<void> Engine::Stop() {
     }
 
     m_playing = false;
-    m_currentPosition = 0.0;
-    m_positionBase.store(0.0, std::memory_order_relaxed);
+    m_currentPosition.store(0.0, std::memory_order_relaxed);
+    m_clock.SetBase(0.0);
     // Phase 3: stopped video must not keep re-presenting its last frame
     // at cadence (a stale wallpaper behind the clear color).
     m_hasVideoFrame.store(false, std::memory_order_release);
     SetState(EngineState::Stopped);
-    m_stopwatch.Reset();
+    m_clock.Reset();
     // User-driven stop: a later auto-resume must not override it.
     m_autoPaused.store(false, std::memory_order_relaxed);
     // Stopped playback has no occlusion timing (parked flag + timer die).
@@ -754,11 +749,10 @@ shared::Result<void> Engine::Stop() {
 double Engine::GetPosition() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_playing) {
-        return m_currentPosition;
+        return m_currentPosition.load(std::memory_order_relaxed);
     }
-    double pos = m_positionBase.load(std::memory_order_relaxed) +
-                 m_stopwatch.ElapsedSeconds() *
-                     m_speed.load(std::memory_order_relaxed);
+    double pos = m_clock.Position(PositionClock::Now(),
+                                  m_speed.load(std::memory_order_relaxed));
     // P1-13: the wall clock drifts from decoder PTS (speed changes, loop
     // wraps, recovery seeks). Reconcile against duration: wrap when looping,
     // clamp otherwise. No duration (static/unopened) → wall clock as-is.
@@ -1069,9 +1063,12 @@ shared::Result<void> Engine::SetProperty(const std::string& property, const std:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_currentScene.audioMode = value;
-        }
-        if (m_videoManager) {
-            m_videoManager->SetAudioOutputMode(*mode);
+            // Same rule as SetVolume/SetMute: m_videoManager is swapped by
+            // the render thread during recovery — dereference under the
+            // lock (audit 2026-10-17, #2).
+            if (m_videoManager) {
+                m_videoManager->SetAudioOutputMode(*mode);
+            }
         }
         REX_LOG_INFO("Engine", "Audio output mode set to {}", value);
         return shared::Result<void>();
@@ -1439,11 +1436,15 @@ void Engine::DumpStats() const {
     REX_LOG_INFO("Engine", "  Playing:         {}", m_playing ? "true" : "false");
     REX_LOG_INFO("Engine", "  Loop:            {}", m_loop ? "true" : "false");
     REX_LOG_INFO("Engine", "  Speed:           {:.2f}", m_speed.load());
-    REX_LOG_INFO("Engine", "  Position:        {:.2f}s", m_currentPosition);
+    REX_LOG_INFO("Engine", "  Position:        {:.2f}s",
+                 m_currentPosition.load(std::memory_order_relaxed));
     REX_LOG_INFO("Engine", "  Frame:           {} (time: {:.2f}ms)",
-                 m_frameCount, m_frameTime);
-    REX_LOG_INFO("Engine", "  Recoveries:      {}", m_recoveryCount);
-    REX_LOG_INFO("Engine", "  Device resets:   {}", m_deviceResetCount);
+                 m_frameCount.load(std::memory_order_relaxed),
+                 m_frameTime.load(std::memory_order_relaxed));
+    REX_LOG_INFO("Engine", "  Recoveries:      {}",
+                 m_recoveryCount.load(std::memory_order_relaxed));
+    REX_LOG_INFO("Engine", "  Device resets:   {}",
+                 m_deviceResetCount.load(std::memory_order_relaxed));
     REX_LOG_INFO("Engine", "  Scene:           {}", m_currentScene.name.c_str());
     REX_LOG_INFO("Engine", "  Monitor:         {} ({}x{})",
                  m_currentMonitor.id.c_str(),
@@ -1463,21 +1464,23 @@ void Engine::DumpStats() const {
 void Engine::Update(double deltaTime) {
     if (m_state != EngineState::Running) return;
 
-    m_frameCount++;
-    m_frameTime = deltaTime;
+    m_frameCount.fetch_add(1, std::memory_order_relaxed);
+    m_frameTime.store(deltaTime, std::memory_order_relaxed);
 
     if (m_playing) {
-        // Read the stopwatch directly — this method runs on the render
-        // thread which owns m_stopwatch and m_currentPosition. Calling
-        // GetPosition() here would try to acquire m_mutex from the render
-        // thread, creating a deadlock with Shutdown() holding m_mutex and
-        // waiting for the render thread to exit.
-        m_currentPosition = m_positionBase.load(std::memory_order_relaxed) +
-                            m_stopwatch.ElapsedSeconds();
+        // Read the clock directly — this method runs on the render thread,
+        // which must never take m_mutex (Shutdown holds it while joining
+        // this thread). PositionClock publishes its state for exactly this
+        // lock-free read (audit 2026-10-17, #3); rate 1.0 preserves the
+        // historical formula here — GetPosition() applies m_speed.
+        m_currentPosition.store(m_clock.Position(PositionClock::Now()),
+                                std::memory_order_relaxed);
 
-        if (m_frameCount % 60 == 0) {
+        if (m_frameCount.load(std::memory_order_relaxed) % 60 == 0) {
             REX_LOG_DEBUG("Engine", "Frame {}: {:.2f} s, {:.2f} ms",
-                          m_frameCount, m_currentPosition, deltaTime);
+                          m_frameCount.load(std::memory_order_relaxed),
+                          m_currentPosition.load(std::memory_order_relaxed),
+                          deltaTime);
         }
     }
 }
@@ -1748,7 +1751,7 @@ void Engine::RenderLoop() {
         auto frameStart = high_resolution_clock::now();
 
         // ── Auto-pause behind full-screen apps (throttled) ──────────────
-        if (m_frameCount % 30 == 0) {
+        if (m_frameCount.load(std::memory_order_relaxed) % 30 == 0) {
             CheckFullScreenPause();
             CheckSuspendSources();
         }
@@ -1775,16 +1778,12 @@ void Engine::RenderLoop() {
                 // render thread exclusively owns these during normal operation)
                 if (m_videoManager) m_videoManager->Pause();
                 m_playing = false;
-                // Fold first (same reason as Pause()): the stopwatch restarts
+                // Fold first (same reason as Pause()): Start() re-stamps
                 // from zero, so the position must be banked or the next
                 // resume rewinds it while the decoder kept its own PTS.
                 // Rate-scaled like Pause() (Phase 4).
-                m_positionBase.store(
-                    m_positionBase.load(std::memory_order_relaxed) +
-                        m_stopwatch.ElapsedSeconds() *
-                            m_speed.load(std::memory_order_relaxed),
-                    std::memory_order_relaxed);
-                m_stopwatch.Reset();
+                m_clock.Fold(PositionClock::Now(),
+                             m_speed.load(std::memory_order_relaxed));
                 SetState(EngineState::Paused);
                 m_autoPaused.store(true, std::memory_order_release);
                 // Ownership handoff: auto-pause owns the decoder now; any
@@ -1797,7 +1796,7 @@ void Engine::RenderLoop() {
                 // Resume: restart video + mark engine running
                 if (m_videoManager) m_videoManager->Play();
                 m_playing = true;
-                m_stopwatch.Start();
+                m_clock.Start(PositionClock::Now());
                 SetState(EngineState::Running);
                 m_autoPaused.store(false, std::memory_order_release);
                 // Fresh timing from here: the decoder just resumed, so a
@@ -1809,7 +1808,7 @@ void Engine::RenderLoop() {
 
 
         // ── Periodically check for display topology changes ─────────────
-        if (m_frameCount % 120 == 0) {
+        if (m_frameCount.load(std::memory_order_relaxed) % 120 == 0) {
             const auto housekeepingStart = high_resolution_clock::now();
             CheckDisplayChanges();
             const double housekeepingMs = duration<double, std::milli>(
@@ -1851,12 +1850,14 @@ void Engine::RenderLoop() {
                 REX_LOG_INFO("Engine", "Recovery requested ({}), reinitializing...",
                              deviceLost ? "device removed" : "desktop host");
                 SetState(EngineState::Error);
-                m_recoveryCount++;
-                if (deviceLost) m_deviceResetCount++;
+                m_recoveryCount.fetch_add(1, std::memory_order_relaxed);
+                if (deviceLost) {
+                    m_deviceResetCount.fetch_add(1, std::memory_order_relaxed);
+                }
 
                 auto recoveryResult = HandleDeviceLoss();
                 if (recoveryResult.IsSuccess()) {
-                    m_frameCount = 0;
+                    m_frameCount.store(0, std::memory_order_relaxed);
                     m_recoveryDelayMs = 0;
                     m_nextRecoveryAttempt = now;
                 } else {
@@ -1873,7 +1874,7 @@ void Engine::RenderLoop() {
             }
             // Always pace: this thread must never busy-loop, whatever the
             // recovery outcome was.
-            m_frameCount++;
+            m_frameCount.fetch_add(1, std::memory_order_relaxed);
             PaceLoop(frameStart, false);
             continue;
         }
@@ -1919,7 +1920,7 @@ void Engine::RenderLoop() {
             // early-continue below) actually pick up file changes (R19).
             if (m_state == EngineState::Running
                 && !renderHotReloadPath.empty()
-                && m_frameCount % 60 == 0) {
+                && m_frameCount.load(std::memory_order_relaxed) % 60 == 0) {
                 std::error_code ec;
                 auto lastWrite = std::filesystem::last_write_time(renderHotReloadPath, ec);
                 if (!ec && lastWrite != renderHotReloadLastWrite) {
@@ -1971,12 +1972,8 @@ void Engine::RenderLoop() {
                 case OcclusionAction::Park: {
                     if (m_videoManager) m_videoManager->Pause();
                     m_playing = false;
-                    m_positionBase.store(
-                        m_positionBase.load(std::memory_order_relaxed) +
-                            m_stopwatch.ElapsedSeconds() *
-                                m_speed.load(std::memory_order_relaxed),
-                        std::memory_order_relaxed);
-                    m_stopwatch.Reset();
+                    m_clock.Fold(PositionClock::Now(),
+                                 m_speed.load(std::memory_order_relaxed));
                     REX_LOG_WARN("Engine",
                                  "Occlusion park: all {} present path(s) "
                                  "DWM-occluded — decode+audio paused, probing at 4 Hz",
@@ -1986,7 +1983,7 @@ void Engine::RenderLoop() {
                 case OcclusionAction::Resume: {
                     if (m_videoManager) m_videoManager->Play();
                     m_playing = true;
-                    m_stopwatch.Start();
+                    m_clock.Start(PositionClock::Now());
                     REX_LOG_WARN("Engine",
                                  "Occlusion resume: present path visible again — "
                                  "decode+audio resumed from parked position");
@@ -1999,7 +1996,7 @@ void Engine::RenderLoop() {
             if (isVideoScene) {
                 if (!pending && !m_hasVideoFrame.load(std::memory_order_acquire)
                     && !m_frameDirty.load(std::memory_order_acquire)) {
-                    m_frameCount++;
+                    m_frameCount.fetch_add(1, std::memory_order_relaxed);
                     if (m_occlusion.IsParked()) {
                         // Parked with nothing decoded yet (LOAD while
                         // covered): 4 Hz probe, not video cadence.
@@ -2017,7 +2014,7 @@ void Engine::RenderLoop() {
                 const bool spectrumActive = renderAudioCapture &&
                                             renderAudioCapture->IsRunning();
                 if (!spectrumActive) {
-                    m_frameCount++;          // keep %30/%120 housekeeping alive
+                    m_frameCount.fetch_add(1, std::memory_order_relaxed);
                     PaceLoop(frameStart, false);
                     continue;
                 }
@@ -2027,7 +2024,7 @@ void Engine::RenderLoop() {
             // context in time (device flagged removed) — skip this pass so
             // nothing is recorded into a stale list; recovery runs next.
             if (!m_renderer->BeginFrame()) {
-                m_frameCount++;
+                m_frameCount.fetch_add(1, std::memory_order_relaxed);
                 PaceLoop(frameStart, isVideoScene);
                 continue;
             }
@@ -2122,7 +2119,8 @@ void Engine::RenderLoop() {
                 m_phaseDrawMs.store(m_phaseDrawMs.load(std::memory_order_relaxed) * 0.9 + endMs * 0.1,
                                     std::memory_order_relaxed);
                 m_phaseWorkMs.store(totalMs, std::memory_order_relaxed);
-                m_phaseFrameIndex.store(m_frameCount, std::memory_order_relaxed);
+                m_phaseFrameIndex.store(m_frameCount.load(std::memory_order_relaxed),
+                                        std::memory_order_relaxed);
                 if (m_renderer) {
                     m_phaseWaitMs.store(m_renderer->LastFrameLatencyWaitMs(),
                                         std::memory_order_relaxed);
@@ -2186,7 +2184,8 @@ void Engine::RenderLoop() {
                 using namespace std::chrono;
                 PresentStage ps{};
                 ps.seq = m_stageSeq++;
-                ps.frameCount = static_cast<uint64_t>(m_frameCount);
+                ps.frameCount =
+                    static_cast<uint64_t>(m_frameCount.load(std::memory_order_relaxed));
                 const double waitMs =
                     m_renderer ? m_renderer->LastFrameLatencyWaitMs() : 0.0;
                 ps.beginWaitMs_x1000 =
