@@ -49,13 +49,23 @@ class WallpaperRuntime extends EventEmitter {
 
     proc.on('error', (err) => {
       this.logLine('wallpaper-runtime error:', err.message)
+      const wasCurrent = this.proc === proc
       this._teardown(proc, `runtime spawn failed: ${err.message}`)
+      // A failed spawn never fires 'exit', so the supervisor used to never
+      // hear about it: no crash report, tray stayed "available", no recovery
+      // (audit 5.10 #12). Surface it on the same channel as a process exit;
+      // code null plus spawnError marks it as a spawn/transport failure.
+      if (wasCurrent) this.emit('exit', null, { pid: proc.pid ?? null, spawnError: err.message })
     })
 
     proc.on('exit', (code) => {
       this.logLine('wallpaper-runtime exited with code', code)
+      // Capture the pid before _teardown clears this.proc: the supervisor's
+      // crash report read manager.pid afterwards and always got null
+      // (audit 5.10 #13).
+      const pid = proc.pid ?? null
       if (this.proc === proc) this._teardown(proc, `runtime exited (${code})`)
-      this.emit('exit', code)
+      this.emit('exit', code, { pid })
     })
 
     return proc

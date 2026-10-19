@@ -59,13 +59,13 @@ class Supervisor {
     // flag every healthy process as hung.
     this.heartbeatArmed = false
     this._probeInFlight = false
-    // No renderer ping bridge exists yet (nothing calls recordRendererPing),
-    // so the watchdog must stay silent until the first ping arrives —
-    // otherwise every visible window would reload in a loop after 15 s.
+    // Renderer ping bridge (audit 5.10 #9): preload heartbeats every 2 s over
+    // 'renderer:ping', so the watchdog must still stay silent until the first
+    // ping arrives — otherwise every visible window reloads in a loop.
     this.lastRendererPing = null
 
     this._timers = []
-    this._onExit = (code) => this._handleRuntimeExit(code)
+    this._onExit = (code, info) => this._handleRuntimeExit(code, info)
   }
 
   start() {
@@ -178,10 +178,10 @@ class Supervisor {
     if (this.quitting) return
     const win = this.deps.getWindow?.()
     if (!win || win.isDestroyed()) return
-    // Hidden windows get throttled timers — don't flag a hidden renderer.
-    if (!win.isVisible()) return
-    // No ping bridge wired yet: without any ping ever recorded there is no
-    // baseline, so there is nothing to call stale (see constructor).
+    // Hidden/minimized windows get throttled timers — don't flag them; the
+    // show/restore hooks re-baseline the clock when they are foreground again.
+    if (!win.isVisible() || win.isMinimized()) return
+    // No ping recorded yet: with no baseline there is nothing to call stale.
     if (this.lastRendererPing === null) return
     const stale = Date.now() - this.lastRendererPing
     if (stale <= this.opts.rendererStaleMs) return
@@ -204,9 +204,14 @@ class Supervisor {
   }
 
   // ─── Runtime exit → recovery ──────────────────────────────────────────────
-  async _handleRuntimeExit(code) {
+  async _handleRuntimeExit(code, info = null) {
     if (this.quitting) return
-    const pid = this.manager.pid ?? null
+    // The client captures pid before teardown and passes it along (audit
+    // 5.10 #13); a spawn failure arrives as code null + spawnError (5.10 #12)
+    // and still runs the normal bounded recovery.
+    const pid = info?.pid ?? this.manager.pid ?? null
+    const spawnError = info?.spawnError ?? null
+    if (spawnError) this.deps.logLine('runtime:spawn failed:', spawnError)
     this.deps.logLine('runtime:exit', code, '(recovering)')
     this.healthy = false
     this.deps.setRuntimeAvailable?.(false)
@@ -214,7 +219,12 @@ class Supervisor {
     this.recoveryAttempts++
     const attempt = this.recoveryAttempts
 
-    this._writeReport({ reason: 'runtime-exit', exitCode: code, pid })
+    this._writeReport({
+      reason: spawnError ? 'runtime-spawn-failed' : 'runtime-exit',
+      exitCode: code,
+      pid,
+      extra: spawnError ? { spawnError } : undefined,
+    })
 
     if (attempt > this.opts.maxRecoveryAttempts) {
       this.deps.logLine('runtime:recovery gave up after', attempt, 'attempts')
@@ -271,7 +281,7 @@ class Supervisor {
   }
 
   // ─── Crash reporting ──────────────────────────────────────────────────────
-  _writeReport({ reason, exitCode, pid, minidump = false }) {
+  _writeReport({ reason, exitCode, pid, minidump = false, extra = null }) {
     const state = this.deps.getLastApplied?.() ?? null
     const logs = {
       runtimeLog: this.deps.logs?.runtimeLog,
@@ -280,6 +290,7 @@ class Supervisor {
       appLog: this.deps.logs?.appLog,
     }
     const report = { reason, exitCode, pid, state, logs }
+    if (extra) report.extra = extra
 
     if (minidump && pid) {
       // Capture while the process is (possibly) still alive; never block the

@@ -7,6 +7,7 @@ const { Supervisor } = require('./supervisor/supervisor.cjs')
 const { AppStateManager } = require('./app-state-manager.cjs')
 const { WallpaperLibrary } = require('./wallpaper-library.cjs')
 const startup = require('./startup.cjs')
+const { isPathInside } = require('./path-guard.cjs')
 
 // ─── Single-instance protection ─────────────────────────────────────────────
 // REX is a background app: one instance, one tray icon, one runtime. A second
@@ -298,6 +299,17 @@ function createWindow() {
     if (mainWindow === win) mainWindow = null
   })
 
+  // ─── Renderer watchdog bridge (audit 5.10 #9) ─────────────────────────────
+  // A crashed renderer used to leave a dead window forever: report it through
+  // the supervisor and reload. Liveness pings arrive via 'renderer:ping'
+  // (preload heartbeat); show/restore re-baseline the staleness clock because
+  // hidden/minimized renderers have their timers throttled.
+  win.webContents.on('render-process-gone', (_event, details) => {
+    supervisor?.handleRendererGone(details)
+  })
+  win.on('show', () => supervisor?.recordRendererPing())
+  win.on('restore', () => supervisor?.recordRendererPing())
+
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
@@ -480,29 +492,14 @@ app.whenReady().then(() => {
     return getCapabilities()
   })
 
-  // Tray-driven wallpaper controls — routed to the native runtime via the
-  // persistent client (PAUSE/PLAY), never direct engine access.
-  ipcMain.handle('wallpaper:pause', () => pauseWallpaper())
-  ipcMain.handle('wallpaper:resume', () => resumeWallpaper())
+  // Renderer liveness heartbeat for the supervisor watchdog (audit 5.10 #9):
+  // preload sends one every 2 s; only a visible-but-stale renderer is treated
+  // as hung (Supervisor._rendererTick).
+  ipcMain.on('renderer:ping', () => supervisor?.recordRendererPing())
 
-  // Launch-at-login toggle (tray menu + future settings UI).
-  ipcMain.handle('settings:get-login-item', () => {
-    try {
-      return { ok: true, enabled: app.getLoginItemSettings().openAtLogin }
-    } catch (err) {
-      return { ok: false, error: err.message }
-    }
-  })
-  ipcMain.handle('settings:set-login-item', (event, { enabled } = {}) => {
-    try {
-      applyLoginItem(enabled)
-      logLine('settings: login item', enabled ? 'enabled' : 'disabled')
-      trayManager?.rebuildMenu?.()
-      return { ok: true, enabled: !!enabled }
-    } catch (err) {
-      return { ok: false, error: err.message }
-    }
-  })
+  // Tray-driven pause/resume and the launch-at-login toggle have no IPC
+  // surface anymore: their only caller was the dead preload API removed in
+  // audit 5.10 #15. The tray drives both via TrayManager callbacks (below).
 
   ipcMain.handle('shell:show-in-folder', (event, { path: filePath } = {}) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath)
@@ -532,7 +529,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle('wallpaper:delete-thumbnail', (event, { path: thumbPath } = {}) => {
     try {
-      if (typeof thumbPath === 'string' && thumbPath.startsWith(thumbDir())) {
+      // Containment with separator + case-insensitive compare (audit 5.10
+      // #14): a bare startsWith let sibling dirs ('...\thumbnails-evil') and
+      // case-variant paths through.
+      if (isPathInside(thumbPath, thumbDir())) {
         fs.rmSync(thumbPath, { force: true })
       }
     } catch {}
@@ -690,7 +690,10 @@ app.whenReady().then(() => {
       runtimeLog: path.join(tempDir, 'REX', 'runtime.log'),
       crashLog: path.join(tempDir, 'REX', 'crash.log'),
       workerwDiagLog: path.join(tempDir, 'REX', 'workerw_diag.log'),
-      appLog: path.join(tempDir, 'REX', 'rex-app.log'),
+      // Unchanged from logLine(): the Electron log lives at the temp root,
+      // not under REX\ — the old path never existed, so reports silently
+      // lacked the app log (audit 5.10 #10).
+      appLog: path.join(tempDir, 'rex-app.log'),
     },
   })
   supervisor.start()

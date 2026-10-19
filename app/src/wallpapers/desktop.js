@@ -1,4 +1,5 @@
 import { notifyError } from './notify'
+import { effectiveCapabilities } from './capabilities'
 
 export const DESKTOP_STYLE_BY_MODE = {
   Cover: 'cover',
@@ -81,7 +82,7 @@ export async function updateDesktopSettings(w) {
   if (!w || !w.filePath || w.filePath.toLowerCase().startsWith('c:\\rex\\')) return
   if (!window.rexDesktop?.updateWallpaper) return
 
-  const caps = DESKTOP_CAPABILITIES[w.type] ?? []
+  const caps = await effectiveCapabilities(DESKTOP_CAPABILITIES[w.type] ?? [], window.rexDesktop)
   const opts = {}
   if (w.type === 'IMAGE') {
     // SET_FILL_MODE speaks the ENGINE vocabulary (fill/fit/stretch/center/

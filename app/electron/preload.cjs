@@ -1,8 +1,6 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('rexDesktop', {
-  platform: process.platform,
-  isDesktop: true,
   getPathForFile: (file) => webUtils.getPathForFile(file),
 
   // Wallpaper apply — driven by the persistent Wallpaper Runtime.
@@ -11,12 +9,6 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   setDesktopVideo: (options) => ipcRenderer.invoke('wallpaper:video', options),
   updateWallpaper: (options) => ipcRenderer.invoke('wallpaper:update', options),
   getCapabilities: () => ipcRenderer.invoke('wallpaper:capabilities'),
-  pauseWallpaper: () => ipcRenderer.invoke('wallpaper:pause'),
-  resumeWallpaper: () => ipcRenderer.invoke('wallpaper:resume'),
-
-  // Launch-at-login toggle (mirrors the tray checkbox).
-  getLoginItem: () => ipcRenderer.invoke('settings:get-login-item'),
-  setLoginItem: (enabled) => ipcRenderer.invoke('settings:set-login-item', { enabled }),
 
   // Runtime events: { event, data } with events READY/LOADED/PLAYING/
   // PAUSED/STOPPED/UNLOADED/ERROR. Returns an unsubscribe function.
@@ -73,3 +65,15 @@ contextBridge.exposeInMainWorld('rexDesktop', {
     return () => ipcRenderer.removeListener('navigate', listener)
   },
 })
+
+// Renderer liveness heartbeat for the supervisor watchdog (audit 5.10 #9):
+// a stale stream while the window is visible means the renderer is hung or
+// dead and the main process reloads it. Hidden/minimized renderers get their
+// timers throttled — the watchdog skips those and re-baselines on show.
+setInterval(() => {
+  try {
+    ipcRenderer.send('renderer:ping')
+  } catch {
+    // renderer is tearing down
+  }
+}, 2000)

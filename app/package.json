@@ -48,6 +48,10 @@
       {
         "from": "../rex-core/.build/Release/swscale-9.dll",
         "to": "bin/swscale-9.dll"
+      },
+      {
+        "from": "../rex-core/.build/Release/rex-minidump.exe",
+        "to": "bin/rex-minidump.exe"
       }
     ],
     "directories": {

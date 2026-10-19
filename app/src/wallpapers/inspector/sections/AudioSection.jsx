@@ -13,8 +13,9 @@ export default function AudioSection({ wallpaper }) {
   return (
     <PropertySection title="Audio" icon={<AudioLines size={15} />}>
       <PropertyToggle label="Enable Audio" checked={audio.enabled} onChange={set('enabled')} />
-      <PropertyToggle label="Mute" checked={audio.mute} onChange={set('mute')} />
-      <PropertySlider label="Volume" value={audio.volume} onChange={set('volume')} min={0} max={100} suffix="%" />
+      {/* Mute/Volume used to be duplicated here on audio.mute/audio.volume —
+          fields no apply path reads. The live pair lives in the Playback
+          section (playback.mute/playback.volume, audit 5.10 #16). */}
       <PropertyDropdown
         label="Output Device"
         value={audio.outputDevice}
