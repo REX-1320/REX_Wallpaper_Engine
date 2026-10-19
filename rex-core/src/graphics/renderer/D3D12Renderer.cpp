@@ -20,6 +20,27 @@ namespace {
     }
 }
 
+D3D12_SHADER_RESOURCE_VIEW_DESC MakeVideoSlotSrvDescriptor(DXGI_FORMAT fmt) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
+    desc.Format = fmt;
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    // The fetched texel is ALWAYS in canonical R,G,B,A order, whatever the
+    // format's byte order is in memory: a B8G8R8A8_UNORM texture sampled with
+    // the default mapping yields (R,G,B,A) in the shader (the same reason
+    // BGRA swap chains sample correctly). The
+    // "FROM_MEMORY_COMPONENT_n" enum therefore indexes the fetched
+    // components (0=red, 1=green, 2=blue, 3=alpha), not the raw bytes.
+    //
+    // The old code treated them as raw bytes and remapped the BGRA pool as
+    // R<-byte2, G<-byte1, B<-byte0 — which swaps red and blue for every
+    // software-decoded wallpaper (skin tones rendered blue, red indicator
+    // lamps rendered blue). The default mapping is correct for every format,
+    // so no per-format swizzle is needed.
+    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    desc.Texture2D.MipLevels = 1;
+    return desc;
+}
+
 // ─── Shader Sources ───────────────────────────────────────────────────────
 
 static const char* g_vertexShaderSource = R"(
@@ -738,21 +759,8 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
             // be valid to satisfy the root signature's 2-descriptor range).
             const UINT base = 1 + idx * 2;
 
-            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-            srvDesc.Format = fmt;
-            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            if (fmt == DXGI_FORMAT_B8G8R8A8_UNORM) {
-                srvDesc.Shader4ComponentMapping =
-                    D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
-                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
-                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
-                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
-                        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3);
-            } else {
-                srvDesc.Shader4ComponentMapping =
-                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            }
-            srvDesc.Texture2D.MipLevels = 1;
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc =
+                MakeVideoSlotSrvDescriptor(fmt);
             D3D12_CPU_DESCRIPTOR_HANDLE cpuSrv = cpu;
             cpuSrv.ptr += base * inc;
             dev->CreateShaderResourceView(m_videoSlots[idx].resource.Get(),

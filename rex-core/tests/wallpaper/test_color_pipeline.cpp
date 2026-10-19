@@ -35,6 +35,7 @@ extern "C" {
 #include <windows.h>
 
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
+#include "graphics/renderer/D3D12Renderer.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -275,4 +276,40 @@ TEST(ColorPipeline, PoolFormatMirrorsDecodeSurfaceNotTransfer) {
     EXPECT_EQ(rex::wallpaper::FfmpegVideoDecoder::PoolTextureFormat(
                   true, false, DXGI_FORMAT_NV12),
               DXGI_FORMAT_NV12);
+}
+
+// ─── Channel order of the video-slot SRV ───────────────────────────────────
+//
+// D3D12 returns the four components of a fetched texel in canonical
+// R,G,B,A order for EVERY format — the format only decides the byte order
+// the pixels sit in memory. The software pool is B8G8R8A8 (swscale writes
+// B,G,R,A bytes), and the renderer used to describe that view with a
+// component mapping that treated the fetched components as raw bytes
+// (R<-byte2, B<-byte0). That swaps red and blue for every
+// software-decoded wallpaper: skin tones rendered as a blue glove, red
+// indicator lamps rendered blue — while the hardware P010 path (which uses
+// no such mapping) stayed correct, which is exactly why only some clips
+// looked wrong.
+//
+// The mapping must be the identity for every pool format.
+TEST(ColorPipeline, VideoSlotSrvKeepsCanonicalComponentOrder) {
+    const DXGI_FORMAT formats[] = {
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R16G16B16A16_UNORM,
+    };
+    for (const DXGI_FORMAT fmt : formats) {
+        const D3D12_SHADER_RESOURCE_VIEW_DESC desc =
+            rex::wallpaper::MakeVideoSlotSrvDescriptor(fmt);
+        EXPECT_EQ(desc.Format, fmt);
+        EXPECT_EQ(desc.ViewDimension, D3D12_SRV_DIMENSION_TEXTURE2D);
+        for (int component = 0; component < 4; ++component) {
+            const auto mapped =
+                D3D12_DECODE_SHADER_4_COMPONENT_MAPPING(component,
+                                                         desc.Shader4ComponentMapping);
+            EXPECT_EQ(mapped, static_cast<D3D12_SHADER_COMPONENT_MAPPING>(component))
+                << "format " << static_cast<int>(fmt) << " component " << component
+                << " must come from the same canonical component";
+        }
+    }
 }

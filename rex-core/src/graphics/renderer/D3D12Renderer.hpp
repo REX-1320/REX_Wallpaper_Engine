@@ -23,6 +23,16 @@
 namespace rex::wallpaper {
 using namespace rex::graphics;
 
+/// SRV descriptor for a decoder pool slot (video texture).
+///
+/// D3D12 returns the four components of a fetched texel in canonical
+/// R,G,B,A order for EVERY format — the format only decides the byte order
+/// the pixels are stored in. The component mapping therefore has to be the
+/// identity even for the BGRA software pool: remapping it as if the
+/// components were raw bytes (R<-byte2, B<-byte0) swaps red and blue for
+/// every software-decoded wallpaper.
+D3D12_SHADER_RESOURCE_VIEW_DESC MakeVideoSlotSrvDescriptor(DXGI_FORMAT fmt);
+
 // ─── D3D12Renderer ─────────────────────────────────────────────────────────
 //
 // Wallpaper-focused D3D12 renderer. Renders a fullscreen textured quad
