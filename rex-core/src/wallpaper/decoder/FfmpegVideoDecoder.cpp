@@ -1152,9 +1152,19 @@ UINT FfmpegVideoDecoder::PickSlotOldestSafe(const int64_t* slotFrameIndex,
 // EVERY frame (exhausting the renderer's slot cache); and the format came
 // from m_hdrContent alone, so RGB bytes landed in a YUV pool.
 DXGI_FORMAT FfmpegVideoDecoder::PoolTextureFormat(bool hardwarePath,
-                                                 bool hdrContent) {
+                                                  bool hdrContent,
+                                                  DXGI_FORMAT surfaceFormat) {
     if (hardwarePath) {
-        // GPU path: the video processor writes YUV surfaces.
+        // The pool must mirror the decoder surface exactly: a format
+        // mismatch in CopySubresourceRegion is dropped silently and the
+        // pool stays uninitialised (the 10-bit SDR "green mess" — Main10/
+        // bt709 decoding to P010 surfaces while the SDR flag chose NV12).
+        if (surfaceFormat == DXGI_FORMAT_NV12 ||
+            surfaceFormat == DXGI_FORMAT_P010) {
+            return surfaceFormat;
+        }
+        // Unhandled surface format: historical flag-based fallback (the HW
+        // copy path logs the surface format and MISMATCH for diagnosis).
         return hdrContent ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
     }
     // Software path: swscale writes packed RGB (BGRA SDR / RGBA64 HDR).
@@ -1307,28 +1317,37 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
     D3D11_TEXTURE2D_DESC desc11 = {};
     tex11->GetDesc(&desc11);
 
-    static bool s_loggedFormat = false;
-    if (!s_loggedFormat) {
-        const char* fmtName = "unknown";
-        switch (desc11.Format) {
-            case DXGI_FORMAT_NV12:       fmtName = "NV12"; break;
-            case DXGI_FORMAT_P010:       fmtName = "P010"; break;
-            case DXGI_FORMAT_YUY2:       fmtName = "YUY2"; break;
-            case DXGI_FORMAT_AYUV:       fmtName = "AYUV"; break;
-            case DXGI_FORMAT_R8G8B8A8_UNORM: fmtName = "BGRA"; break;
-            case DXGI_FORMAT_R16G16B16A16_FLOAT: fmtName = "RGBA16F"; break;
-        }
-        const char* decodePath = m_hdrContent ? "HW_P010" : "HW_NV12";
+    const char* fmtName = "unknown";
+    switch (desc11.Format) {
+        case DXGI_FORMAT_NV12:       fmtName = "NV12"; break;
+        case DXGI_FORMAT_P010:       fmtName = "P010"; break;
+        case DXGI_FORMAT_YUY2:       fmtName = "YUY2"; break;
+        case DXGI_FORMAT_AYUV:       fmtName = "AYUV"; break;
+        case DXGI_FORMAT_R8G8B8A8_UNORM: fmtName = "BGRA"; break;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: fmtName = "RGBA16F"; break;
+    }
+    const DXGI_FORMAT poolFormat =
+        PoolTextureFormat(true /* GPU path */, m_hdrContent, desc11.Format);
+    // Log whenever the surface CHANGES, not once per process: the pool format
+    // mirrors the surface, so a per-clip record is the first thing to read
+    // when frames come out wrong (the old once-per-session static hid every
+    // clip after the first — exactly how the 10-bit SDR bug stayed invisible).
+    if (desc11.Format != m_loggedSurfaceFormat ||
+        desc11.Width != m_loggedSurfaceW ||
+        desc11.Height != m_loggedSurfaceH) {
         REX_LOG_INFO(kModule, "decoder surface: {}x{} fmt={} (0x{:x}) "
-                     "hdr={} decodePath={}",
+                     "hdr={} pool={} copy={}",
                      desc11.Width, desc11.Height, fmtName,
                      static_cast<unsigned>(desc11.Format), m_hdrContent,
-                     decodePath);
-        s_loggedFormat = true;
+                     poolFormat == DXGI_FORMAT_P010 ? "P010" :
+                     (poolFormat == DXGI_FORMAT_NV12 ? "NV12" : "other"),
+                     poolFormat == desc11.Format ? "match" : "MISMATCH");
+        m_loggedSurfaceFormat = desc11.Format;
+        m_loggedSurfaceW = desc11.Width;
+        m_loggedSurfaceH = desc11.Height;
     }
 
-    if (!EnsurePool(desc11.Width, desc11.Height,
-                     PoolTextureFormat(true /* GPU path */, m_hdrContent))) {
+    if (!EnsurePool(desc11.Width, desc11.Height, poolFormat)) {
         return false;
     }
 

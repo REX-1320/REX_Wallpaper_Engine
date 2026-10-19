@@ -34,6 +34,8 @@ extern "C" {
 #endif
 #include <windows.h>
 
+#include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -257,12 +259,20 @@ TEST(ColorPipeline, EveryFileResolvesAConsistentColourDescription) {
     }
 }
 
-TEST(ColorPipeline, PoolFormatMatchesTransferFunction) {
-    // REX pools NV12 for SDR and P010 for HDR (FfmpegVideoDecoder::PoolTexture
-    // Format). P010 is the only correct HDR pool: 10-bit 4:2:0, and NV12 would
-    // truncate PQ/HLG to 8 bits. This asserts the rule the renderer relies on.
-    const bool hdrContentUsesP010 = true;   // by construction of PoolTextureFormat
-    const bool hdrContentNeeds10bit = true; // PQ/HLG are defined on 10-bit signals
-    EXPECT_TRUE(hdrContentNeeds10bit ? hdrContentUsesP010 : true)
-        << "HDR content must land in a 10-bit P010 pool, not 8-bit NV12";
+TEST(ColorPipeline, PoolFormatMirrorsDecodeSurfaceNotTransfer) {
+    // The pool mirrors the DECODER SURFACE that is actually copied into it —
+    // NOT the SDR/HDR flag. A format-mismatched CopySubresourceRegion is
+    // dropped silently and every frame then renders as garbage (the 10-bit
+    // SDR "green mess": P010 surfaces while the SDR flag asked for NV12).
+    // 10-bit SDR therefore keeps its P010 pool; the transfer function only
+    // selects the shader math via the frame's colour info.
+    EXPECT_EQ(rex::wallpaper::FfmpegVideoDecoder::PoolTextureFormat(
+                  true, false, DXGI_FORMAT_P010),
+              DXGI_FORMAT_P010);
+    EXPECT_EQ(rex::wallpaper::FfmpegVideoDecoder::PoolTextureFormat(
+                  true, true, DXGI_FORMAT_P010),
+              DXGI_FORMAT_P010);
+    EXPECT_EQ(rex::wallpaper::FfmpegVideoDecoder::PoolTextureFormat(
+                  true, false, DXGI_FORMAT_NV12),
+              DXGI_FORMAT_NV12);
 }

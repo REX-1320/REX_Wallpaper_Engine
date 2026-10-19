@@ -529,10 +529,18 @@ class FfmpegVideoDecoder {
     bool Flush();
 
     /// Pool texture format for a decode path (P0-3 / R3).
-    /// HW frames are YUV (VP output): P010 for HDR, NV12 for SDR.
+    /// HW frames are YUV decoder surfaces; the pool MUST mirror the actual
+    /// surface format (`surfaceFormat`, i.e. desc11.Format) — a mismatched
+    /// CopySubresourceRegion is dropped silently and every frame renders as
+    /// garbage (the 10-bit SDR "green mess": Main10/bt709 decoding to P010
+    /// surfaces while the SDR flag asked for an NV12 pool). `hdrContent` only
+    /// selects the SDR/HDR shader math downstream, never the pool format.
+    /// Unhandled surface formats fall back to the historical flag choice.
     /// SW frames are RGB (swscale output): 16-bit RGBA for HDR, BGRA for
     /// SDR. Uploading RGB bytes into a YUV pool corrupts every frame.
-    static DXGI_FORMAT PoolTextureFormat(bool hardwarePath, bool hdrContent);
+    static DXGI_FORMAT PoolTextureFormat(
+        bool hardwarePath, bool hdrContent,
+        DXGI_FORMAT surfaceFormat = DXGI_FORMAT_UNKNOWN);
 
     /// Slot-leasing allocator (Phase D): the oldest pool slot whose contents
     /// are at least `margin` frames behind the render thread's consumed
@@ -698,6 +706,11 @@ private:
     // Pool generation key: exact texture format (path + HDR in one).
     // Rebuilt one-time per resolution/format, regardless of HW/SW path.
     DXGI_FORMAT m_poolFormat = DXGI_FORMAT_UNKNOWN;
+    // Last decoder surface format announced in the log (per-change logging,
+    // not once per process) — see ConvertHardwareFrame.
+    DXGI_FORMAT m_loggedSurfaceFormat = DXGI_FORMAT_UNKNOWN;
+    UINT m_loggedSurfaceW = 0;
+    UINT m_loggedSurfaceH = 0;
     bool m_hdrContent = false; // current stream carries PQ/HLG transfer
     UINT64 m_fenceValue = 0;
     UINT64 m_frameIndex = 0;

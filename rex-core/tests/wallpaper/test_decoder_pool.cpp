@@ -103,6 +103,48 @@ TEST(DecoderPoolFormatTest, SoftwareHdrIsRgba16) {
               DXGI_FORMAT_R16G16B16A16_UNORM);
 }
 
+// The pool must mirror the decoder SURFACE, not the SDR/HDR flag: 10-bit
+// content (Main10) decodes to P010 surfaces whether or not its transfer is
+// PQ/HLG, and a P010 surface copied into an NV12 pool is a silent no-op
+// (CopySubresourceRegion drops format mismatches) — every frame then renders
+// as garbage. The flag only selects the shader math via the frame's colour
+// info; the pool ↔ surface contract always holds.
+TEST(DecoderPoolFormatTest, HardwareSdrWithP010SurfaceKeepsP010Pool) {
+    EXPECT_EQ(FfmpegVideoDecoder::PoolTextureFormat(true, false,
+                                                    DXGI_FORMAT_P010),
+              DXGI_FORMAT_P010);
+}
+
+TEST(DecoderPoolFormatTest, HardwareHdrWithNv12SurfaceKeepsNv12Pool) {
+    // Inverse direction: an 8-bit surface must never be copied into P010.
+    EXPECT_EQ(FfmpegVideoDecoder::PoolTextureFormat(true, true,
+                                                    DXGI_FORMAT_NV12),
+              DXGI_FORMAT_NV12);
+}
+
+TEST(DecoderPoolFormatTest, HardwareSdrWithNv12SurfaceStaysNv12) {
+    EXPECT_EQ(FfmpegVideoDecoder::PoolTextureFormat(true, false,
+                                                    DXGI_FORMAT_NV12),
+              DXGI_FORMAT_NV12);
+}
+
+TEST(DecoderPoolFormatTest, HardwareHdrWithP010SurfaceStaysP010) {
+    EXPECT_EQ(FfmpegVideoDecoder::PoolTextureFormat(true, true,
+                                                    DXGI_FORMAT_P010),
+              DXGI_FORMAT_P010);
+}
+
+TEST(DecoderPoolFormatTest, UnhandledSurfaceFallsBackToFlagChoice) {
+    // Surface formats the copy path cannot express keep the historical
+    // flag-based mapping (the copy path logs them).
+    EXPECT_EQ(FfmpegVideoDecoder::PoolTextureFormat(true, false,
+                                                    DXGI_FORMAT_YUY2),
+              DXGI_FORMAT_NV12);
+    EXPECT_EQ(FfmpegVideoDecoder::PoolTextureFormat(true, true,
+                                                    DXGI_FORMAT_YUY2),
+              DXGI_FORMAT_P010);
+}
+
 namespace {
 
 // In-repo SDR fixture (deterministic); override via REX_TEST_VIDEO_SDR.

@@ -163,6 +163,10 @@ float4 main(VSOutput input) : SV_TARGET {
         rgb = (mode.y > 0.5) ? (PqToLinear(saturate(c.rgb)) / norm)
                              : SrgbToLinear(c.rgb);
     } else if (extra.x > 1.5) {
+        // P010 (10-bit) surface. The pool mirrors the decoder surface
+        // regardless of transfer, so the SIGNAL must be read from the colour
+        // constants: PQ/HLG content is BT.2020 HDR; SDR transfer is ordinary
+        // BT.601/709 video and follows the 8-bit path's math below.
         float  yRaw  = texY.Sample(sam, input.uv).r;
         float2 uvRaw = texUV.Sample(sam, input.uv).rg;
         float y10  = yRaw * 1023.68;
@@ -179,16 +183,33 @@ float4 main(VSOutput input) : SV_TARGET {
             cbN = (cb10 - 512.0) / 896.0;
             crN = (cr10 - 512.0) / 896.0;
         }
-        float r = yN + 1.4746 * crN;
-        float g = yN - 0.16455 * cbN - 0.57135 * crN;
-        float b = yN + 1.8814 * cbN;
-        rgb = float3(r, g, b);
-        if (mode.y > 1.5) {
-            rgb = HlgToLinear(saturate(rgb)) / norm;
+        float r, g, b;
+        if (mode.y > 0.5) {
+            // HDR (PQ/HLG): BT.2020 non-constant-luminance matrix.
+            r = yN + 1.4746 * crN;
+            g = yN - 0.16455 * cbN - 0.57135 * crN;
+            b = yN + 1.8814 * cbN;
+            rgb = float3(r, g, b);
+            if (mode.y > 1.5) {
+                rgb = HlgToLinear(saturate(rgb)) / norm;
+            } else {
+                rgb = PqToLinear(saturate(rgb)) / norm;
+            }
+            rgb = max(mul(rgb, BT2020_TO_BT709), 0.0);
         } else {
-            rgb = PqToLinear(saturate(rgb)) / norm;
+            // SDR transfer: the 10-bit version of the 8-bit branch below —
+            // same matrices, same linearisation (e.g. Main10/bt709 content).
+            if (mode.x < 0.5) {
+                r = yN + 1.402 * crN;
+                g = yN - 0.344136 * cbN - 0.714136 * crN;
+                b = yN + 1.772 * cbN;
+            } else {
+                r = yN + 1.5748 * crN;
+                g = yN - 0.1873 * cbN - 0.4681 * crN;
+                b = yN + 1.8556 * cbN;
+            }
+            rgb = SrgbToLinear(saturate(float3(r, g, b)));
         }
-        rgb = max(mul(rgb, BT2020_TO_BT709), 0.0);
     } else if (extra.x > 0.5) {
         // RGB video slot (P0-3: software-decode BGRA/RGBA16 pool): already
         // RGB, skip the YUV matrix. Mirrors the static-RGBA branch above
@@ -244,7 +265,10 @@ float4 main(VSOutput input) : SV_TARGET {
         // be allowed to roll off. Clamping first collapsed every value >= paper
         // white onto one code, blowing out all highlight gradation (397, 594,
         // 806 and 1004 nits all rendered identically).
-        const bool hdrInput = (mode.y > 0.5) || (extra.x > 1.5);
+        // HDR *signal* is a transfer-function property (PQ/HLG) — the pool
+        // format (P010 vs NV12) says nothing about it: 10-bit SDR content
+        // sits in P010 pools too.
+        const bool hdrInput = (mode.y > 0.5);
         rgb = rgb * (adj.x * adj.y);
         rgb = hdrInput ? max(rgb, 0.0) : saturate(rgb);
         float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
@@ -257,7 +281,7 @@ float4 main(VSOutput input) : SV_TARGET {
 
     if (mode.w > 0.5) {
         float3 lin;
-        if (mode.y > 0.5 || extra.x > 1.5) {
+        if (mode.y > 0.5) {
             // HDR input: PQ/HLG decode already yields absolute luminance, which
             // was divided by `norm` (paper white) on the way in, so scale it
             // back and cap at the display peak.
@@ -275,10 +299,10 @@ float4 main(VSOutput input) : SV_TARGET {
             const float sdrWhiteNits = extra.z > 1.0 ? extra.z : 100.0;
             lin = rgb * sdrWhiteNits;
         }
-        return float4(LinearToPq((mode.y > 0.5 || extra.x > 1.5) ? lin : mul(lin, BT709_TO_BT2020)), 1.0);
+        return float4(LinearToPq((mode.y > 0.5) ? lin : mul(lin, BT709_TO_BT2020)), 1.0);
     }
 
-    if (mode.y > 0.5 || extra.x > 1.5) {
+    if (mode.y > 0.5) {
         rgb = AcesFit(rgb);
     }
     return float4(LinearToSrgb(saturate(rgb)), 1.0);

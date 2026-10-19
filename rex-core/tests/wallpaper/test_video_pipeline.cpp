@@ -116,6 +116,73 @@ TEST(VideoPipeline, HardwareDecodeProducesSharedFrames) {
     vm.Shutdown();
 }
 
+// In-repo 10-bit SDR fixture (HEVC Main10, bt709/tv — the "green mess"
+// class); override via REX_TEST_VIDEO_10BIT_SDR.
+std::string FindTenBitSdrTestVideo() {
+    if (const char* env = std::getenv("REX_TEST_VIDEO_10BIT_SDR")) {
+        if (*env && std::filesystem::exists(env)) return env;
+    }
+    const std::string repoFixture =
+        "D:/REX_doc/bench-media/hevc10_sdr_320x240.mp4";
+    if (std::filesystem::exists(repoFixture)) return repoFixture;
+    return std::string();
+}
+
+TEST(VideoPipeline, TenBitSdrDecodePublishesP010PoolTexture) {
+    // 10-bit SDR (Main10/bt709): D3D11VA decodes into P010 surfaces, so the
+    // pool texture the renderer receives must be P010 too. Before the fix the
+    // pool was chosen from the SDR flag (NV12), the surface copy was silently
+    // dropped, and every frame rendered as garbage.
+    const std::string path = FindTenBitSdrTestVideo();
+    if (path.empty()) {
+        GTEST_SKIP() << "no 10-bit SDR test video (set REX_TEST_VIDEO_10BIT_SDR)";
+    }
+
+    rex::graphics::Device d3d12;
+    const auto devResult = d3d12.Initialize();
+    if (devResult.IsError()) {
+        GTEST_SKIP() << "D3D12 device unavailable: " << devResult.Error().message;
+    }
+
+    WallpaperConfig config;
+    config.enableHardwareAcceleration = true;
+
+    VideoManager vm;
+    const auto initResult = vm.Initialize(config, d3d12.Get());
+    if (initResult.IsError()) {
+        GTEST_SKIP() << "VideoManager init unavailable: " << initResult.Error().message;
+    }
+
+    const auto openResult = vm.OpenVideo(path);
+    ASSERT_TRUE(openResult.IsSuccess()) << openResult.Error().message;
+
+    vm.Play();
+
+    // Consume frames until a valid one arrives (10 s timeout).
+    const VideoFrame* frame = nullptr;
+    for (int i = 0; i < 600; ++i) {
+        frame = vm.Tick(0.0);
+        if (frame && frame->valid) break;
+        Sleep(16);
+    }
+    ASSERT_NE(frame, nullptr) << "no frame published within timeout";
+    ASSERT_NE(frame->sharedHandle, static_cast<HANDLE>(nullptr));
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> opened;
+    const HRESULT hr = d3d12.Get()->OpenSharedHandle(
+        frame->sharedHandle, IID_PPV_ARGS(&opened));
+    ASSERT_TRUE(SUCCEEDED(hr)) << "OpenSharedHandle failed (0x" << std::hex << hr
+                               << std::dec << ")";
+
+    // The discriminator: the consumer-visible pool texture must be the P010
+    // the decoder actually wrote into — never a flag-chosen NV12.
+    EXPECT_EQ(opened->GetDesc().Format, DXGI_FORMAT_P010);
+
+    vm.Stop();
+    vm.Close();
+    vm.Shutdown();
+}
+
 // In-repo long fixture (60 s — no loop wrap interferes with the Stop
 // measurement); override via REX_TEST_VIDEO_LONG.
 std::string FindLongTestVideo() {
