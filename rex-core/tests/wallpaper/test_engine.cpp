@@ -753,7 +753,16 @@ TEST(SpeedClockTest, PositionAdvancesAtPlaybackRate) {
     }
     auto engine = CreateWallpaperEngine();
     ASSERT_NE(engine, nullptr);
-    ASSERT_TRUE(engine->Initialize(WallpaperConfig{}).IsSuccess());
+    // The ambient fullscreen detector must not pause the wallpaper
+    // mid-measurement: observed once during a full-suite run — an external
+    // fullscreen edge auto-paused playback right after Play(), freezing the
+    // position at the first Update() publish (~0.78 ms) for the whole
+    // sleep. Rate scaling is what this test measures; the pause
+    // arbitration has its own coverage (PlaybackArbitrationTest /
+    // FullscreenDetectionTest).
+    WallpaperConfig config;
+    config.pauseOnFullscreen = false;
+    ASSERT_TRUE(engine->Initialize(config).IsSuccess());
 
     SceneInfo scene;
     scene.id = "speed_clock";
@@ -764,11 +773,18 @@ TEST(SpeedClockTest, PositionAdvancesAtPlaybackRate) {
     ASSERT_TRUE(engine->Play().IsSuccess());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    const EngineState state = engine->GetState();
     const double pos = engine->GetPosition();
     // 2x rate: ~2.0 after 1 s (wide margins for CI scheduling jitter;
     // unscaled 1x would read ~1.0).
-    EXPECT_GT(pos, 1.2);
-    EXPECT_LT(pos, 2.8);
+    // Suspend sources (session lock / display off / power saving) cannot be
+    // configured off: name them in the failure instead of letting a frozen
+    // clock masquerade as a broken rate.
+    EXPECT_EQ(state, EngineState::Running)
+        << "playback left Running — a suspend source auto-paused the "
+           "wallpaper; the frozen clock invalidates the rate measurement";
+    EXPECT_GT(pos, 1.2) << "state=" << static_cast<int>(state);
+    EXPECT_LT(pos, 2.8) << "state=" << static_cast<int>(state);
 
     EXPECT_TRUE(engine->Stop().IsSuccess());
     EXPECT_TRUE(engine->UnloadScene().IsSuccess());
