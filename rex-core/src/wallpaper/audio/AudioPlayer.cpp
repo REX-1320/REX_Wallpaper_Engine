@@ -244,7 +244,8 @@ shared::Result<void> AudioPlayer::Open(std::string_view path) {
 
     m_open.store(true, std::memory_order_release);
 REX_LOG_INFO(kModule, "opened audio stream {} ({} Hz, {} ch -> {} ch device)",
-                 streamIndex, m_sampleRate, m_srcChannels, m_channels);
+                 streamIndex, m_sampleRate.load(), m_srcChannels,
+                 m_channels.load());
     return shared::Result<void>();
 }
 
@@ -434,7 +435,9 @@ bool AudioPlayer::OpenEndpoint() {
         m_modeFallback.store(requestedChannels != 0 && !exact,
                             std::memory_order_release);
 
-        const int rate = m_sampleRate > 0 ? m_sampleRate : 48000;
+        const int rate = m_sampleRate.load(std::memory_order_relaxed) > 0
+                             ? m_sampleRate.load(std::memory_order_relaxed)
+                             : 48000;
         // Try the negotiated layout, stepping down the ladder if Initialize
         // refuses it. Mono/stereo are the last resort and always succeed in
         // practice, so the loop always terminates with a usable layout.
@@ -481,7 +484,7 @@ bool AudioPlayer::OpenEndpoint() {
     }
     if (SUCCEEDED(hr)) {
 REX_LOG_INFO(kModule, "WASAPI render endpoint ready ({} frames/buffer, {} ch)",
-                 m_bufferFrames, m_channels);
+                 m_bufferFrames, m_channels.load());
         return true;
     }
     REX_LOG_WARN(kModule, "WASAPI unavailable (0x{:08X}); audio disabled", hr);
@@ -579,7 +582,8 @@ void AudioPlayer::ThreadLoop() {
                              (rendered - prev) / dt,
                              m_underruns.load(std::memory_order_relaxed),
                              static_cast<double>(peak) / 32768.0,
-                             m_srcChannels, m_channels, m_sampleRate,
+                             m_srcChannels, m_channels.load(),
+                             m_sampleRate.load(),
                              m_muted.load(std::memory_order_relaxed) ? 1 : 0);
                 decodedAtLastStats = decoded;
             }
@@ -807,8 +811,16 @@ void AudioPlayer::DoSeek(double seconds) {
     if (!m_fmtCtx) return;
     const AVRational tb = m_fmtCtx->streams[m_streamIndex]->time_base;
     const int64_t ts = static_cast<int64_t>(seconds / av_q2d(tb));
-    avformat_seek_file(m_fmtCtx, m_streamIndex, INT64_MIN, ts, ts,
-                       AVSEEK_FLAG_BACKWARD);
+    if (avformat_seek_file(m_fmtCtx, m_streamIndex, INT64_MIN, ts, ts,
+                           AVSEEK_FLAG_BACKWARD) < 0) {
+        // The demuxer kept its old position; flushing and re-baselining the
+        // ring here would make a failed seek indistinguishable from a
+        // successful one (audio continues from the old spot while the video
+        // playhead jumped — audit 5.3 #10). Keep everything as-is.
+        REX_LOG_WARN(kModule, "seek to {:.3f}s failed; keeping current position",
+                     seconds);
+        return;
+    }
     avcodec_flush_buffers(m_decCtx);
     m_eof = false;
     std::lock_guard lock(m_ringMutex);
@@ -902,9 +914,10 @@ int AudioPlayer::PushFrameToRing(AVFrame* frame) {
     // change) are downmixed by dropping the extras — the old
     // max(frameCh, m_channels) stride wrote past the allocation (heap
     // overflow) and corrupted the layout RenderStep reads with m_channels.
+    const int devChannels = m_channels.load(std::memory_order_relaxed);
     const int srcChannels = frame->ch_layout.nb_channels > 0
-                                ? frame->ch_layout.nb_channels : m_channels;
-    const int channels = m_channels > 0 ? m_channels : srcChannels;
+                                ? frame->ch_layout.nb_channels : devChannels;
+    const int channels = devChannels > 0 ? devChannels : srcChannels;
     if (frames <= 0 || channels <= 0 || srcChannels <= 0) {
         return 0;
     }

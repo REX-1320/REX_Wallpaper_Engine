@@ -70,6 +70,21 @@ inline CaptureSampleFormat ClassifyCaptureFormat(const WAVEFORMATEX* wf) {
     }
 }
 
+/// True when a capture HRESULT means the bound device is gone and the client
+/// must be torn down and re-opened (default-device switch/unplug/service
+/// restart). Any other failure is transient and must not churn the client.
+inline bool CaptureNeedsReopen(HRESULT hr) {
+    return hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+           hr == AUDCLNT_E_SERVICE_NOT_RUNNING;
+}
+
+/// True when a captured packet carries no usable samples: a null buffer or
+/// the AUDCLNT_BUFFERFLAGS_SILENT flag. The consumer contributes zeros for
+/// the packet's frame count instead of reading the buffer (audit AU8).
+inline bool CaptureFrameIsSilent(const BYTE* data, DWORD flags) {
+    return data == nullptr || (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+}
+
 // Captures loopback audio via WASAPI and computes an FFT spectrum.
 // Thread-safe; the render thread reads the latest spectrum.
 class AudioCapture {
@@ -96,6 +111,14 @@ private:
     void ProcessAudio(const BYTE* data, UINT32 frames);
     void ComputeFFT();
 
+    /// Creates enumerator/device/client/capture-client and the mix format on
+    /// the CALLING thread (COM must already be initialized there). Resets any
+    /// previous generation first, so it doubles as the re-open path.
+    bool OpenClient();
+    /// Capture-thread device-change recovery: stop + OpenClient + Start.
+    /// False leaves the client torn down for the next retry.
+    bool ReopenDevice();
+
     std::atomic<bool> m_running{false};
     std::thread m_thread;
 
@@ -105,6 +128,11 @@ private:
     Microsoft::WRL::ComPtr<IAudioClient> m_audioClient;
     Microsoft::WRL::ComPtr<IAudioCaptureClient> m_captureClient;
     WAVEFORMATEX* m_waveFormat = nullptr;
+    // True when Start()'s CoInitializeEx actually added an apartment ref on
+    // the calling thread (S_OK/S_FALSE). RPC_E_CHANGED_MODE means the thread
+    // already had COM in another mode and no ref was added — calling
+    // CoUninitialize then would underflow the counter (audit AU5).
+    bool m_comInitialized = false;
 
     // Audio buffer
     static constexpr int kFFTSize = 2048;

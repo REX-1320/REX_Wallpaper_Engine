@@ -487,6 +487,29 @@ TEST(AudioCaptureFormatTest, UnknownSubformatIsUnsupportedNotS16) {
               CaptureSampleFormat::Unsupported);
 }
 
+// ─── Capture recovery / silence seams (audit 2026-10-17 AU7/AU8) ─────────
+
+TEST(AudioCaptureRecoveryTest, InvalidationErrorsNeedReopen) {
+    // The capture thread used to Sleep(10)/continue forever on any
+    // GetNextPacketSize failure, so a default-device switch froze the
+    // spectrum silently. Device invalidation must route to a re-open.
+    EXPECT_TRUE(CaptureNeedsReopen(AUDCLNT_E_DEVICE_INVALIDATED));
+    EXPECT_TRUE(CaptureNeedsReopen(AUDCLNT_E_SERVICE_NOT_RUNNING));
+}
+
+TEST(AudioCaptureRecoveryTest, OrdinaryErrorsDoNotReopen) {
+    EXPECT_FALSE(CaptureNeedsReopen(S_OK));
+    EXPECT_FALSE(CaptureNeedsReopen(E_FAIL));
+    EXPECT_FALSE(CaptureNeedsReopen(AUDCLNT_E_NOT_INITIALIZED));
+}
+
+TEST(AudioCaptureSilenceTest, SilentFlagAndNullBufferAreSilence) {
+    BYTE sample = 0;
+    EXPECT_TRUE(CaptureFrameIsSilent(nullptr, 0));
+    EXPECT_TRUE(CaptureFrameIsSilent(&sample, AUDCLNT_BUFFERFLAGS_SILENT));
+    EXPECT_FALSE(CaptureFrameIsSilent(&sample, 0));
+}
+
 // ─── Downmix matrix ──────────────────────────────────────────────────────
 
 TEST(AudioDownmixTest, MatrixMatchesDolbyCoefficients) {

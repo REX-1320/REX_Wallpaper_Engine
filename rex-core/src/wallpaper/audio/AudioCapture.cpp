@@ -16,6 +16,67 @@ AudioCapture::~AudioCapture() {
     Stop();
 }
 
+bool AudioCapture::OpenClient() {
+    // Requires COM on the calling thread. Resets any previous generation so
+    // this doubles as the device-change re-open path.
+    m_captureClient.Reset();
+    m_audioClient.Reset();
+    m_device.Reset();
+    m_enumerator.Reset();
+    if (m_waveFormat) {
+        CoTaskMemFree(m_waveFormat);
+        m_waveFormat = nullptr;
+    }
+
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+        CLSCTX_ALL, IID_PPV_ARGS(&m_enumerator));
+    if (FAILED(hr)) {
+        REX_LOG_ERROR(kModule, "MMDeviceEnumerator creation failed (0x{:08x})", hr);
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<IMMDevice> audioDevice;
+    hr = m_enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &audioDevice);
+    if (FAILED(hr)) {
+        REX_LOG_ERROR(kModule, "GetDefaultAudioEndpoint failed (0x{:08x})", hr);
+        return false;
+    }
+
+    hr = audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+        reinterpret_cast<void**>(m_audioClient.GetAddressOf()));
+    if (FAILED(hr)) {
+        REX_LOG_ERROR(kModule, "AudioClient activation failed (0x{:08x})", hr);
+        return false;
+    }
+
+    hr = m_audioClient->GetMixFormat(&m_waveFormat);
+    if (FAILED(hr)) {
+        REX_LOG_ERROR(kModule, "GetMixFormat failed (0x{:08x})", hr);
+        return false;
+    }
+
+    REFERENCE_TIME hnsPeriod;
+    hr = m_audioClient->GetDevicePeriod(nullptr, &hnsPeriod);
+    if (FAILED(hr)) {
+        REX_LOG_ERROR(kModule, "GetDevicePeriod failed (0x{:08x})", hr);
+        return false;
+    }
+
+    hr = m_audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, hnsPeriod, 0, m_waveFormat, nullptr);
+    if (FAILED(hr)) {
+        REX_LOG_ERROR(kModule, "AudioClient::Initialize failed (0x{:08x})", hr);
+        return false;
+    }
+
+    hr = m_audioClient->GetService(IID_PPV_ARGS(&m_captureClient));
+    if (FAILED(hr)) {
+        REX_LOG_ERROR(kModule, "GetService(IAudioCaptureClient) failed (0x{:08x})", hr);
+        return false;
+    }
+    return true;
+}
+
 bool AudioCapture::Start() {
     if (m_running.load()) return true;
 
@@ -47,52 +108,7 @@ bool AudioCapture::Start() {
     }
     coInitialized = SUCCEEDED(hr);
 
-    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
-        CLSCTX_ALL, IID_PPV_ARGS(&m_enumerator));
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "MMDeviceEnumerator creation failed (0x{:08x})", hr);
-        return fail();
-    }
-
-    Microsoft::WRL::ComPtr<IMMDevice> audioDevice;
-    hr = m_enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &audioDevice);
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "GetDefaultAudioEndpoint failed (0x{:08x})", hr);
-        return fail();
-    }
-
-    hr = audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-        reinterpret_cast<void**>(m_audioClient.GetAddressOf()));
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "AudioClient activation failed (0x{:08x})", hr);
-        return fail();
-    }
-
-    hr = m_audioClient->GetMixFormat(&m_waveFormat);
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "GetMixFormat failed (0x{:08x})", hr);
-        return fail();
-    }
-
-    REFERENCE_TIME hnsPeriod;
-    hr = m_audioClient->GetDevicePeriod(nullptr, &hnsPeriod);
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "GetDevicePeriod failed (0x{:08x})", hr);
-        return fail();
-    }
-
-    hr = m_audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK, hnsPeriod, 0, m_waveFormat, nullptr);
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "AudioClient::Initialize failed (0x{:08x})", hr);
-        return fail();
-    }
-
-    hr = m_audioClient->GetService(IID_PPV_ARGS(&m_captureClient));
-    if (FAILED(hr)) {
-        REX_LOG_ERROR(kModule, "GetService(IAudioCaptureClient) failed (0x{:08x})", hr);
-        return fail();
-    }
+    if (!OpenClient()) return fail();
 
     m_waveform.clear();
     m_waveform.reserve(kFFTSize * 2);
@@ -103,6 +119,9 @@ bool AudioCapture::Start() {
         return fail();
     }
 
+    // Only NOW does the caller thread own an apartment ref that Stop() must
+    // release. RPC_E_CHANGED_MODE above means no ref was added.
+    m_comInitialized = coInitialized;
     m_running.store(true, std::memory_order_release);
     m_thread = std::thread(&AudioCapture::CaptureThread, this);
 
@@ -121,7 +140,12 @@ void AudioCapture::Stop() {
     m_device.Reset();
     m_enumerator.Reset();
     if (m_waveFormat) { CoTaskMemFree(m_waveFormat); m_waveFormat = nullptr; }
-    CoUninitialize();
+    // Paired with Start()'s CoInitializeEx: only release when that call
+    // actually added a ref (RPC_E_CHANGED_MODE added none — audit AU5).
+    if (m_comInitialized) {
+        CoUninitialize();
+        m_comInitialized = false;
+    }
     REX_LOG_INFO(kModule, "loopback audio capture stopped");
 }
 
@@ -133,7 +157,28 @@ bool AudioCapture::GetSpectrum(std::array<float, 32>& out) {
     return true;
 }
 
+bool AudioCapture::ReopenDevice() {
+    // Capture-thread only. Stop() joins this thread before touching any of
+    // these members, so the unsynchronized mutation cannot race the caller.
+    if (m_audioClient) m_audioClient->Stop();  // best-effort: device is gone
+    if (!OpenClient()) return false;
+    if (FAILED(m_audioClient->Start())) {
+        REX_LOG_WARN(kModule, "re-opened capture client failed to start");
+        return false;
+    }
+    REX_LOG_INFO(kModule, "loopback capture re-opened ({}ch, {}Hz)",
+                 m_waveFormat->nChannels, m_waveFormat->nSamplesPerSec);
+    return true;
+}
+
 void AudioCapture::CaptureThread() {
+    // WASAPI/COM: the clients below are created on the caller thread, but ALL
+    // calls happen here, so this thread owns its own apartment. MTA because
+    // nothing on this thread pumps messages (audit AU6). SUCCEEDED covers
+    // S_FALSE ("already initialized") — still an owned ref to release.
+    const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool coOk = SUCCEEDED(coHr);
+
     // P2-16 drive-by: the NULL task index was an AVRT contract violation
     // (it writes the index through the pointer) — both observed audio-scene
     // crashes died inside AVRT.dll. Revert on thread exit.
@@ -142,8 +187,20 @@ void AudioCapture::CaptureThread() {
 
     while (m_running.load(std::memory_order_acquire)) {
         UINT32 packet = 0;
-        if (FAILED(m_captureClient->GetNextPacketSize(&packet))) {
-            Sleep(10);
+        HRESULT pktHr = m_captureClient
+                            ? m_captureClient->GetNextPacketSize(&packet)
+                            : E_FAIL;
+        if (FAILED(pktHr)) {
+            // A default-device switch/unplug invalidates the bound client;
+            // the old code Sleep(10)'d forever and the spectrum froze
+            // silently (audit AU7). Other failures are transient.
+            if (CaptureNeedsReopen(pktHr)) {
+                REX_LOG_WARN(kModule, "capture device lost (0x{:08x}); re-opening",
+                             static_cast<unsigned>(pktHr));
+                if (!ReopenDevice()) Sleep(1000);  // retry on the next pass
+            } else {
+                Sleep(10);
+            }
             continue;
         }
         if (packet == 0) { Sleep(1); continue; }
@@ -152,14 +209,27 @@ void AudioCapture::CaptureThread() {
         UINT32 frames = 0;
         DWORD flags = 0;
         HRESULT hr = m_captureClient->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
-        if (FAILED(hr)) continue;
+        if (FAILED(hr)) {
+            if (CaptureNeedsReopen(hr)) {
+                REX_LOG_WARN(kModule, "capture buffer device loss (0x{:08x}); re-opening",
+                             static_cast<unsigned>(hr));
+                if (!ReopenDevice()) Sleep(1000);
+            }
+            continue;
+        }
 
-        ProcessAudio(data, frames);
+        // SILENT packets and null buffers are silence — feed zeros so the
+        // waveform keeps advancing and the spectrum decays instead of
+        // freezing at the last loud frame (audit AU8).
+        ProcessAudio(CaptureFrameIsSilent(data, flags) ? nullptr : data, frames);
         m_captureClient->ReleaseBuffer(frames);
     }
 
     if (mmcss) {
         AvRevertMmThreadCharacteristics(mmcss);
+    }
+    if (coOk) {
+        CoUninitialize();
     }
 }
 

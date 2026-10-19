@@ -96,7 +96,7 @@ public:
     shared::Result<void> Open(std::string_view path);
     void Close();
     bool IsOpen() const { return m_open.load(std::memory_order_acquire); }
-    bool HasAudio() const { return m_hasAudio; }
+    bool HasAudio() const { return m_hasAudio.load(std::memory_order_acquire); }
 
     void Play();
     void Pause();
@@ -178,7 +178,7 @@ public:
         return m_modeFallback.load(std::memory_order_acquire);
     }
     /// Negotiated device channel count (matches the ring layout).
-    int GetDeviceChannels() const { return m_channels; }
+    int GetDeviceChannels() const { return m_channels.load(std::memory_order_acquire); }
 
     // Output telemetry. Audio correctness cannot be judged by ear in a
     // headless test, so the render path reports what it actually pushed to
@@ -200,8 +200,8 @@ public:
     static int NegotiateChannels(AudioOutputMode requested, int sourceChannels,
                                  int endpointMixChannels);
 
-    int  GetSampleRate() const { return m_sampleRate; }
-    int  GetChannels()   const { return m_channels; }
+    int  GetSampleRate() const { return m_sampleRate.load(std::memory_order_acquire); }
+    int  GetChannels()   const { return m_channels.load(std::memory_order_acquire); }
     double GetPosition() const { return m_position.load(std::memory_order_acquire); }
 
 private:
@@ -234,8 +234,11 @@ private:
     int  m_streamIndex           = -1;
     bool m_eof                   = false;
     std::string m_codecName;     // for error logs (e.g. "eac3")
-int  m_sampleRate            = 48000;
-    int  m_channels            = 2;   // DEVICE layout (negotiated)
+    // Read by the public getters from any thread while the internal thread
+    // negotiates the endpoint (Open/OpenEndpoint/Close) — atomics, not plain
+    // ints (audit 5.3 #9).
+    std::atomic<int>  m_sampleRate{48000};
+    std::atomic<int>  m_channels{2};   // DEVICE layout (negotiated)
     int  m_srcChannels         = 2;   // codec layout (6 for AC-3/E-AC-3)
     // Requested vs negotiated layout. Atomic: SetOutputMode may be called
     // from the UI thread while the audio thread negotiates.
@@ -285,7 +288,7 @@ int  m_sampleRate            = 48000;
     std::atomic<int> m_peakWindow{0};
     std::atomic<uint64_t> m_decodedFrames{0};
     std::atomic<uint64_t> m_underruns{0};
-    bool m_hasAudio = false;
+    std::atomic<bool> m_hasAudio{false};
 
     std::thread m_thread;
 };
