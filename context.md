@@ -1,7 +1,7 @@
 # REX — Working Context (agent handoff)
 
 > Created 2026-10-19 from the session compaction dump + live state.
-> Last updated: 2026-10-19 12:07 (+05:30) — model: DeepSeek V4.1 Flash Free (`opencode/deepseek-v4.1-flash-free`).
+> Last updated: 2026-10-19 12:18 (+05:30) — model: DeepSeek V4.1 Flash Free (`opencode/deepseek-v4.1-flash-free`).
 > **Living document: update the "Current state" and "Remaining" sections after every finished work unit.**
 > Companion docs: `TODO.md` (remaining + bug backlog), `everything.md` (done inventory), `docs/bugs/AUDIT-2026-10-17-quality-audit.md` (source findings).
 
@@ -41,13 +41,13 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 - Unit 10: `534b906` + `dfeea93` — decoder pool atomic build (§5.2 #2), renderer slot-cache eviction (§5.2 #3/F1), SW slot lease (§5.2 #4/§5.4 #3), partial-QI leak (§5.2 #6), `PickSlotOldestSafe` public (#15 tie-in). New test `SoftwareDecodePoolTest.SoftwarePathLeasesPoolSlots` RED→GREEN. 778/778. Runtime relinked 2026-10-19 11:10:30.
 - Unit 11: telemetry sleep slicing (§5.5 #1), `TryGetTelemetry` try-lock for watchdog + sampler (§5.5 #2), oversized-prefix teardown vs zero-length continue (§5.5 #3). New tests `FrameLengthTest.*` (Empty/Oversized) + `EngineTelemetryTest.TryGetTelemetrySucceedsWhenUncontended`; live protocol smoke (zero→continue→SHUTDOWN; oversized→close in 41 ms). 779/779. Runtime relinked 2026-10-19 11:38:37.
 - Unit 12: `AudioCapture` COM ref tracked (`m_comInitialized`, §5.3 #4/#5) + MTA apartment on capture thread (#6) + `OpenClient()`/`ReopenDevice()` device-change recovery (#7) + SILENT/null → zeros (#8); `AudioPlayer` getters atomics (#9), `DoSeek` failure keeps state (#10). New tests `AudioCaptureRecoveryTest.*` + `AudioCaptureSilenceTest.*` (compile-RED → green). 782/782. Runtime relinked 2026-10-19 12:05:32.
+- Unit 13 (app): quit fallback 3→5 s + cleared on exit (§5.10 #4), INIT failure drops the wedged process (#6), heartbeat capability-probed + armed with miss limit 3 (#7), live updates merged into `lastApplied` + debounced persist via pure `startup.mergeLiveUpdate` (#5), login item first-run-only (#8). Evidence: node checks 11/11, live `verify-supervisor.cjs` incl. new arming assertion, lint/tsc clean. No native change; suite stays 782/782.
 
 ### Remaining (this session's mandate — in order)
 
-1. **APP3–8 (§5.10 #3–#8)** — Electron: live fill-mode mapping ('cover'/'stretched'); audio mode on Live updates; live updates persisted to `lastApplied`; INIT-timeout wedge; hang detection `missLimit: Infinity`; launch-at-login override.
-2. **G3–9 (§5.8 #3–#9)** — compositor: per-frame fence + device-removed; barrier StateBefore tracking; bounded fence waits; SRV slot leak on layer replace; ImportLayerTexture format/width from `GetDesc()`; shared-handle fence/ownership; back-buffer state tracking.
-3. **P3 residuals (§5.1 #10/#11/#12/#13/#15 + §5.6 + §5.4 remaining P3s + §5.3 #11/#13/#14/#15)** — engine: WideCharToMultiByte guard, DXGI factory per monitor, dead state, docs, dup helper; renderer residuals; audio render-callback scratch/ReleaseBuffer/propvariant/CoInit P3s.
-4. **Batch-4 hygiene (§6)** — orphaned `wallpaper/renderer/` archive (git mv, not delete), dead modules, unbuilt tests, root clutter; tooling only where it does not touch `CMakeLists.txt` (hard rule).
+1. **G3–9 (§5.8 #3–#9)** — compositor: per-frame fence + device-removed; barrier StateBefore tracking; bounded fence waits; SRV slot leak on layer replace; ImportLayerTexture format/width from `GetDesc()`; shared-handle fence/ownership; back-buffer state tracking.
+2. **P3 residuals (§5.1 #10/#11/#12/#13/#15 + §5.6 + §5.4 remaining P3s + §5.3 #11/#13/#14/#15 + §5.10 #9–#16)** — engine: WideCharToMultiByte guard, DXGI factory per monitor, dead state, docs, dup helper; renderer residuals; audio render-callback scratch/ReleaseBuffer/propvariant/CoInit P3s; app dead code/log-path/pid/minidump/delete-thumbnail/preload/UI no-ops.
+3. **Batch-4 hygiene (§6)** — orphaned `wallpaper/renderer/` archive (git mv, not delete), dead modules, unbuilt tests, root clutter; tooling only where it does not touch `CMakeLists.txt` (hard rule).
 
 ### After the batches (user-sequenced, do NOT start early)
 
@@ -75,5 +75,5 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 
 ## Current state
 
-**Working on:** APP3–8 (Electron). Unit 12 closed 2026-10-19 12:05; suite 782/782; runtime relinked 2026-10-19 12:05:32; code commit `cdd0635`.
-**Handoff updated:** 2026-10-19 12:07 (+05:30) by DeepSeek V4.1 Flash Free.
+**Working on:** G3–9 (compositor graphics). Unit 13 closed 2026-10-19 12:18; suite 782/782 (native unchanged); no relink (app-only); code commit `fdb29e2`.
+**Handoff updated:** 2026-10-19 12:18 (+05:30) by DeepSeek V4.1 Flash Free.
