@@ -55,6 +55,15 @@ bool Compositor::Initialize(HWND targetWindow) {
 }
 
 void Compositor::Shutdown() {
+    // Drain in-flight GPU work before releasing anything (audit 5.8 #3):
+    // the allocator/list and render targets cannot be released while the
+    // GPU may still be executing recorded commands. Bounded — a dead GPU
+    // must not hang teardown, and if it is gone the release is moot anyway.
+    if (m_commandQueue && m_frameFence && m_frameFenceVal > 0 && !m_deviceLost) {
+        WaitForGpuFence(m_frameFence.Get(), m_frameFenceVal, m_frameFenceEvent,
+                        "shutdown drain");
+    }
+
     m_initialized = false;
     m_textures.clear();
     m_layers.clear();
@@ -80,6 +89,15 @@ void Compositor::Shutdown() {
         m_videoCopyFenceEvent = nullptr;
     }
     m_videoUploadSize = 0;
+
+    m_frameFence.Reset();
+    if (m_frameFenceEvent) {
+        CloseHandle(m_frameFenceEvent);
+        m_frameFenceEvent = nullptr;
+    }
+    m_frameFenceVal = 0;
+    m_deviceLost = false;
+    m_backBufferStates.Reset();
 }
 
 bool Compositor::CreateDevice() {
@@ -165,7 +183,139 @@ bool Compositor::CreateDevice() {
     m_rtvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
+    // Main-queue frame fence (audit 5.8 #3): RenderFrame waits it before
+    // reusing the allocator, Shutdown drains it before releasing objects.
+    hr = m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                               IID_PPV_ARGS(&m_frameFence));
+    if (FAILED(hr) || !m_frameFence) {
+        printf("[REX] Compositor: frame fence creation failed: 0x%08lx\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
+    if (!m_frameFenceEvent) {
+        m_frameFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (!m_frameFenceEvent) {
+            printf("[REX] Compositor: frame fence event creation failed\n");
+            return false;
+        }
+    }
+
     return true;
+}
+
+// ── Failure-path helpers (audit 5.8 #3/#5/#9) ───────────────────────────────
+
+bool Compositor::IsDeviceLostHr(HRESULT hr) {
+    return hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
+           hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+}
+
+Compositor::PresentOutcome Compositor::ClassifyPresent(HRESULT hr) {
+    // DXGI_STATUS_OCCLUDED is a success code that nevertheless means the
+    // frame was not displayed — distinct from a normal present.
+    if (hr == DXGI_STATUS_OCCLUDED) return PresentOutcome::Occluded;
+    if (SUCCEEDED(hr)) return PresentOutcome::Ok;
+    if (IsDeviceLostHr(hr)) return PresentOutcome::DeviceLost;
+    return PresentOutcome::Failed;
+}
+
+Compositor::GpuWaitOutcome Compositor::ClassifyGpuWait(
+    unsigned long waitResult, HRESULT deviceRemovedReason) {
+    if (waitResult == WAIT_OBJECT_0) return GpuWaitOutcome::Completed;
+    // A wait that did not complete while the device is gone is device loss,
+    // not a plain timeout — the caller can latch and stop rendering.
+    if (IsDeviceLostHr(deviceRemovedReason)) return GpuWaitOutcome::DeviceLost;
+    if (waitResult == WAIT_TIMEOUT) return GpuWaitOutcome::TimedOut;
+    return GpuWaitOutcome::WaitFailed;
+}
+
+DXGI_FORMAT Compositor::SrvFormatForResourceFormat(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:    return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:    return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8X8_TYPELESS:    return DXGI_FORMAT_B8G8R8X8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case DXGI_FORMAT_R32G32B32A32_TYPELESS: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        default: return format;
+    }
+}
+
+bool Compositor::TakeSrvSlot(std::vector<uint32_t>& freeSlots, uint32_t& nextSlot,
+                             uint32_t maxSlots, uint32_t& outSlot) {
+    if (!freeSlots.empty()) {
+        outSlot = freeSlots.back();
+        freeSlots.pop_back();
+        return true;
+    }
+    if (nextSlot < maxSlots) {
+        outSlot = nextSlot++;
+        return true;
+    }
+    return false;
+}
+
+void Compositor::ReturnSrvSlot(std::vector<uint32_t>& freeSlots, int slot) {
+    if (slot < 0) return;
+    const uint32_t s = static_cast<uint32_t>(slot);
+    // Guard against double returns: a slot handed out twice would alias two
+    // textures onto one descriptor.
+    if (std::find(freeSlots.begin(), freeSlots.end(), s) != freeSlots.end()) return;
+    freeSlots.push_back(s);
+}
+
+void Compositor::MarkDeviceLost(const char* what) {
+    if (m_deviceLost) return;
+    m_deviceLost = true;
+    const HRESULT reason = m_device ? m_device->GetDeviceRemovedReason() : E_FAIL;
+    printf("[REX] Compositor: rendering halted (%s); device removed reason 0x%08lx\n",
+           what, static_cast<unsigned long>(reason));
+}
+
+bool Compositor::WaitForGpuFence(ID3D12Fence* fence, UINT64 value,
+                                 HANDLE eventHandle, const char* what) {
+    if (!fence) return true;
+    if (fence->GetCompletedValue() >= value) return true;
+    if (!eventHandle) {
+        printf("[REX] Compositor: %s: no fence event available\n", what);
+        return false;
+    }
+
+    const HRESULT hr = fence->SetEventOnCompletion(value, eventHandle);
+    if (FAILED(hr)) {
+        printf("[REX] Compositor: %s: SetEventOnCompletion failed: 0x%08lx\n",
+               what, static_cast<unsigned long>(hr));
+        if (IsDeviceLostHr(hr)) MarkDeviceLost(what);
+        return false;
+    }
+
+    const DWORD result = WaitForSingleObject(eventHandle, GPU_WAIT_TIMEOUT_MS);
+    const HRESULT reason = m_device ? m_device->GetDeviceRemovedReason() : S_OK;
+    switch (ClassifyGpuWait(result, reason)) {
+        case GpuWaitOutcome::Completed:
+            return true;
+        case GpuWaitOutcome::DeviceLost:
+            MarkDeviceLost(what);
+            return false;
+        case GpuWaitOutcome::TimedOut:
+            // Bounded, not latched: a stalled queue may still recover; the
+            // caller skips this frame instead of resetting a live allocator.
+            printf("[REX] Compositor: %s: GPU wait timed out after %lu ms "
+                   "(skipping this frame)\n", what, GPU_WAIT_TIMEOUT_MS);
+            return false;
+        case GpuWaitOutcome::WaitFailed:
+            printf("[REX] Compositor: %s: WaitForSingleObject failed (0x%08lx)\n",
+                   what, static_cast<unsigned long>(result));
+            return false;
+    }
+    return false;
+}
+
+void Compositor::RecycleTextureSlot(uint64_t layerId) {
+    auto it = m_textures.find(layerId);
+    if (it != m_textures.end()) {
+        ReturnSrvSlot(m_freeSrvSlots, it->second.srvSlot);
+    }
 }
 
 bool Compositor::CreateSrvHeap() {
@@ -439,18 +589,27 @@ bool Compositor::CreateSwapChain(HWND targetWindow) {
         m_device->CreateRenderTargetView(m_renderTargets[i].Get(), nullptr, rtvHandle);
     }
 
+    // Fresh swap-chain buffers begin in PRESENT.
+    m_backBufferStates.Reset();
+
     return true;
 }
 
 void Compositor::PopulateCommandList() {
-    // Transition back buffer from PRESENT → RENDER_TARGET
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    m_commandList->ResourceBarrier(1, &barrier);
+    // Transition the back buffer from its TRACKED state → RENDER_TARGET
+    // (audit 5.8 #9): hardcoding PRESENT as StateBefore was wrong for a
+    // buffer whose previous frame/Present did not complete normally.
+    const D3D12_RESOURCE_STATES before = m_backBufferStates.Before(m_frameIndex);
+    if (before != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
+        barrier.Transition.StateBefore = before;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_commandList->ResourceBarrier(1, &barrier);
+    }
+    m_backBufferStates.OnRenderBegin(m_frameIndex);
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
         m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -513,36 +672,98 @@ void Compositor::PopulateCommandList() {
     }
 
     // Transition back buffer from RENDER_TARGET → PRESENT
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    m_commandList->ResourceBarrier(1, &barrier);
+    D3D12_RESOURCE_BARRIER exitBarrier = {};
+    exitBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    exitBarrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
+    exitBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    exitBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    exitBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    m_commandList->ResourceBarrier(1, &exitBarrier);
+    m_backBufferStates.OnRenderEnd(m_frameIndex);
 }
 
 void Compositor::RenderFrame() {
-    if (!m_initialized) return;
+    if (!m_initialized || m_deviceLost) return;
+    static_assert(BackBufferStateTracker::COUNT == FRAME_COUNT,
+                  "back-buffer tracker must cover every swap-chain buffer");
 
-    m_commandAllocator->Reset();
-    m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get());
+    // The allocator and command list cannot be reset while the previous
+    // frame is still executing on the GPU (audit 5.8 #3): wait, bounded,
+    // for the frame fence first. A timed-out wait skips the frame instead
+    // of resetting a live allocator; a lost device latches rendering off.
+    if (m_frameFenceVal > 0 &&
+        !WaitForGpuFence(m_frameFence.Get(), m_frameFenceVal,
+                         m_frameFenceEvent, "frame fence")) {
+        return;
+    }
+
+    HRESULT hr = m_commandAllocator->Reset();
+    if (FAILED(hr)) {
+        if (IsDeviceLostHr(hr)) {
+            MarkDeviceLost("allocator reset");
+        } else {
+            printf("[REX] Compositor: allocator reset failed: 0x%08lx\n",
+                   static_cast<unsigned long>(hr));
+        }
+        return;
+    }
+
+    hr = m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get());
+    if (FAILED(hr)) {
+        if (IsDeviceLostHr(hr)) {
+            MarkDeviceLost("command list reset");
+        } else {
+            printf("[REX] Compositor: command list reset failed: 0x%08lx\n",
+                   static_cast<unsigned long>(hr));
+        }
+        return;
+    }
 
     PopulateCommandList();
-    m_commandList->Close();
+
+    hr = m_commandList->Close();
+    if (FAILED(hr)) {
+        if (IsDeviceLostHr(hr)) {
+            MarkDeviceLost("command list close");
+        } else {
+            printf("[REX] Compositor: command list close failed: 0x%08lx\n",
+                   static_cast<unsigned long>(hr));
+        }
+        return;
+    }
 
     ID3D12CommandList* commandLists[] = { m_commandList.Get() };
     m_commandQueue->ExecuteCommandLists(1, commandLists);
 
-    HRESULT hr = m_swapChain->Present(1, 0);
+    // Signal AFTER submission (audit 5.8 #3): the next frame's reuse wait
+    // covers every command this frame recorded.
+    m_frameFenceVal++;
+    m_commandQueue->Signal(m_frameFence.Get(), m_frameFenceVal);
 
-    if (hr == DXGI_STATUS_OCCLUDED) {
-        static int occludedCount = 0;
-        occludedCount++;
-        if (occludedCount % 300 == 1) {
-            printf("[REX] Compositor: DXGI_STATUS_OCCLUDED "
-                   "(count=%d). DWM considers the window occluded.\n",
-                   occludedCount);
+    hr = m_swapChain->Present(1, 0);
+
+    switch (ClassifyPresent(hr)) {
+        case PresentOutcome::Ok:
+            break;
+        case PresentOutcome::Occluded: {
+            static int occludedCount = 0;
+            occludedCount++;
+            if (occludedCount % 300 == 1) {
+                printf("[REX] Compositor: DXGI_STATUS_OCCLUDED "
+                       "(count=%d). DWM considers the window occluded.\n",
+                       occludedCount);
+            }
+            break;
         }
-    } else if (FAILED(hr)) {
-        printf("[REX] Compositor: Present FAILED 0x%08lx\n",
-               static_cast<unsigned long>(hr));
+        case PresentOutcome::DeviceLost:
+            // The swap chain's state is unknowable after device loss; stop
+            // touching it (audit 5.8 #3/#9) until a fresh Initialize().
+            MarkDeviceLost("Present");
+            return;
+        case PresentOutcome::Failed:
+            printf("[REX] Compositor: Present FAILED 0x%08lx\n",
+                   static_cast<unsigned long>(hr));
+            break;
     }
 
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
@@ -572,30 +793,56 @@ void Compositor::SetClearColor(float r, float g, float b) {
 bool Compositor::ImportLayerTexture(
     uint64_t layerId, HANDLE sharedHandle, int width, int height)
 {
-    if (!m_device) return false;
+    if (!m_device || !sharedHandle) return false;
 
-    int slot;
-    if (!m_freeSrvSlots.empty()) {
-        slot = m_freeSrvSlots.back();
-        m_freeSrvSlots.pop_back();
-    } else if (m_nextSrvSlot < MAX_TEXTURES) {
-        slot = m_nextSrvSlot++;
-    } else {
+    // Open and validate BEFORE consuming an SRV slot (audit 5.8 #7): derive
+    // the view format and dimensions from the resource itself instead of
+    // forcing R8G8B8A8 and trusting caller numbers.
+    ComPtr<ID3D12Resource> resource;
+    HRESULT hr = m_device->OpenSharedHandle(sharedHandle, IID_PPV_ARGS(&resource));
+    if (FAILED(hr) || !resource) {
+        printf("[REX] Compositor: OpenSharedHandle failed (0x%08lx)\n",
+               static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc.SampleDesc.Count != 1 || desc.MipLevels < 1) {
+        printf("[REX] Compositor: shared handle is not a single-sample 2D "
+               "texture (dim=%d samples=%u mips=%u)\n",
+               static_cast<int>(desc.Dimension), desc.SampleDesc.Count,
+               desc.MipLevels);
+        return false;
+    }
+    const DXGI_FORMAT srvFormat = SrvFormatForResourceFormat(desc.Format);
+    if (srvFormat == DXGI_FORMAT_UNKNOWN) {
+        printf("[REX] Compositor: shared texture has an unusable format (%d)\n",
+               static_cast<int>(desc.Format));
+        return false;
+    }
+    if (width > 0 && height > 0 &&
+        (desc.Width != static_cast<UINT64>(width) ||
+         desc.Height != static_cast<UINT>(height))) {
+        printf("[REX] Compositor: caller size %dx%d != shared resource "
+               "%llux%u — using the resource\n",
+               width, height, static_cast<unsigned long long>(desc.Width),
+               desc.Height);
+    }
+
+    // Replacing an existing layer must recycle its SRV slot first
+    // (audit 5.8 #6) or every replace leaks one until the 64-slot heap
+    // runs out. Taking the new slot right after also reuses it.
+    RecycleTextureSlot(layerId);
+
+    uint32_t slot = 0;
+    if (!TakeSrvSlot(m_freeSrvSlots, m_nextSrvSlot, MAX_TEXTURES, slot)) {
         printf("[REX] Compositor: out of SRV slots\n");
         return false;
     }
 
-    ComPtr<ID3D12Resource> resource;
-    HRESULT hr = m_device->OpenSharedHandle(sharedHandle, IID_PPV_ARGS(&resource));
-    if (FAILED(hr)) {
-        printf("[REX] Compositor: OpenSharedHandle failed (0x%08lx)\n",
-               static_cast<unsigned long>(hr));
-        m_freeSrvSlots.push_back(slot);
-        return false;
-    }
-
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.Format = srvFormat;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Texture2D.MipLevels = 1;
@@ -608,11 +855,15 @@ bool Compositor::ImportLayerTexture(
 
     LayerTexture lt;
     lt.resource = std::move(resource);
-    lt.srvSlot = slot;
+    lt.srvSlot = static_cast<int>(slot);
+    lt.texWidth = static_cast<int>(desc.Width);
+    lt.texHeight = static_cast<int>(desc.Height);
     m_textures[layerId] = std::move(lt);
 
-    printf("[REX] Compositor: imported texture for layer %llu (slot %d, %dx%d)\n",
-        layerId, slot, width, height);
+    printf("[REX] Compositor: imported texture for layer %llu "
+           "(slot %u, %llux%u fmt=%d)\n",
+           layerId, slot, static_cast<unsigned long long>(desc.Width),
+           desc.Height, static_cast<int>(srvFormat));
     return true;
 }
 
@@ -620,7 +871,7 @@ void Compositor::RemoveLayerTexture(uint64_t layerId) {
     auto it = m_textures.find(layerId);
     if (it == m_textures.end()) return;
 
-    m_freeSrvSlots.push_back(it->second.srvSlot);
+    ReturnSrvSlot(m_freeSrvSlots, it->second.srvSlot);
     m_textures.erase(it);
     printf("[REX] Compositor: removed texture for layer %llu\n", layerId);
 }
@@ -632,17 +883,12 @@ bool Compositor::UpdateLayerPixels(uint64_t layerId,
 
     auto texIt = m_textures.find(layerId);
     if (texIt == m_textures.end()) {
-        int slot;
-        if (!m_freeSrvSlots.empty()) {
-            slot = m_freeSrvSlots.back();
-            m_freeSrvSlots.pop_back();
-        } else if (m_nextSrvSlot < MAX_TEXTURES) {
-            slot = m_nextSrvSlot++;
-        } else {
+        uint32_t slot = 0;
+        if (!TakeSrvSlot(m_freeSrvSlots, m_nextSrvSlot, MAX_TEXTURES, slot)) {
             return false;
         }
         LayerTexture placeholder;
-        placeholder.srvSlot = slot;
+        placeholder.srvSlot = static_cast<int>(slot);
         auto result = m_textures.emplace(layerId, std::move(placeholder));
         texIt = result.first;
     }
@@ -686,6 +932,7 @@ bool Compositor::UpdateLayerPixels(uint64_t layerId,
 
         lt.texWidth  = width;
         lt.texHeight = height;
+        lt.state = D3D12_RESOURCE_STATE_COPY_DEST;
     }
 
     // Ensure upload buffer is large enough
@@ -757,6 +1004,20 @@ bool Compositor::UpdateLayerPixels(uint64_t layerId,
     m_videoCopyAlloc->Reset();
     m_videoCopyList->Reset(m_videoCopyAlloc.Get(), nullptr);
 
+    // Barrier bookkeeping (audit 5.8 #4): the texture is COPY_DEST only
+    // right after creation; a second call finds it PIXEL_SHADER_RESOURCE and
+    // claiming COPY_DEST as StateBefore was a barrier violation.
+    if (lt.state != D3D12_RESOURCE_STATE_COPY_DEST) {
+        D3D12_RESOURCE_BARRIER toCopy = {};
+        toCopy.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toCopy.Transition.pResource   = lt.resource.Get();
+        toCopy.Transition.StateBefore = lt.state;
+        toCopy.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        toCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_videoCopyList->ResourceBarrier(1, &toCopy);
+        lt.state = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+
     {
         D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
         dstLoc.pResource        = lt.resource.Get();
@@ -784,6 +1045,7 @@ bool Compositor::UpdateLayerPixels(uint64_t layerId,
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         m_videoCopyList->ResourceBarrier(1, &barrier);
+        lt.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
 
     m_videoCopyList->Close();
@@ -791,13 +1053,13 @@ bool Compositor::UpdateLayerPixels(uint64_t layerId,
     ID3D12CommandList* lists[] = { m_videoCopyList.Get() };
     m_commandQueue->ExecuteCommandLists(1, lists);
 
-    // Wait for copy to complete
+    // Wait for copy to complete — bounded (audit 5.8 #5): the old INFINITE
+    // wait froze the compositor with no device-removed escape.
     m_videoCopyFenceVal++;
     m_commandQueue->Signal(m_videoCopyFence.Get(), m_videoCopyFenceVal);
-    if (m_videoCopyFence->GetCompletedValue() < m_videoCopyFenceVal) {
-        m_videoCopyFence->SetEventOnCompletion(m_videoCopyFenceVal,
-                                                m_videoCopyFenceEvent);
-        WaitForSingleObject(m_videoCopyFenceEvent, INFINITE);
+    if (!WaitForGpuFence(m_videoCopyFence.Get(), m_videoCopyFenceVal,
+                         m_videoCopyFenceEvent, "layer pixel copy")) {
+        return false;
     }
 
     return true;
@@ -824,17 +1086,12 @@ bool Compositor::SetBackgroundFromFile(const char* filePath) {
              texData.width, texData.height, texData.rowPitch);
     LogToFile(buf);
 
-    int slot;
-    if (!m_freeSrvSlots.empty()) {
-        slot = m_freeSrvSlots.back();
-        m_freeSrvSlots.pop_back();
-    } else if (m_nextSrvSlot < MAX_TEXTURES) {
-        slot = m_nextSrvSlot++;
-    } else {
+    uint32_t slot = 0;
+    if (!TakeSrvSlot(m_freeSrvSlots, m_nextSrvSlot, MAX_TEXTURES, slot)) {
         LogToFile("  FAIL: out of SRV slots");
         return false;
     }
-    snprintf(buf, sizeof(buf), "  Allocated SRV slot %d", slot);
+    snprintf(buf, sizeof(buf), "  Allocated SRV slot %d", static_cast<int>(slot));
     LogToFile(buf);
 
     D3D12_HEAP_PROPERTIES heapProps = {};
@@ -856,7 +1113,7 @@ bool Compositor::SetBackgroundFromFile(const char* filePath) {
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture));
     if (FAILED(hr)) {
         LogToFile("  FAIL: CreateCommittedResource texture");
-        m_freeSrvSlots.push_back(slot); return false;
+        ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot)); return false;
     }
     LogToFile("  Created texture OK");
 
@@ -880,13 +1137,13 @@ bool Compositor::SetBackgroundFromFile(const char* filePath) {
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
     if (FAILED(hr)) {
         LogToFile("  FAIL: upload buffer creation");
-        m_freeSrvSlots.push_back(slot); return false;
+        ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot)); return false;
     }
     LogToFile("  Created upload buffer OK");
 
     void* mapped = nullptr;
     hr = uploadBuffer->Map(0, nullptr, &mapped);
-    if (FAILED(hr)) { LogToFile("  FAIL: Map upload buffer"); m_freeSrvSlots.push_back(slot); return false; }
+    if (FAILED(hr)) { LogToFile("  FAIL: Map upload buffer"); ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot)); return false; }
     {
         const uint8_t* src = texData.pixels.data();
         uint8_t* dst = static_cast<uint8_t*>(mapped);
@@ -902,13 +1159,13 @@ bool Compositor::SetBackgroundFromFile(const char* filePath) {
     ComPtr<ID3D12CommandAllocator> copyAlloc;
     hr = m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                            IID_PPV_ARGS(&copyAlloc));
-    if (FAILED(hr)) { LogToFile("  FAIL: create copy allocator"); m_freeSrvSlots.push_back(slot); return false; }
+    if (FAILED(hr)) { LogToFile("  FAIL: create copy allocator"); ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot)); return false; }
 
     ComPtr<ID3D12GraphicsCommandList> copyList;
     hr = m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                       copyAlloc.Get(), nullptr,
                                       IID_PPV_ARGS(&copyList));
-    if (FAILED(hr)) { LogToFile("  FAIL: create copy list"); m_freeSrvSlots.push_back(slot); return false; }
+    if (FAILED(hr)) { LogToFile("  FAIL: create copy list"); ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot)); return false; }
     LogToFile("  Created copy list OK");
 
     D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
@@ -944,16 +1201,17 @@ bool Compositor::SetBackgroundFromFile(const char* filePath) {
     // Wait for copy to complete
     ComPtr<ID3D12Fence> fence;
     hr = m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
-    if (FAILED(hr)) { LogToFile("  FAIL: create fence"); m_freeSrvSlots.push_back(slot); return false; }
+    if (FAILED(hr)) { LogToFile("  FAIL: create fence"); ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot)); return false; }
 
     HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (!fenceEvent) { LogToFile("  FAIL: create event"); m_freeSrvSlots.push_back(slot); return false; }
+    if (!fenceEvent) { LogToFile("  FAIL: create event"); ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot)); return false; }
 
     UINT64 fenceVal = 1;
     m_commandQueue->Signal(fence.Get(), fenceVal);
-    if (fence->GetCompletedValue() < fenceVal) {
-        fence->SetEventOnCompletion(fenceVal, fenceEvent);
-        WaitForSingleObject(fenceEvent, INFINITE);
+    if (!WaitForGpuFence(fence.Get(), fenceVal, fenceEvent, "background upload")) {
+        CloseHandle(fenceEvent);
+        ReturnSrvSlot(m_freeSrvSlots, static_cast<int>(slot));
+        return false;
     }
     CloseHandle(fenceEvent);
     LogToFile("  Copy completed via fence");
@@ -976,6 +1234,9 @@ bool Compositor::SetBackgroundFromFile(const char* filePath) {
     lt.texWidth = texData.width;
     lt.texHeight = texData.height;
     constexpr uint64_t BG_LAYER_ID = 1;
+    // Recycle any slot a previous background image held (audit 5.8 #6):
+    // overwriting the entry used to leak its descriptor until the heap ran out.
+    RecycleTextureSlot(BG_LAYER_ID);
     m_textures[BG_LAYER_ID] = std::move(lt);
 
     Layer bgLayer;
