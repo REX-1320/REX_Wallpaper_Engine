@@ -82,7 +82,14 @@ async function main() {
     onEvent: () => {},
   })
   sup.start()
-  await new Promise((r) => setTimeout(r, 300)) // heartbeat ticks once or twice
+  // First tick probes PING (interval 500ms) and arms the heartbeat; poll
+  // briefly instead of assuming a tick already ran.
+  let armed = false
+  for (let i = 0; i < 10 && !armed; i++) {
+    await new Promise((r) => setTimeout(r, 200))
+    armed = sup.getStatus().heartbeatArmed === true
+  }
+  check('heartbeat armed after PING probe', armed, JSON.stringify(sup.getStatus()))
   const pidBefore = runtime.proc.pid
   runtime.proc.kill() // simulate crash
   await new Promise((r) => setTimeout(r, 1500))

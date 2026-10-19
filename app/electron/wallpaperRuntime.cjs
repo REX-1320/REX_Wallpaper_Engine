@@ -181,6 +181,23 @@ class WallpaperRuntime extends EventEmitter {
         .then(() => {
           this.inited = true
         })
+        .catch((err) => {
+          // A failed INIT (most often the 15 s command timeout) leaves a
+          // live process that may still be initializing. Retrying INIT
+          // against it answers "already initialized" forever — the client
+          // had no reset path and the app wedged until relaunch (audit
+          // 5.10 #6). Drop the process so the next attempt spawns fresh.
+          const proc = this.proc
+          if (proc) {
+            this._teardown(proc, `INIT failed: ${err.message}`)
+            try {
+              proc.kill()
+            } catch {
+              // already gone
+            }
+          }
+          throw err
+        })
         .finally(() => {
           this.initPromise = null
         })
@@ -215,7 +232,10 @@ class WallpaperRuntime extends EventEmitter {
     // Hard fallback: a wedged runtime (e.g. render-loop freeze) never
     // answers SHUTDOWN and never exits on EOF. Its open pipes would keep
     // the Electron app alive forever with no window — kill it so app quit
-    // always completes.
+    // always completes. The deadline covers the native SHUTDOWN sequence
+    // (telemetry join ≤250 ms after the unit-11 slicing + engine teardown,
+    // GPU drains included); 3 s used to truncate that teardown (audit 5.10
+    // #4). Cleared on exit so a clean quit never signals a dead process.
     const killTimer = setTimeout(() => {
       try {
         this.logLine('wallpaper-runtime: no SHUTDOWN response, terminating process')
@@ -223,8 +243,9 @@ class WallpaperRuntime extends EventEmitter {
       } catch {
         // already gone
       }
-    }, 3000)
+    }, 5000)
     if (killTimer.unref) killTimer.unref()
+    proc.once('exit', () => clearTimeout(killTimer))
   }
 }
 

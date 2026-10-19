@@ -45,6 +45,35 @@ function clearLastApplied(userDataDir) {
   } catch {}
 }
 
+// Live-update merge (audit 5.10 #5): folds the properties a live update
+// actually applied into a persisted { kind, params } entry, so a crash
+// replays the user's current settings instead of the apply-time snapshot.
+// `values` carries the IPC handler's destructured args; only commands in
+// `applied` are written, and undefined values are ignored. Returns the
+// (mutated) entry, or null when there was nothing to update.
+const FIELD_BY_UPDATE_CMD = {
+  SET_FILL_MODE: 'mode',
+  SET_LOOP: 'loop',
+  SET_SPEED: 'speed',
+  SET_VOLUME: 'volume',
+  SET_MUTE: 'muted',
+  SET_AUDIO_MODE: 'audioMode',
+}
+
+function mergeLiveUpdate(entry, applied, values) {
+  if (!entry || !entry.params || !Array.isArray(applied) || applied.length === 0) {
+    return null
+  }
+  for (const cmd of applied) {
+    const field = FIELD_BY_UPDATE_CMD[cmd]
+    if (!field) continue
+    let v = values?.[field]
+    if (field === 'loop' || field === 'muted') v = !!v
+    if (v !== undefined) entry.params[field] = v
+  }
+  return entry
+}
+
 // Descriptor for Electron's app.setLoginItemSettings. Kept here (not in
 // main.cjs) so the contract is visible and the shape is unit-testable.
 // In a packaged app the executable IS the app, so args suffice. In dev the
@@ -57,4 +86,4 @@ function loginItemSettings(enabled, appPath) {
   return { openAtLogin: !!enabled, args: ['--background'] }
 }
 
-module.exports = { saveLastApplied, loadLastApplied, clearLastApplied, loginItemSettings }
+module.exports = { saveLastApplied, loadLastApplied, clearLastApplied, loginItemSettings, mergeLiveUpdate }

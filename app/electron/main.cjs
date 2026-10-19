@@ -149,6 +149,20 @@ async function reapplyLastWallpaper() {
   }
 }
 
+// Live updates used to change only the running engine; a crash then
+// replayed the STALE apply-time settings from startup's last-wallpaper.json
+// (audit 5.10 #5). Merge successful live updates into lastApplied and
+// persist them — debounced so slider drags don't hammer the disk.
+let _persistTimer = null
+function persistLastAppliedDebounced() {
+  if (_persistTimer) clearTimeout(_persistTimer)
+  _persistTimer = setTimeout(() => {
+    _persistTimer = null
+    if (lastApplied) startup.saveLastApplied(app.getPath('userData'), lastApplied)
+  }, 500)
+  if (_persistTimer.unref) _persistTimer.unref()
+}
+
 async function getCapabilities() {
   if (capabilities) return capabilities
   try {
@@ -451,6 +465,14 @@ app.whenReady().then(() => {
     if (volume != null) await sendIfSupported('SET_VOLUME', { value: volume }, applied, skipped)
     if (muted != null) await sendIfSupported('SET_MUTE', { value: !!muted }, applied, skipped)
     if (audioMode != null) await sendIfSupported('SET_AUDIO_MODE', { value: audioMode }, applied, skipped)
+    // Persist only what actually applied: a skipped property must not
+    // enter the crash-replay state (replaying it would resurrect a value
+    // the renderer refuses, or one the user never saw accepted).
+    if (applied.length > 0 && lastApplied) {
+      if (startup.mergeLiveUpdate(lastApplied, applied, { mode, loop, volume, speed, muted, audioMode })) {
+        persistLastAppliedDebounced()
+      }
+    }
     return { ok: true, applied, skipped }
   })
 
@@ -602,15 +624,7 @@ app.whenReady().then(() => {
   trayManager.create()
   logLine('tray: created')
 
-  // ─── Launch at login + boot re-apply ──────────────────────────────────────
-  // Register every launch (idempotent): REX is a resident wallpaper app and
-  // must survive reboots. The toggle lives in the tray menu + settings IPC.
-  try {
-    applyLoginItem(true)
-    logLine('startup: registered for login (--background)')
-  } catch (err) {
-    logLine('startup: registration ERROR', err.message)
-  }
+  // ─── Boot re-apply ────────────────────────────────────────────────────────
   const bootEntry = startup.loadLastApplied(app.getPath('userData'))
   if (bootEntry) {
     applyStoredWallpaper(bootEntry).then((ok) => {
@@ -626,14 +640,36 @@ app.whenReady().then(() => {
   _galleryLib = new WallpaperLibrary()
   logLine('persistence: app-state + gallery library ready')
 
+  // ─── Launch at login ──────────────────────────────────────────────────────
+  // Default-enable on FIRST RUN only and remember that we did; later launches
+  // respect whatever the user chose (tray toggle writes the OS state
+  // directly). Registering unconditionally re-enabled the login item on every
+  // start, overriding "off" (audit 5.10 #8).
+  try {
+    if (!appState.get('settings.loginItemInitialized')) {
+      applyLoginItem(true)
+      appState.set('settings.loginItemInitialized', true)
+      logLine('startup: registered for login (first run)')
+    } else {
+      let enabled = false
+      try {
+        enabled = app.getLoginItemSettings().openAtLogin
+      } catch {}
+      logLine('startup: login item left as configured (enabled=' + enabled + ')')
+    }
+  } catch (err) {
+    logLine('startup: login-item setup ERROR', err.message)
+  }
+
   // Runtime health → Supervisor (P0.2). It owns exit-driven recovery
   // (bounded reapply rounds, then park), hang/renderer watchdogs, crash
   // reports and recovery events. Replaces the old inline recoverRuntime so
   // exactly one driver replays the wallpaper (no double-reapply races).
-  // Heartbeat is parked (miss limit Infinity) until the native PING command
-  // lands in a linked binary — without it every healthy runtime would read
-  // as hung. Renderer watchdog stays silent until the first renderer ping
-  // arrives (guard inside the supervisor).
+  // The heartbeat is capability-probed: the first PING that answers arms the
+  // miss counter (limit 3, ~6 s); an older runtime binary without PING stays
+  // parked instead of reading as hung every interval. Renderer watchdog
+  // stays silent until the first renderer ping arrives (guard inside the
+  // supervisor).
   supervisor = new Supervisor({
     runtime,
     logLine,
@@ -656,7 +692,6 @@ app.whenReady().then(() => {
       workerwDiagLog: path.join(tempDir, 'REX', 'workerw_diag.log'),
       appLog: path.join(tempDir, 'REX', 'rex-app.log'),
     },
-    options: { heartbeatMissLimit: Number.POSITIVE_INFINITY },
   })
   supervisor.start()
 

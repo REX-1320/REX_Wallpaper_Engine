@@ -53,6 +53,12 @@ class Supervisor {
     this.poisonStreak = 0
     this.lastRecoveredPath = null
     this.heartbeatMisses = 0
+    // Capability probe (audit 5.10 #7): the watchdog counts misses only
+    // after a PING has answered once. An older runtime binary without the
+    // command answers "unknown command", so arming unconditionally would
+    // flag every healthy process as hung.
+    this.heartbeatArmed = false
+    this._probeInFlight = false
     // No renderer ping bridge exists yet (nothing calls recordRendererPing),
     // so the watchdog must stay silent until the first ping arrives —
     // otherwise every visible window would reload in a loop after 15 s.
@@ -109,6 +115,7 @@ class Supervisor {
       recoveryAttempts: this.recoveryAttempts,
       maxRecoveryAttempts: this.opts.maxRecoveryAttempts,
       heartbeatMisses: this.heartbeatMisses,
+      heartbeatArmed: this.heartbeatArmed,
       runtimeAlive: this.manager.alive,
       runtimePid: this.manager.pid,
       lastRendererPing: this.lastRendererPing,
@@ -126,6 +133,22 @@ class Supervisor {
   // ─── Runtime heartbeat ────────────────────────────────────────────────────
   async _heartbeatTick() {
     if (this.quitting || this.recovering || !this.manager.alive) return
+    if (!this.heartbeatArmed) {
+      // Capability probe: one PING decides whether this binary supports the
+      // heartbeat. Only an answered PING arms the miss counter (audit 5.10
+      // #7); until then the watchdog stays parked and this tick is a no-op.
+      if (this._probeInFlight) return
+      this._probeInFlight = true
+      try {
+        if (await this.manager.ping(this.opts.pingTimeoutMs)) {
+          this.heartbeatArmed = true
+          this.deps.logLine('supervisor:heartbeat armed (PING supported)')
+        }
+      } finally {
+        this._probeInFlight = false
+      }
+      return
+    }
     const ok = await this.manager.ping(this.opts.pingTimeoutMs)
     if (this.quitting) return
     if (ok) {
@@ -145,7 +168,7 @@ class Supervisor {
     const pid = this.manager.pid
     this.deps.logLine('supervisor:runtime hung (no PING x', this.opts.heartbeatMissLimit + ')', 'pid', pid)
     this._writeReport({ reason: 'runtime-hung', pid, minidump: true })
-    // Hard stop: SHUTDOWN frame, then the client's 3s kill fallback. A hung
+    // Hard stop: SHUTDOWN frame, then the client's hard-kill fallback. A hung
     // process won't answer; killing it fires 'exit' → normal recovery path.
     this.manager.stop()
   }
