@@ -3,7 +3,7 @@
 > Last updated: 2026-07-25
 > Auto-generated from codebase audit. Update this file when a feature reaches ✅.
 > See also: [everything.md](everything.md) (done inventory) · [TODO.md](TODO.md) (remaining work).
-> Note: the "Shell UI" section below describes the native C++ shell now archived in `dump/` — the current UI is the Electron app in `app/`.
+> Note: the "Shell UI" section below is **retired/historical** — the native C++ shell was archived in `dump/` (and the orphaned `wallpaper/renderer/` subsystem was archived there on 2026-10-19). The current UI is the Electron app in `app/`; statuses inside that section are snapshots from its July audit and are not maintained.
 
 ---
 
@@ -222,9 +222,11 @@
 | PersonalizationService | ✅ | Delegates to WinTaskbarAdapter, WinExplorerAdapter, WinStartMenuAdapter |
 | PersonalizationModule | ✅ | `rex.personalization`, registers IPersonalizationService in container |
 | WinTaskbarAdapter | ✅ | Reads/writes `TaskbarAl`, `TaskbarAutoHide`, `TaskbarSmallIcons` via registry |
-| WinExplorerAdapter | ✅ | Reads/writes explorer registry keys |
-| WinStartMenuAdapter | ✅ | Reads/writes start menu registry keys |
+| WinExplorerAdapter | 🟡 | Placeholder — `apply()` writes invented values (audit §5.9 #4, 2026-10-17) |
+| WinStartMenuAdapter | 🟡 | Placeholder — invented keys (`Start_ShowRecommended`; `compactMode`→`DisallowShaking`) (audit §5.9 #4, 2026-10-17) |
 | PersonalizationPage | ✅ | Full workspace: Toolbar (Apply/Reset), Tabs (Taskbar/Explorer/StartMenu), Toggles, Dropdowns, Slider, PropertyGrid inspector |
+
+> ⚠️ **2026-10-17 audit §5.9 #4/#3/#9:** the Start-menu/Explorer adapters above are placeholders claiming complete (`apply()` writes invented values) — now marked 🟡. Also: two parallel personalization stacks exist and the richer native one is never constructed (factory never called), so the whole stack is compiled-but-unreferenced (§6). Not user-visible today; owner call: implement, or prune with the dead-module batch (CMakeLists-gated).
 
 ---
 
@@ -327,6 +329,8 @@
 ---
 
 ## Shell UI
+
+> **RETIRED — historical snapshot.** The native C++ shell described below was archived to `dump/` (2026-07 era; the orphaned `wallpaper/renderer/` subsystem joined it there on 2026-10-19). The shipping UI is the Electron app (`app/`). Statuses in this section are **not maintained** — use `TODO.md` + `everything.md` for current state.
 
 ### Component Library (24 primitives)
 
