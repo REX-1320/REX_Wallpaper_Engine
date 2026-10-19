@@ -80,6 +80,7 @@ public:
     FrameSurface GetFrameSurface() const override;
     uint64_t GetFrameSlotHandle(uint32_t slot) const override;
     void GetTelemetry(EngineTelemetry& out) const override;
+    bool TryGetTelemetry(EngineTelemetry& out) const override;
     shared::UUID GetSessionId() const override { return m_sessionId; }
 
     // ─── Per-monitor wallpapers (Phase 5) ────────────────────────────────
@@ -89,6 +90,8 @@ public:
         std::shared_ptr<rex::settings::ISettingsService> settings) override;
 
 private:
+    /// Snapshot body; caller must hold m_mutex.
+    void GetTelemetryLocked(EngineTelemetry& out) const;
     void Update(double deltaTime);
     void SetState(EngineState state);
     void RenderLoop();

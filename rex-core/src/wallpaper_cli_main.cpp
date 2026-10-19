@@ -534,9 +534,12 @@ static void WriteFrame(const std::string& frame) {
     WriteExact(out, frame.data(), len);
 }
 
-// P2-17: tri-state read. Zero/oversized prefixes are malformed input, not
-// EOF — the dispatcher answers `malformed frame` and continues instead of
-// tearing the session down. Only a closed/truncated stream ends the loop.
+// P2-17: tri-state read. Zero prefixes are malformed input, not EOF — the
+// dispatcher answers `malformed frame` and continues instead of tearing the
+// session down. Oversized prefixes are unrecoverable: no trustworthy body
+// boundary exists, so consuming the next 4 bytes as a prefix would desync
+// forever (audit 5.5 #3). Only a closed/truncated stream or an oversized
+// prefix ends the loop.
 enum class ReadFrameResult { Ok, Eof, Malformed };
 
 static ReadFrameResult ReadFrame(std::string& out) {
@@ -544,9 +547,16 @@ static ReadFrameResult ReadFrame(std::string& out) {
     if (in == INVALID_HANDLE_VALUE || in == nullptr) return ReadFrameResult::Eof;
     uint32_t len = 0;
     if (!ReadExact(in, &len, 4)) return ReadFrameResult::Eof;
-    if (rex::wallpaper::ClassifyFrameLength(len) !=
-        rex::wallpaper::FrameLengthVerdict::Ok) {
-        return ReadFrameResult::Malformed;
+    switch (rex::wallpaper::ClassifyFrameLength(len)) {
+        case rex::wallpaper::FrameLengthVerdict::Ok:
+            break;
+        case rex::wallpaper::FrameLengthVerdict::Empty:
+            return ReadFrameResult::Malformed;
+        case rex::wallpaper::FrameLengthVerdict::Oversized:
+            REX_LOG_WARN("Runtime",
+                         "Oversized frame prefix ({} bytes): body boundary "
+                         "unrecoverable, closing session", len);
+            return ReadFrameResult::Eof;
     }
     out.assign(static_cast<size_t>(len), '\0');
     if (!ReadExact(in, out.data(), len)) return ReadFrameResult::Eof;
@@ -659,13 +669,30 @@ static void TelemetryThread(std::mutex& engineGuard,
                             std::shared_ptr<IWallpaperEngine>& engine,
                             std::atomic<bool>& stop) {
     while (!stop.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        // 5 s cadence in 250 ms slices: SHUTDOWN joins this thread while
+        // Electron kills the process at 3 s (wallpaperRuntime.cjs), so an
+        // unsliced sleep_for(5 s) could blow the client's deadline
+        // (audit 5.5 #1).
+        bool aborted = false;
+        for (int i = 0; i < 20; ++i) {
+            if (stop.load(std::memory_order_acquire)) {
+                aborted = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        if (aborted) break;
+
         EngineTelemetry t;
+        bool sampled = false;
         {
             std::lock_guard lock(engineGuard);
-            if (!engine) continue;
-            engine->GetTelemetry(t);
+            // try-lock telemetry: a command holding the engine lock must not
+            // stall the sampler (nor the SHUTDOWN join waiting on it). Skip
+            // this sample and retry on the next cadence tick.
+            sampled = engine && engine->TryGetTelemetry(t);
         }
+        if (!sampled) continue;
         FILE* f = nullptr;
         if (fopen_s(&f, BuildLogPath(L"runtime-telemetry.log").c_str(), "a") != 0 || !f) {
             continue;
@@ -885,8 +912,13 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                     std::unique_lock<std::mutex> lock(engineGuard, std::try_to_lock);
                     if (!lock.owns_lock() || !engine) return {false, 0};
                     if (engine->GetState() != EngineState::Running) return {false, 0};
+                    // try-lock telemetry: GetTelemetry takes the engine's
+                    // m_mutex, which this lambda's engineGuard does not
+                    // cover. A busy engine lock reports "not watched" for
+                    // one interval instead of blocking the watchdog
+                    // (audit 5.5 #2).
                     EngineTelemetry tel{};
-                    engine->GetTelemetry(tel);
+                    if (!engine->TryGetTelemetry(tel)) return {false, 0};
                     return {true, tel.presentCount};
                 });
 

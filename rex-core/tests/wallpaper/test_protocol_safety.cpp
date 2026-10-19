@@ -7,8 +7,10 @@
 // uncaught → terminate. SafeExists uses the error_code overload plus a
 // length cap and never throws.
 // R12: a zero-length length-prefix is a protocol violation, not EOF —
-// like an oversized prefix it must answer `malformed frame` and continue,
-// never tear the session down.
+// it must answer `malformed frame` and continue, never tear the session
+// down. An oversized prefix, however, has no trustworthy body boundary
+// (audit 5.5 #3): it must classify as unrecoverable so the dispatcher
+// tears the session down instead of reading payload as the next prefix.
 
 #include <gtest/gtest.h>
 
@@ -21,8 +23,10 @@
 
 using namespace rex::wallpaper;
 
-TEST(FrameLengthTest, ZeroLengthIsMalformed) {
-    EXPECT_EQ(ClassifyFrameLength(0), FrameLengthVerdict::Malformed);
+TEST(FrameLengthTest, ZeroLengthIsEmptyButRecoverable) {
+    // No body follows, so answering `malformed frame` keeps the stream
+    // aligned (P2-17/R12).
+    EXPECT_EQ(ClassifyFrameLength(0), FrameLengthVerdict::Empty);
 }
 
 TEST(FrameLengthTest, NormalLengthsAreOk) {
@@ -31,11 +35,13 @@ TEST(FrameLengthTest, NormalLengthsAreOk) {
     EXPECT_EQ(ClassifyFrameLength(kMaxFrameBytes), FrameLengthVerdict::Ok);
 }
 
-TEST(FrameLengthTest, OversizedLengthsAreMalformed) {
+TEST(FrameLengthTest, OversizedLengthsAreUnrecoverable) {
+    // Audit 5.5 #3: the body boundary cannot be trusted, so the dispatcher
+    // must close the session instead of continuing into a desync.
     EXPECT_EQ(ClassifyFrameLength(kMaxFrameBytes + 1),
-              FrameLengthVerdict::Malformed);
+              FrameLengthVerdict::Oversized);
     EXPECT_EQ(ClassifyFrameLength(0xFFFFFFFFu),
-              FrameLengthVerdict::Malformed);
+              FrameLengthVerdict::Oversized);
 }
 
 TEST(SafeExistsTest, MissingFileIsFalse) {

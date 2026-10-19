@@ -378,8 +378,18 @@ public:
 
     // ─── Telemetry ────────────────────────────────────────────────────────
     /// Snapshot of live allocation counters (decoder/ring/GPU/scenes).
-    /// Cheap and non-blocking; safe to call from any thread.
+    /// May briefly take the engine lock; safe from any thread.
     virtual void GetTelemetry(EngineTelemetry& out) const = 0;
+
+    /// Best-effort telemetry for watchdogs/health monitors. Returns false
+    /// (leaving `out` untouched) when the snapshot would block on the
+    /// engine lock, so the caller can skip this interval instead of
+    /// stalling. Implementations that cannot take a non-blocking snapshot
+    /// return false by default.
+    virtual bool TryGetTelemetry(EngineTelemetry& out) const {
+        (void)out;
+        return false;
+    }
 };
 
 // ─── Factory ───────────────────────────────────────────────────────────────

@@ -67,6 +67,20 @@ TEST(EngineTest, ShutdownWithoutInitializeSucceeds) {
     EXPECT_TRUE(engine->Shutdown().IsSuccess());
 }
 
+TEST(EngineTelemetryTest, TryGetTelemetrySucceedsWhenUncontended) {
+    // Audit 5.5 #2: the hang watchdog must be able to sample progress
+    // without blocking on the engine lock. Uncontended, the non-blocking
+    // path must return a snapshot that agrees with GetTelemetry.
+    auto engine = CreateWallpaperEngine();
+    ASSERT_NE(engine, nullptr);
+
+    EngineTelemetry blocking{};
+    engine->GetTelemetry(blocking);
+    EngineTelemetry nonBlocking{};
+    ASSERT_TRUE(engine->TryGetTelemetry(nonBlocking));
+    EXPECT_EQ(nonBlocking.presentCount, blocking.presentCount);
+}
+
 TEST(EngineTest, StopWithoutInitializeRejected) {
     // Audit 2026-10-17, #8: Stop()/Play() on a torn-down engine used to
     // "succeed" (Stop stamped Stopped onto an uninitialized object — or

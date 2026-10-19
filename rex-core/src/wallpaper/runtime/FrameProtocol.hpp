@@ -2,10 +2,16 @@
 
 // ─── Stdin/stdout frame protocol: length-prefix verdict (P2-17 / R12) ───────
 //
-// Frames are uint32 length + JSON bytes. A zero-length prefix is a protocol
-// violation, not EOF; an over-16 MB prefix is corrupt input, not a session
-// killer. Both answer `malformed frame` and continue — the dispatch loop
-// only tears down on a genuinely closed/truncated stream.
+// Frames are uint32 length + JSON bytes. The verdicts are NOT symmetric:
+//
+//   * Zero-length prefix: a protocol violation that consumes no body, so
+//     the stream stays byte-aligned. The dispatcher answers `malformed
+//     frame` and continues (P2-17/R12).
+//   * Over-16 MB prefix: the 4 bytes carry no trustworthy body boundary
+//     (the claimed body may never arrive). Draining `len` bytes is
+//     unbounded, and treating the next 4 bytes as a new prefix would read
+//     payload as length — a permanent desync. The session is unrecoverable
+//     and must be torn down, not answered-and-continued (audit 5.5 #3).
 
 #include <cstdint>
 
@@ -24,11 +30,16 @@ inline bool IsSupportedProtocolVersion(int version) {
 }
 
 /// How to treat a length prefix.
-enum class FrameLengthVerdict { Ok, Malformed };
+enum class FrameLengthVerdict {
+    Ok,         ///< Read `len` body bytes.
+    Empty,      ///< Zero-length frame: reject, stream still aligned.
+    Oversized,  ///< No trustworthy body boundary: session unrecoverable.
+};
 
 inline FrameLengthVerdict ClassifyFrameLength(uint32_t len) {
-    return (len == 0 || len > kMaxFrameBytes) ? FrameLengthVerdict::Malformed
-                                              : FrameLengthVerdict::Ok;
+    if (len == 0) return FrameLengthVerdict::Empty;
+    if (len > kMaxFrameBytes) return FrameLengthVerdict::Oversized;
+    return FrameLengthVerdict::Ok;
 }
 
 }  // namespace rex::wallpaper

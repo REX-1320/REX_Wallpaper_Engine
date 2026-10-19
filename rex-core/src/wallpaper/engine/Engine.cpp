@@ -1294,6 +1294,21 @@ void Engine::GetTelemetry(EngineTelemetry& out) const {
     // Locked: the 5 s telemetry sampler runs on its own thread while the
     // render thread may be tearing these objects down in ReinitializeRenderer.
     std::lock_guard<std::mutex> lock(m_mutex);
+    GetTelemetryLocked(out);
+}
+
+bool Engine::TryGetTelemetry(EngineTelemetry& out) const {
+    // Never wait: watchdogs must stay responsive even while a command holds
+    // the engine lock. ReinitializeRenderer now releases m_mutex across the
+    // heavy teardown/rebuild, so a busy interval is short - but it is not
+    // bounded from the watchdog's point of view (audit 5.5 #2).
+    std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    GetTelemetryLocked(out);
+    return true;
+}
+
+void Engine::GetTelemetryLocked(EngineTelemetry& out) const {
     out = EngineTelemetry{};
 
     if (m_videoManager) {
