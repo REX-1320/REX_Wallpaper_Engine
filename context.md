@@ -1,7 +1,7 @@
 # REX — Working Context (agent handoff)
 
 > Created 2026-10-19 from the session compaction dump + live state.
-> Last updated: 2026-10-19 11:42 (+05:30) — model: DeepSeek V4.1 Flash Free (`opencode/deepseek-v4.1-flash-free`).
+> Last updated: 2026-10-19 12:07 (+05:30) — model: DeepSeek V4.1 Flash Free (`opencode/deepseek-v4.1-flash-free`).
 > **Living document: update the "Current state" and "Remaining" sections after every finished work unit.**
 > Companion docs: `TODO.md` (remaining + bug backlog), `everything.md` (done inventory), `docs/bugs/AUDIT-2026-10-17-quality-audit.md` (source findings).
 
@@ -25,7 +25,7 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 ## Environment facts
 
 - Build: `cmake --build .build --config Release --target rex-wallpaper-tests` (workdir `rex-core`); runtime: `--target rex-wallpaper-runtime`.
-- Test: `ctest --test-dir .build -C Release --output-on-failure`. Suite entry count 779 (one disabled), pass line format "100% tests passed out of N".
+- Test: `ctest --test-dir .build -C Release --output-on-failure`. Suite: 782 tests (783 entries, one disabled), pass line format "100% tests passed out of N".
 - Test exe: `rex-core/.build/Release/rex-wallpaper-tests.exe`. Runtime exe: `rex-core/.build/Release/rex-wallpaper-runtime.exe`.
 - Tests never call `Logger::Initialize` (no engine log from ctest). Rust note: logs to `%TEMP%\REX`.
 - Machine: RX 6700 XT, 3840×2160@120 Hz, MPO disabled. In-repo media fixtures: `bench-media/` (e.g. `mpeg4_320x240.mp4`).
@@ -40,14 +40,14 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 - Unit 9: `5cbd4a6` + `868d9e9` + `42b6158` — playback EOF restart latch (§5.4 #5), `VideoManager::Shutdown` self-contained (§5.4 #7), per-monitor tick target (§5.4 #8); SpeedClock flake diagnosed (ambient auto-pause) + hardened. 777/777.
 - Unit 10: `534b906` + `dfeea93` — decoder pool atomic build (§5.2 #2), renderer slot-cache eviction (§5.2 #3/F1), SW slot lease (§5.2 #4/§5.4 #3), partial-QI leak (§5.2 #6), `PickSlotOldestSafe` public (#15 tie-in). New test `SoftwareDecodePoolTest.SoftwarePathLeasesPoolSlots` RED→GREEN. 778/778. Runtime relinked 2026-10-19 11:10:30.
 - Unit 11: telemetry sleep slicing (§5.5 #1), `TryGetTelemetry` try-lock for watchdog + sampler (§5.5 #2), oversized-prefix teardown vs zero-length continue (§5.5 #3). New tests `FrameLengthTest.*` (Empty/Oversized) + `EngineTelemetryTest.TryGetTelemetrySucceedsWhenUncontended`; live protocol smoke (zero→continue→SHUTDOWN; oversized→close in 41 ms). 779/779. Runtime relinked 2026-10-19 11:38:37.
+- Unit 12: `AudioCapture` COM ref tracked (`m_comInitialized`, §5.3 #4/#5) + MTA apartment on capture thread (#6) + `OpenClient()`/`ReopenDevice()` device-change recovery (#7) + SILENT/null → zeros (#8); `AudioPlayer` getters atomics (#9), `DoSeek` failure keeps state (#10). New tests `AudioCaptureRecoveryTest.*` + `AudioCaptureSilenceTest.*` (compile-RED → green). 782/782. Runtime relinked 2026-10-19 12:05:32.
 
 ### Remaining (this session's mandate — in order)
 
-1. **AU3–10 (§5.3 #3–#10)** — audio: EXTENSIBLE SubFormat/bit-depth (P1); AudioCapture COM leaks + CoUninit pairing; COM init on capture thread; device-change recovery; GetBuffer SILENT/null; AudioPlayer getters non-atomic; DoSeek result ignored.
-2. **APP3–8 (§5.10 #3–#8)** — Electron: live fill-mode mapping ('cover'/'stretched'); audio mode on Live updates; live updates persisted to `lastApplied`; INIT-timeout wedge; hang detection `missLimit: Infinity`; launch-at-login override.
-3. **G3–9 (§5.8 #3–#9)** — compositor: per-frame fence + device-removed; barrier StateBefore tracking; bounded fence waits; SRV slot leak on layer replace; ImportLayerTexture format/width from `GetDesc()`; shared-handle fence/ownership; back-buffer state tracking.
-4. **P3 residuals (§5.1 #10/#11/#12/#13/#15 + §5.6 + §5.4 remaining P3s)** — engine: WideCharToMultiByte guard, DXGI factory per monitor, dead state, docs, dup helper; renderer residuals.
-5. **Batch-4 hygiene (§6)** — orphaned `wallpaper/renderer/` archive (git mv, not delete), dead modules, unbuilt tests, root clutter; tooling only where it does not touch `CMakeLists.txt` (hard rule).
+1. **APP3–8 (§5.10 #3–#8)** — Electron: live fill-mode mapping ('cover'/'stretched'); audio mode on Live updates; live updates persisted to `lastApplied`; INIT-timeout wedge; hang detection `missLimit: Infinity`; launch-at-login override.
+2. **G3–9 (§5.8 #3–#9)** — compositor: per-frame fence + device-removed; barrier StateBefore tracking; bounded fence waits; SRV slot leak on layer replace; ImportLayerTexture format/width from `GetDesc()`; shared-handle fence/ownership; back-buffer state tracking.
+3. **P3 residuals (§5.1 #10/#11/#12/#13/#15 + §5.6 + §5.4 remaining P3s + §5.3 #11/#13/#14/#15)** — engine: WideCharToMultiByte guard, DXGI factory per monitor, dead state, docs, dup helper; renderer residuals; audio render-callback scratch/ReleaseBuffer/propvariant/CoInit P3s.
+4. **Batch-4 hygiene (§6)** — orphaned `wallpaper/renderer/` archive (git mv, not delete), dead modules, unbuilt tests, root clutter; tooling only where it does not touch `CMakeLists.txt` (hard rule).
 
 ### After the batches (user-sequenced, do NOT start early)
 
@@ -75,5 +75,5 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 
 ## Current state
 
-**Working on:** AU3–10 (audio). Unit 11 closed 2026-10-19 11:38; suite 779/779; runtime relinked 2026-10-19 11:38:37; code commit `57b89d1`.
-**Handoff updated:** 2026-10-19 11:42 (+05:30) by DeepSeek V4.1 Flash Free.
+**Working on:** APP3–8 (Electron). Unit 12 closed 2026-10-19 12:05; suite 782/782; runtime relinked 2026-10-19 12:05:32; code commit `cdd0635`.
+**Handoff updated:** 2026-10-19 12:07 (+05:30) by DeepSeek V4.1 Flash Free.
