@@ -1,7 +1,7 @@
 # REX — Working Context (agent handoff)
 
 > Created 2026-10-19 from the session compaction dump + live state.
-> Last updated: 2026-10-19 15:01 (+05:30) — model: DeepSeek V4.1 Flash Free (`opencode/deepseek-v4.1-flash-free`).
+> Last updated: 2026-10-19 15:40 (+05:30) — model: DeepSeek V4.1 Flash Free (`opencode/deepseek-v4.1-flash-free`).
 > **Living document: update the "Current state" and "Remaining" sections after every finished work unit.**
 > Companion docs: `TODO.md` (remaining + bug backlog), `everything.md` (done inventory), `docs/bugs/AUDIT-2026-10-17-quality-audit.md` (source findings).
 
@@ -11,7 +11,7 @@
 
 Make the wallpaper engine perfect — 4K video playback stutter-free with faithful colours. Bug fixes over features.
 Scope banner: engine (`rex-core/` wallpaper stack) + gallery/apply path (`app/`) only. Widgets/taskbar/themes/marketplace deferred.
-User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then** the two user-reported IMAX-clip bugs (Odyssey green tint, Oppenheimer colours).
+User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then** the two user-reported IMAX-clip bugs (Odyssey green tint — **fixed 2026-10-19, unit 18**; Oppenheimer colours — **next**).
 
 ## Standing rules (from AGENTS.md)
 
@@ -25,7 +25,7 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 ## Environment facts
 
 - Build: `cmake --build .build --config Release --target rex-wallpaper-tests` (workdir `rex-core`); runtime: `--target rex-wallpaper-runtime`.
-- Test: `ctest --test-dir .build -C Release --output-on-failure`. Suite: 797 tests (798 entries, one disabled), pass line format "100% tests passed out of N".
+- Test: `ctest --test-dir .build -C Release --output-on-failure`. Suite: 803 tests (804 entries, one disabled), pass line format "100% tests passed out of N".
 - Test exe: `rex-core/.build/Release/rex-wallpaper-tests.exe`. Runtime exe: `rex-core/.build/Release/rex-wallpaper-runtime.exe`.
 - Tests never call `Logger::Initialize` (no engine log from ctest). Rust note: logs to `%TEMP%\REX`.
 - Machine: RX 6700 XT, 3840×2160@120 Hz, MPO disabled. In-repo media fixtures: `bench-media/` (e.g. `mpeg4_320x240.mp4`).
@@ -49,6 +49,8 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 
 - Unit 17 (§6 hygiene): orphaned `wallpaper/renderer/` (15 files, in no CMake target, cannot compile) `git mv` → `dump/wallpaper-renderer/` + README (origin, §5.6 #7 latent bugs, revival notes — audit §5.6 #6/#7/§6); root clutter staged out of the repo to `%TEMP%\opencode\root_clutter_2026-10-19\` (6 `.obj`, 4 `repack*.log`, e2e/wall pngs ~10 MB — the tracked `wall_*` pair now `git rm`'d, still in history — `--help` ×2, `rex-runtime.log`, `rex-cli.log`, `test_settings_config.json`, `rex-core/cli-test.err/.out`; kept: `hdr_*.log`, PresentMon CSV, `_research_*`/`decode_raw*`/`fps.md`, `bench-media/`, `sessions/`); stale docs fixed (`#project_status.md` Shell UI banner'd RETIRED + stub-adapter rows ✅→🟡; `everything.md` repo-map/harness/screenshot rows; A1/A2 overstated-closure corrections in TODO + everything). New findings: native `playlist/` orphan (uncompiled + unreferenced — owner call, NOT archived), CMake-blocked remnant list consolidated (dead compiled modules incl. §5.8 #10/#12, unbuilt tests incl. `test_compositor_render.cpp`, §5.9 #10). No code changed; build no-op green; **797/797** (`ctest_unit17_1019.log`); no relink.
 
+- Unit 18 (IMAX bug 1 — Odyssey green tint): `PoolTextureFormat` gained a third param `surfaceFormat` (pass `desc11.Format` at the HW call site) — the HW pool now mirrors the decoder surface (P010 stays P010 for 10-bit SDR; NV12→NV12; unhandled formats keep the flag fallback); the surface log is now per-change with `pool=`/`copy=match|MISMATCH` (the old once-per-session static is exactly why this bug stayed invisible). Renderer shader: P010 branch gained the SDR case (BT.601/709 + `SrgbToLinear`, mirroring the 8-bit branch) and the `extra.x > 1.5` HDR proxy was removed at all four downstream sites (SDR clamp, HDR-out branch, PQ-out matrix select, ACES gate) — replaced by `mode.y > 0.5` (transfer), never the pool format. Tests: 5 pure mapping + `VideoPipeline.TenBitSdrDecodePublishesP010PoolTexture` (runtime discriminator; in-repo 10-bit SDR fixture; RED proved consumer-visible NV12 where P010 required — 103 vs 104) + rewritten `ColorPipeline.PoolFormatMirrorsDecodeSurfaceNotTransfer` (was a vacuous always-true pin). Fixture `bench-media/hevc10_sdr_320x240.mp4` (Main 10, bt709/tv; untracked; override `REX_TEST_VIDEO_10BIT_SDR`). Shader validated with fxc `ps_5_0`; **803/803** (`ctest_odyssey_1019.log`); runtime relinked 2026-10-19 15:16 (772,608 B). Live (headless runtime against the real `TheOdyssey_IMAX_TLR-2…mkv`): `fmt=P010 (0x68) hdr=false pool=P010 copy=match`, frames flowing, clean shutdown; user live look: video + colours correct. New P3 backlog: shutdown-time first-chance VEH 0x71A in `WorkerWManager`'s `WTSUnRegisterSessionNotification` (146/176 historical crash.log blocks — benign, diagnostic noise).
+
 ### Remaining (this session's mandate — in order)
 
 1. **Owner call — CMake-blocked hygiene remnants:** dead *compiled* modules removal (§5.7 #11 stubs + `render_scheduler` + `unique_handle`; `graphics/animation|effects` — the §5.8 #10/#12 defects live there; `profiles/**`, `modules/Sync/*`, `WidgetRuntime.cpp`, `UpdateManager.cpp`, `desktop_personalization/**` factory, `ModuleManager.cpp`, Search semantic path), unbuilt-test wiring (`test_compositor_render.cpp` = the only D3D12 compositor smoke — §5.6 #8; `test_startup.cpp`; legacy `test_workerw.cpp` tied to unbuilt `src/workerw.cpp`; superseded `test_settings.cpp`), test-infra temp writes (§5.9 #10). All need `rex-core/CMakeLists.txt` edits — deferred by the standing hard rule. Plus the **native `playlist/` orphan** (wire or prune — new finding, NOT archived).
@@ -56,8 +58,8 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 
 ### After the batches (user-sequenced, do NOT start early)
 
-- **Odyssey green tint**: pool format must come from the actual `desc11.Format` (P010) + a P010→SDR renderer path (or VP convert). Location: `FfmpegVideoDecoder.cpp` `PoolTextureFormat` + hw copy path; renderer `m_inputFormat` handling.
-- **Oppenheimer colours**: player A/B in mpv/VLC + `capture_wall.ps1` capture vs `opp_frame_709.bmp` (`C:\Users\Moinu\AppData\Local\Temp\opencode\`).
+- **Odyssey green tint — DONE (unit 18, 2026-10-19).** Pool mirrors the decoder surface (`desc11.Format`) + P010 SDR shader path; live-confirmed on the actual clip (`fmt=P010 hdr=false pool=P010 copy=match`).
+- **Oppenheimer colours — NEXT (unit 19).** Player A/B in mpv/VLC + `capture_wall.ps1` capture vs `opp_frame_709.bmp` (`C:\Users\Moinu\AppData\Local\Temp\opencode\`).
 
 ## Key file pointers
 
@@ -80,5 +82,5 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 
 ## Current state
 
-**Working on:** ALL AUDIT BATCHES CLOSED (units 1–17; unit 17 done 2026-10-19 15:01). Unit 17 finished Batch-4 §6: `wallpaper/renderer/` archived to `dump/wallpaper-renderer/` (+README), root clutter staged to `%TEMP%\opencode\root_clutter_2026-10-19\`, stale docs truthed (Shell UI retired, adapter rows 🟡, A1/A2 corrections). Build no-op green; suite re-run **797/797**; no relink (no code changed). **Next: the user-sequenced IMAX bugs — Odyssey green tint first (`FfmpegVideoDecoder.cpp` pool format from `desc11.Format` + P010→SDR renderer path), then Oppenheimer colours (mpv/VLC A/B + `capture_wall.ps1` vs `opp_frame_709.bmp`).** Standalone owner calls filed: CMake-blocked hygiene remnants, `playlist/` orphan, rex-minidump CMake target. Live app re-watches for units 13/16 pend an app restart.
-**Handoff updated:** 2026-10-19 15:01 (+05:30) by DeepSeek V4.1 Flash Free.
+**Working on:** IMAX bug 1 of 2 DONE — **unit 18 (Odyssey 10-bit-SDR green mess) fixed and live-confirmed 2026-10-19**: the decoder pool now mirrors the actual surface format (`desc11.Format`), so Main10/bt709 SDR clips keep their P010 pool (live: `fmt=P010 (0x68) hdr=false pool=P010 copy=match`) and format-mismatched copies are impossible; P010 gained the SDR shader path and the pool-format-as-HDR proxy is gone. Tests: 5 pure + runtime P010 discriminator (RED 103 vs 104) + rewritten colour pin; fxc `ps_5_0` clean; **803/803**; runtime relinked 15:16 (772,608 B); user live look: video + colours correct. **Next: unit 19 — Oppenheimer on-screen colours (mpv/VLC A/B + `capture_wall.ps1` vs `opp_frame_709.bmp`).** Standalone owner calls still filed: CMake-blocked hygiene remnants, `playlist/` orphan, rex-minidump CMake target; new P3 found during the live run: shutdown-time first-chance VEH 0x71A in `WorkerWManager`'s `WTSUnRegisterSessionNotification` (benign, diagnostic noise). Live app re-watches for units 13/16 pend an app restart.
+**Handoff updated:** 2026-10-19 15:40 (+05:30) by DeepSeek V4.1 Flash Free.
