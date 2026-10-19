@@ -187,6 +187,25 @@ TEST(StopTimelineTest, StopRestartsPlaybackFromZero) {
     vm.Shutdown();
 }
 
+// ── Audit 2026-10-17, §5.4 #7: Shutdown is self-contained and idempotent ──
+
+TEST(VideoManagerShutdownTest, SelfContainedTeardownIsIdempotent) {
+    // Teardown must own the full object state: a second Shutdown (dtor or
+    // explicit) is a no-op, and every consumer path stays null-safe after
+    // teardown. Previously Shutdown left monitor entries and compositors
+    // alive on a dead device and reset the controller without the lock
+    // whose callers reach it.
+    VideoManager vm;
+    EXPECT_FALSE(vm.IsInitialized());
+    vm.Shutdown();  // cold teardown
+    vm.Shutdown();  // idempotent
+    EXPECT_FALSE(vm.IsInitialized());
+    EXPECT_EQ(vm.Tick(1.0), nullptr);  // guarded consumer path
+    EXPECT_EQ(vm.GetSlotCount(), 0u);
+    EXPECT_EQ(vm.GetTelemetry().framesDecoded, 0u);
+    EXPECT_FALSE(vm.IsOpen());
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Per-stage telemetry contract (Phase 1)
 // ═══════════════════════════════════════════════════════════════════════════

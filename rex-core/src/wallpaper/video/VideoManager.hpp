@@ -37,7 +37,10 @@ namespace rex::wallpaper {
 //      (monotonic values: always race-free, even across ring wrap-around)
 //
 // Threading: control methods (Open/Play/Pause/Stop/Seek) are safe from any
-// thread; Tick() is the render-thread-only consumer (SPSC).
+// thread; Tick() is the render-thread-only consumer (SPSC). Shutdown() and
+// Reinitialize() are self-contained: they tear down every owned backend
+// (controller + monitor entries) under m_monitorMutex and must run with the
+// host's render thread parked (the engine stops it before video teardown).
 
 class VideoManager {
 public:

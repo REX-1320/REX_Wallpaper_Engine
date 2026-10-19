@@ -333,6 +333,32 @@ TEST(DiscontinuityRuleTest, ShortLoopWrapIsASeek) {
     EXPECT_TRUE(VideoPlaybackController::IsBackwardJump(0.45, 0.0));
 }
 
+// ── Audit 2026-10-17, §5.4 #5: replay a non-looping video after EOF ─────
+
+TEST(PlayAfterEofTest, EosLatchForcesRewindEvenAFrameShort) {
+    // Natural EOF: the last published PTS stops one frame short of the
+    // duration, so the position heuristic alone reads "mid-stream" and
+    // Play() used to refuse to restart the finished video. The explicit
+    // EOS latch is what makes the restart decision correct.
+    const double duration = 21.9;
+    const double lastPts = duration - 1.0 / 24.0;  // one 24 fps frame short
+    EXPECT_FALSE(
+        VideoPlaybackController::NeedsRewindOnPlay(false, lastPts, duration));
+    EXPECT_TRUE(
+        VideoPlaybackController::NeedsRewindOnPlay(true, lastPts, duration));
+}
+
+TEST(PlayAfterEofTest, PositionHeuristicStillRewindsAtStreamEnd) {
+    // Untagged end state (a decoder that stopped without latching EOS):
+    // the tail-position heuristic still covers a position at the end.
+    EXPECT_TRUE(VideoPlaybackController::NeedsRewindOnPlay(false, 21.9, 21.9));
+}
+
+TEST(PlayAfterEofTest, MidStreamPlayDoesNotRewind) {
+    EXPECT_FALSE(VideoPlaybackController::NeedsRewindOnPlay(false, 5.0, 100.0));
+    EXPECT_FALSE(VideoPlaybackController::NeedsRewindOnPlay(false, 0.0, 100.0));
+}
+
 TEST(WrapTargetTest, LoopWrapsTargetByDuration) {
     // 21.9 s loop: wall 22.0 must select content at ~0.1, not starve.
     EXPECT_NEAR(VideoPlaybackController::WrapTarget(22.0, 21.9, true),

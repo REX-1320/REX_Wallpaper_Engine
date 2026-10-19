@@ -78,9 +78,29 @@ shared::Result<void> VideoManager::Reinitialize(const WallpaperConfig& config,
 }
 
 void VideoManager::Shutdown() {
-    if (m_controller) {
-        m_controller->Close();
-        m_controller.reset();
+    // Self-contained teardown (audit 2026-10-17, §5.4 #7): the monitor
+    // entries (compositors + per-monitor controllers) used to survive
+    // Shutdown — live windows and GPU objects on a dead device, re-attached
+    // after a device-loss Reinitialize — and the controller reset ran
+    // unguarded against workers that reach it through m_monitorMutex.
+    // Everything owned now dies here, under that lock.
+    {
+        std::lock_guard<std::mutex> lock(m_monitorMutex);
+        for (auto& entry : m_monitorEntries) {
+            if (entry.monitorController) {
+                entry.monitorController->Close();
+                entry.monitorController.reset();
+            }
+            if (entry.compositor) {
+                entry.compositor->Shutdown();
+                entry.compositor.reset();
+            }
+        }
+        m_monitorEntries.clear();
+        if (m_controller) {
+            m_controller->Close();
+            m_controller.reset();
+        }
     }
     if (m_fenceHandle) {
         CloseHandle(m_fenceHandle);
@@ -248,6 +268,11 @@ shared::Result<void> VideoManager::Seek(double seconds) {
 }
 
 const VideoFrame* VideoManager::Tick(double targetPts) {
+    // m_monitorMutex (audit §5.4 #7): Shutdown/Reinitialize reset the
+    // controller under this lock; the unguarded read here was the ordering
+    // hole the class doc papered over. This guards only the pointer
+    // hand-off — the frame stream stays SPSC.
+    std::lock_guard<std::mutex> lock(m_monitorMutex);
     return m_controller ? m_controller->Tick(targetPts) : nullptr;
 }
 
@@ -376,7 +401,14 @@ void VideoManager::PresentToAllMonitors(const VideoFrame& frame) {
 
         // Per-monitor independent video takes priority over shared frame
         if (entry.monitorController && entry.monitorController->IsOpen()) {
-            const VideoFrame* monitorFrame = entry.monitorController->Tick(0.0);
+            // Audit §5.4 #8: the target used to be hardcoded 0.0, so under
+            // the strict retain policy only the first frames were ever due
+            // and the video froze. The monitor video's own published
+            // position is its wall clock: decode pacing advances it at
+            // ~1x, and it can never select content ahead of the playhead.
+            const double targetPts = entry.monitorController->GetPosition();
+            const VideoFrame* monitorFrame =
+                entry.monitorController->Tick(targetPts);
             if (monitorFrame && monitorFrame->valid) {
                 entry.compositor->PresentFrame(*monitorFrame, m_fence12.Get());
                 continue;

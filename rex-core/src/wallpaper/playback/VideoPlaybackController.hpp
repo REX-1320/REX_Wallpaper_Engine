@@ -213,6 +213,18 @@ public:
         return wrapped;
     }
 
+    /// Play()-time restart decision (audit 2026-10-17, §5.4 #5): true when
+    /// the playhead must rewind to 0 before (re)starting. The position
+    /// heuristic alone cannot see a natural end of stream — the last
+    /// published PTS stops one frame short of the duration — so a
+    /// non-looping video that played to completion could never restart.
+    /// EOS is latched explicitly by the decode thread and ORed in. Pure;
+    /// unit-tested.
+    static bool NeedsRewindOnPlay(bool eosReached, double position,
+                                  double duration) {
+        return eosReached || position >= duration - 0.001;
+    }
+
 private:
     void DecoderThread();
 
@@ -249,6 +261,11 @@ private:
     std::atomic<bool> m_open{false};
     std::atomic<bool> m_playing{false};
     std::atomic<bool> m_paused{false};
+    // EOS latch (audit 2026-10-17, §5.4 #5): set by the decode thread when
+    // a NON-looping stream ends; cleared by Open/Seek/Stop. Play() ORs it
+    // into the restart decision because the published position cannot
+    // express "finished" (last PTS is one frame short of the duration).
+    std::atomic<bool> m_eosReached{false};
     std::atomic<bool> m_looping{true};
     std::atomic<float> m_speed{1.0f};
     // Phase D: measured reserve depth (ms) and the decode-ahead policy in force.

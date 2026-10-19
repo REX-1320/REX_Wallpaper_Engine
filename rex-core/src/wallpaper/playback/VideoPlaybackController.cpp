@@ -59,6 +59,8 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
         std::lock_guard clk(m_contentMutex);
         m_contentMeter.Reset();
     }
+    // A reopen must be playable: clear any EOS latch from the previous file.
+    m_eosReached.store(false, std::memory_order_release);
     // Scale the reserve marks to what the 8-slot pool can actually hold at this
     // source rate. A fixed 100 ms mark is unreachable at >=60 fps and made the
     // decoder thrash burst->park->burst (measured: schedDrops 204, effFps 52.5).
@@ -211,7 +213,9 @@ void VideoPlaybackController::Close() {
 void VideoPlaybackController::Play() {
     if (!m_open.load(std::memory_order_acquire)) return;
     if (!m_playing.load(std::memory_order_acquire) &&
-        m_position.load(std::memory_order_acquire) >= m_duration - 0.001) {
+        NeedsRewindOnPlay(m_eosReached.load(std::memory_order_acquire),
+                          m_position.load(std::memory_order_acquire),
+                          m_duration)) {
         Seek(0.0);
     }
     m_paused.store(false, std::memory_order_release);
@@ -271,6 +275,7 @@ void VideoPlaybackController::Stop() {
     // (with a decoder, the decode thread is parked on m_playing=false
     // and re-checks it under the lock before publishing).
     m_position.store(0.0, std::memory_order_release);
+    m_eosReached.store(false, std::memory_order_release);  // timeline reset ⇒ playable
     if (audio) {
         audio->Stop();
     }
@@ -337,6 +342,7 @@ shared::Result<void> VideoPlaybackController::Seek(double seconds) {
         return shared::Result<void>(shared::ErrorCode::InvalidState, "seek failed");
     }
     m_position.store(seconds, std::memory_order_release);
+    m_eosReached.store(false, std::memory_order_release);  // any seek re-arms playback
     ++m_decodeGeneration;  // drop any frame decoded from the pre-seek stream
     if (audio) {
         audio->Seek(seconds);
@@ -615,6 +621,11 @@ void VideoPlaybackController::DecoderThread() {
                 continue;  // decoder already looped internally
             }
             m_playing.store(false, std::memory_order_release);  // end of stream
+            // Latch EOS (audit 2026-10-17, §5.4 #5): the published position
+            // alone cannot mark "finished" (last PTS is one frame short of
+            // the duration), so Play() would refuse to restart a non-looping
+            // video that played to completion. Seek/Stop/Open clear this.
+            m_eosReached.store(true, std::memory_order_release);
             continue;
         }
 
