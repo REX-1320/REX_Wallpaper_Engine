@@ -534,6 +534,16 @@ class FfmpegVideoDecoder {
     /// SDR. Uploading RGB bytes into a YUV pool corrupts every frame.
     static DXGI_FORMAT PoolTextureFormat(bool hardwarePath, bool hdrContent);
 
+    /// Slot-leasing allocator (Phase D): the oldest pool slot whose contents
+    /// are at least `margin` frames behind the render thread's consumed
+    /// watermark, falling back to the strict oldest when nothing qualifies.
+    /// Pure integer bookkeeping with no device dependency — public so the
+    /// lease tests call this exact function instead of a drift-prone mirror
+    /// copy (audit 2026-10-17, §5.2 #15).
+    static UINT PickSlotOldestSafe(const int64_t* slotFrameIndex, UINT slots,
+                                   int64_t consumed, int64_t margin,
+                                   bool haveConsumed);
+
     /// Shareable pool slot count, public for the P1 resource envelope
     /// (ResourcePolicy.hpp mirrors it; MediaBudgetMirrorTest pins equality).
     static constexpr UINT kPoolSize = 8;
@@ -667,7 +677,6 @@ private:
     std::atomic<UINT64> m_slotFence[kPoolSize]{};
     UINT m_poolW = 0;
     UINT m_poolH = 0;
-    UINT m_poolNext = 0;
     // Slot leasing (Phase D prerequisite). A slot must not be reused until the
     // render thread is provably done reading it. The fence only gives GPU
     // ORDERING, not lifetime: after a slot is overwritten, a consumer that

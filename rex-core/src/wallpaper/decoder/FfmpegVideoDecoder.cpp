@@ -45,39 +45,9 @@ constexpr const char* kModule = "FfmpegVideoDecoder";
 // a slot within a frame or two). Decode-ahead widens that window a lot, so the
 // allocator below prefers the slot furthest behind the consumed watermark.
 //
-// This is pure integer bookkeeping with no device dependency, so it is unit
-// tested directly (see test_pool_slot_lease.cpp).
-/// Oldest slot that is at least `margin` frames behind `consumed`.
-/// Falls back to the strict oldest slot when no slot qualifies (the renderer
-/// has fallen further behind than the margin allows), which degrades to
-/// "reuse the stalest content" rather than "reuse whatever round-robin lands
-/// on" - strictly better than the previous blind rotation, and still bounded
-/// by the consumer's own fence wait for correctness.
-UINT PickSlotOldestSafe(const int64_t* slotFrameIndex, UINT slots,
-                        int64_t consumed, int64_t margin, bool haveConsumed) {
-    // Fallback: the strict oldest slot, always a valid choice.
-    UINT fallback = 0;
-    int64_t fallbackIndex = slotFrameIndex[0];
-    for (UINT i = 1; i < slots; ++i) {
-        const int64_t idx = slotFrameIndex[i];
-        if (idx < fallbackIndex) { fallbackIndex = idx; fallback = i; }
-    }
-    if (!haveConsumed) return fallback;
-
-    // Preferred: the oldest slot at least `margin` frames behind the render
-    // thread. Found by scan rather than seeded at slot 0, because slot 0 may
-    // itself be ineligible - seeding would return it unchecked.
-    UINT best = UINT_MAX;
-    int64_t bestIndex = INT64_MAX;
-    for (UINT i = 0; i < slots; ++i) {
-        const int64_t idx = slotFrameIndex[i];
-        if (idx <= consumed - margin && idx < bestIndex) {
-            bestIndex = idx;
-            best = i;
-        }
-    }
-    return best != UINT_MAX ? best : fallback;
-}
+// This is pure integer bookkeeping with no device dependency: it is a public
+// static (declared in the header) and the lease tests call this exact
+// function — no mirror copy (audit 2026-10-17, §5.2 #15).
 
 // Bounded retry budget for avcodec_send_packet returning EAGAIN. Zero means
 // never stall; this many retries lets a transiently-full decoder drain first.
@@ -144,14 +114,21 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
         return shared::Result<void>(shared::ErrorCode::HardwareNotSupported,
                                     "cannot get D3D11 device from context");
     }
-    ID3D11VideoDevice* rawVideoDevice = nullptr;
-    ID3D11VideoContext* rawVideoContext = nullptr;
-    ID3D11VideoContext1* rawVideoContext1 = nullptr;
-    ID3D11DeviceContext4* rawContext4 = nullptr;
-    HRESULT hVid  = m_device11->QueryInterface(IID_PPV_ARGS(&rawVideoDevice));
-    HRESULT hVCtx = context11->QueryInterface(IID_PPV_ARGS(&rawVideoContext));
-    HRESULT hVC1  = context11->QueryInterface(IID_PPV_ARGS(&rawVideoContext1));
-    HRESULT hCtx4 = context11->QueryInterface(IID_PPV_ARGS(&rawContext4));
+    // Audit 2026-10-17, §5.2 #6: QI into ComPtr locals and publish only when
+    // all four succeed. The old raw-pointer form leaked every already-
+    // AddRef'd interface when a later QI failed (the early return skipped
+    // all four Attach calls).
+    Microsoft::WRL::ComPtr<ID3D11VideoDevice>   videoDevice;
+    Microsoft::WRL::ComPtr<ID3D11VideoContext>  videoContext;
+    Microsoft::WRL::ComPtr<ID3D11VideoContext1> videoContext1;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> context4;
+    HRESULT hVid  = m_device11.As(&videoDevice);
+    HRESULT hVCtx = context11->QueryInterface(
+        IID_PPV_ARGS(videoContext.GetAddressOf()));
+    HRESULT hVC1  = context11->QueryInterface(
+        IID_PPV_ARGS(videoContext1.GetAddressOf()));
+    HRESULT hCtx4 = context11->QueryInterface(
+        IID_PPV_ARGS(context4.GetAddressOf()));
     if (FAILED(hVid) || FAILED(hVCtx) || FAILED(hVC1) || FAILED(hCtx4)) {
         m_context.Reset();
         m_device11.Reset();
@@ -160,10 +137,10 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
             "D3D11 device lacks video support (vid=0x" + Hex(hVid) + ", vctx=0x" +
                 Hex(hVCtx) + ", vctx1=0x" + Hex(hVC1) + ", ctx4=0x" + Hex(hCtx4) + ")");
     }
-    m_videoDevice.Attach(rawVideoDevice);
-    m_videoContext.Attach(rawVideoContext);
-    m_videoContext1.Attach(rawVideoContext1);
-    m_context4.Attach(rawContext4);
+    m_videoDevice   = std::move(videoDevice);
+    m_videoContext  = std::move(videoContext);
+    m_videoContext1 = std::move(videoContext1);
+    m_context4      = std::move(context4);
 
     // Capability probe (Phase 6): ask the driver what it can actually decode
     // instead of discovering the answer by attempting an open and reading a
@@ -522,7 +499,6 @@ void FfmpegVideoDecoder::Close() {
     m_processor.Reset();
     m_poolW = 0;
     m_poolH = 0;
-    m_poolNext = 0;
     for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
     m_poolFormat = DXGI_FORMAT_UNKNOWN;
     m_hdrContent = false;
@@ -1143,6 +1119,33 @@ size_t FfmpegVideoDecoder::DumpDecodeStages() const {
     return rows.size();
 }
 
+UINT FfmpegVideoDecoder::PickSlotOldestSafe(const int64_t* slotFrameIndex,
+                                           UINT slots, int64_t consumed,
+                                           int64_t margin, bool haveConsumed) {
+    // Fallback: the strict oldest slot, always a valid choice.
+    UINT fallback = 0;
+    int64_t fallbackIndex = slotFrameIndex[0];
+    for (UINT i = 1; i < slots; ++i) {
+        const int64_t idx = slotFrameIndex[i];
+        if (idx < fallbackIndex) { fallbackIndex = idx; fallback = i; }
+    }
+    if (!haveConsumed) return fallback;
+
+    // Preferred: the oldest slot at least `margin` frames behind the render
+    // thread. Found by scan rather than seeded at slot 0, because slot 0 may
+    // itself be ineligible - seeding would return it unchecked.
+    UINT best = UINT_MAX;
+    int64_t bestIndex = INT64_MAX;
+    for (UINT i = 0; i < slots; ++i) {
+        const int64_t idx = slotFrameIndex[i];
+        if (idx <= consumed - margin && idx < bestIndex) {
+            bestIndex = idx;
+            best = i;
+        }
+    }
+    return best != UINT_MAX ? best : fallback;
+}
+
 // P0-3 / R3+R4: the pool is keyed by (size, exact format), not by
 // (size, hdr flag + m_processor). The old fast path required m_processor,
 // null on software decode, so SW rebuilt all 8 textures + shared handles
@@ -1166,18 +1169,18 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
         return true;
     }
 
-    for (HANDLE h : m_poolHandles) {
-        if (h) CloseHandle(h);
-    }
-    m_poolHandles.clear();
-    m_poolTex.clear();
-    m_poolTex.resize(kPoolSize);
-    m_poolHandles.resize(kPoolSize, nullptr);
-    m_poolW = width;
-    m_poolH = height;
-    m_poolNext = 0;
-    for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
-    m_poolFormat = format;
+    // Audit 2026-10-17, §5.2 #2: build the whole pool generation into
+    // temporaries and commit only when every texture, NT handle, video
+    // processor and staging texture exists. The old order published
+    // m_poolW/H/Format (and resized the vectors) before the creation loop
+    // and returned false mid-loop on failure — the fast path above then
+    // claimed a complete pool whose remaining slots were null textures,
+    // and every later conversion wrote through one.
+    std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> tex(kPoolSize);
+    std::vector<HANDLE> handles(kPoolSize, nullptr);
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> vpEnum;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessor> vpProcessor;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
 
     const char* fmtName = "unknown";
     switch (format) {
@@ -1187,8 +1190,8 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
         case DXGI_FORMAT_R16G16B16A16_UNORM: fmtName = "RGBA16 (SW HDR)"; break;
         default: break;
     }
-    REX_LOG_INFO(kModule, "pool rebuilt: {} slots, {}x{}, {} (bounded)",
-                 kPoolSize, width, height, fmtName);
+    // Every failure path below releases the partial generation and leaves
+    // the previous committed pool (if any) intact; the next call retries.
 
     // SDR: NV12 pool (bypass VP, shader does YUV→RGB).
     // HDR + HW: P010 pool (GPU-resident, shader does BT.2020 PQ decode).
@@ -1196,7 +1199,7 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
     // SDR + SW: BGRA pool (software swscale outputs BGRA).
     const DXGI_FORMAT poolFormat = format;
 
-    for (size_t i = 0; i < m_poolTex.size(); ++i) {
+    for (size_t i = 0; i < tex.size(); ++i) {
         D3D11_TEXTURE2D_DESC pd = {};
         pd.Width = width;
         pd.Height = height;
@@ -1214,19 +1217,26 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
         }
         pd.MiscFlags = D3D11_RESOURCE_MISC_SHARED |
                        D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-        if (FAILED(m_device11->CreateTexture2D(&pd, nullptr, &m_poolTex[i]))) {
+        if (FAILED(m_device11->CreateTexture2D(&pd, nullptr, &tex[i]))) {
+            REX_LOG_ERROR(kModule, "pool texture creation failed ({}x{}, {})",
+                          width, height, fmtName);
+            for (HANDLE h : handles) { if (h) CloseHandle(h); }
             return false;
         }
         Microsoft::WRL::ComPtr<IDXGIResource1> res1;
-        if (SUCCEEDED(m_poolTex[i].As(&res1))) {
-            res1->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr,
-                                     &m_poolHandles[i]);
+        if (FAILED(tex[i].As(&res1)) ||
+            FAILED(res1->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr,
+                                            &handles[i])) ||
+            !handles[i]) {
+            // A slot without an NT handle can never reach the renderer; a
+            // half-shareable pool is the exact state §5.2 #2 warns about.
+            REX_LOG_ERROR(kModule, "pool slot share-handle creation failed");
+            for (HANDLE h : handles) { if (h) CloseHandle(h); }
+            return false;
         }
     }
 
     // Hardware YUV->RGB video processor (only needed for hardware decode)
-    m_enum.Reset();
-    m_processor.Reset();
     if (m_hardware) {
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd = {};
         cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
@@ -1237,18 +1247,18 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
         cd.OutputWidth = width;
         cd.OutputHeight = height;
         cd.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
-        HRESULT hr = m_videoDevice->CreateVideoProcessorEnumerator(&cd, &m_enum);
+        HRESULT hr = m_videoDevice->CreateVideoProcessorEnumerator(&cd, &vpEnum);
         if (SUCCEEDED(hr)) {
-            hr = m_videoDevice->CreateVideoProcessor(m_enum.Get(), 0, &m_processor);
+            hr = m_videoDevice->CreateVideoProcessor(vpEnum.Get(), 0, &vpProcessor);
         }
         if (FAILED(hr)) {
             REX_LOG_ERROR(kModule, "create video processor failed (0x{:08x})", hr);
+            for (HANDLE h : handles) { if (h) CloseHandle(h); }
             return false;
         }
     }
 
     // Software-upload staging texture.
-    m_staging.Reset();
     D3D11_TEXTURE2D_DESC sd = {};
     sd.Width = width;
     sd.Height = height;
@@ -1258,10 +1268,29 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
     sd.SampleDesc.Count = 1;
     sd.Usage = D3D11_USAGE_STAGING;
     sd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    if (FAILED(m_device11->CreateTexture2D(&sd, nullptr, &m_staging))) {
+    if (FAILED(m_device11->CreateTexture2D(&sd, nullptr, &staging))) {
         REX_LOG_ERROR(kModule, "create staging texture failed");
+        for (HANDLE h : handles) { if (h) CloseHandle(h); }
         return false;
     }
+
+    // ── Commit point (audit §5.2 #2): every resource exists; only now
+    // invalidate the old generation and publish the new one.
+    for (HANDLE h : m_poolHandles) {
+        if (h) CloseHandle(h);
+    }
+    m_poolTex = std::move(tex);
+    m_poolHandles = std::move(handles);
+    m_poolW = width;
+    m_poolH = height;
+    m_poolFormat = format;
+    for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
+    m_enum = std::move(vpEnum);
+    m_processor = std::move(vpProcessor);
+    m_staging = std::move(staging);
+
+    REX_LOG_INFO(kModule, "pool rebuilt: {} slots, {}x{}, {} (bounded)",
+                 kPoolSize, width, height, fmtName);
     return true;
 }
 
@@ -1510,8 +1539,13 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
         if (dlFrame) av_frame_free(&dlFrame);
         return false;
     }
-    const UINT slot = m_poolNext;
-    m_poolNext = (m_poolNext + 1) % kPoolSize;
+    // Audit 2026-10-17, §5.2 #4 (cross-listed §5.4 #3): lease through the
+    // same consumed-watermark allocator as the GPU path. The old blind
+    // round-robin could overwrite a slot the renderer had not consumed yet
+    // and never stamped m_slotFrameIndex, so the lease saw stale
+    // bookkeeping.
+    const UINT slot = PickPoolSlot();
+    m_slotFrameIndex[slot] = static_cast<int64_t>(m_frameIndex);
 
     av_frame_unref(m_swFrame);
     m_swFrame->format = swFormat;

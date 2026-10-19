@@ -268,10 +268,16 @@ private:
         // via uvScale so zeroed padding rows never present (green bar).
         UINT texWidth = 0;
         UINT texHeight = 0;
+        // Usage stamp (LRU eviction, audit §5.2 #3): a mid-session pool
+        // rebuild retires every NT handle, so the cache must be able to
+        // evict old-generation slots instead of failing at 8.
+        UINT64 lastUsedTick = 0;
     };
     static constexpr UINT kMaxVideoSlots = 8;
     std::array<VideoSlotResource, kMaxVideoSlots> m_videoSlots;
     UINT   m_videoSlotCount = 0;
+    // Monotonic stamp feeding lastUsedTick.
+    UINT64 m_slotUseCounter = 0;
     HANDLE m_activeVideoHandle = nullptr;
     bool   m_hasVideoFrame = false;
     int    m_videoWidth  = 0;

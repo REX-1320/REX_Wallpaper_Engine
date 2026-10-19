@@ -703,9 +703,11 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
 
     ID3D12Device* dev = m_device.Get();
 
-    // Locate or open the pool slot resource (handles are stable per video
-    // open; the decoder's pool has kPoolSize slots, so the cache never
-    // needs eviction).
+    // Locate or open the pool slot resource. Handles are stable in the
+    // steady state, but a mid-session pool rebuild (stream switch / format
+    // change) retires all 8 inside one video open — so the cache tracks
+    // usage and retires the least-recently-drawn slot instead of failing
+    // at kMaxVideoSlots (audit 2026-10-17, §5.2 #3 / F1).
     UINT idx = kMaxVideoSlots;
     for (UINT i = 0; i < m_videoSlotCount; ++i) {
         if (m_videoSlots[i].sharedHandle == frame.sharedHandle) {
@@ -713,12 +715,45 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
             break;
         }
     }
+    if (idx < kMaxVideoSlots) {
+        m_videoSlots[idx].lastUsedTick = ++m_slotUseCounter;
+    }
     if (idx == kMaxVideoSlots) {
         if (m_videoSlotCount >= kMaxVideoSlots) {
-            return shared::Result<void>(shared::ErrorCode::InvalidState,
-                                        "Video slot cache exhausted");
+            // Drain first: D3D12 does not refcount resources for the GPU,
+            // and every submitted list referencing a victim has completed
+            // once the queue is idle. This runs between BeginFrame/EndFrame
+            // before the pass records its video draw, so the open command
+            // list cannot reference a victim either.
+            ActiveQueue().WaitForGPU();
+            UINT victim = kMaxVideoSlots;
+            UINT64 oldest = UINT64_MAX;
+            for (UINT i = 0; i < m_videoSlotCount; ++i) {
+                // Keep the presented frame: with 8 slots and one active
+                // handle there is always a non-active candidate.
+                if (m_videoSlots[i].sharedHandle == m_activeVideoHandle) {
+                    continue;
+                }
+                if (m_videoSlots[i].lastUsedTick < oldest) {
+                    oldest = m_videoSlots[i].lastUsedTick;
+                    victim = i;
+                }
+            }
+            if (victim == kMaxVideoSlots) {
+                return shared::Result<void>(shared::ErrorCode::InvalidState,
+                                            "Video slot cache exhausted");
+            }
+            REX_LOG_INFO("D3D12", "video slot cache full - evicting slot {} "
+                         "(stale pool generation)", victim);
+            m_videoSlots[victim].resource.Reset();
+            m_videoSlots[victim].sharedHandle = nullptr;
+            m_videoSlots[victim].srvGpu = {};
+            m_videoSlots[victim].texWidth = 0;
+            m_videoSlots[victim].texHeight = 0;
+            idx = victim;
+        } else {
+            idx = m_videoSlotCount;
         }
-        idx = m_videoSlotCount;
         HRESULT hr = dev->OpenSharedHandle(frame.sharedHandle,
                                            IID_PPV_ARGS(&m_videoSlots[idx].resource));
         if (FAILED(hr)) {
@@ -727,6 +762,7 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
                                         "OpenSharedHandle failed");
         }
         m_videoSlots[idx].sharedHandle = frame.sharedHandle;
+        m_videoSlots[idx].lastUsedTick = ++m_slotUseCounter;
 
         const DXGI_FORMAT fmt = m_videoSlots[idx].resource->GetDesc().Format;
         const D3D12_RESOURCE_DESC resDesc = m_videoSlots[idx].resource->GetDesc();
@@ -834,7 +870,10 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
             m_videoSlots[idx].srvGpu.ptr += base * inc;
         }
 
-        m_videoSlotCount++;
+        // Reusing a victim keeps the count; an append extends it (the old
+        // unconditional ++ would have drifted past kMaxVideoSlots once
+        // eviction reuses an index below the count).
+        if (idx >= m_videoSlotCount) m_videoSlotCount = idx + 1;
     }
 
     // GPU ordering: the D3D11 video engine blts into this pool slot and

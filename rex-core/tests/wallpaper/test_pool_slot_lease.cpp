@@ -13,32 +13,19 @@
 #include <cstdint>
 #include <utility>
 
-namespace {
+#include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 
 using UINT = unsigned int;
 
-// Mirrors FfmpegVideoDecoder.cpp's PickSlotOldestSafe exactly.
+namespace {
+
+// Calls the production allocator directly (audit 2026-10-17, §5.2 #15): the
+// previous mirror copy could not detect drift — these tests would keep
+// passing while the real semantics changed underneath them.
 UINT PickSlotOldestSafe(const int64_t* slotFrameIndex, UINT slots,
                         int64_t consumed, int64_t margin, bool haveConsumed) {
-    // Fallback: the strict oldest slot, always a valid choice.
-    UINT fallback = 0;
-    int64_t fallbackIndex = slotFrameIndex[0];
-    for (UINT i = 1; i < slots; ++i) {
-        const int64_t idx = slotFrameIndex[i];
-        if (idx < fallbackIndex) { fallbackIndex = idx; fallback = i; }
-    }
-    if (!haveConsumed) return fallback;
-
-    UINT best = UINT_MAX;
-    int64_t bestIndex = INT64_MAX;
-    for (UINT i = 0; i < slots; ++i) {
-        const int64_t idx = slotFrameIndex[i];
-        if (idx <= consumed - margin && idx < bestIndex) {
-            bestIndex = idx;
-            best = i;
-        }
-    }
-    return best != UINT_MAX ? best : fallback;
+    return rex::wallpaper::FfmpegVideoDecoder::PickSlotOldestSafe(
+        slotFrameIndex, slots, consumed, margin, haveConsumed);
 }
 
 constexpr UINT kSlots = 8;

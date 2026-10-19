@@ -16,6 +16,10 @@
 #include <string>
 
 #include <windows.h>
+#include <d3d11.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
 
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 #include "wallpaper/video/VideoManager.hpp"
@@ -146,4 +150,80 @@ TEST(SoftwareDecodePoolTest, BgraPoolServesValidRgbFrames) {
     EXPECT_TRUE(frame->valid);
     EXPECT_NE(frame->sharedHandle, static_cast<HANDLE>(nullptr));
     EXPECT_GT(frame->fenceValue, 0ULL);
+}
+
+// ── Audit 2026-10-17, §5.2 #4 (cross-listed §5.4 #3): SW path skipped the
+//    pool-slot lease ────────────────────────────────────────────────────────
+//
+// The software conversion path rotated a blind cursor (m_poolNext) and never
+// stamped m_slotFrameIndex, so it could overwrite a slot the renderer was
+// still reading and left the lease bookkeeping stale for later consumers.
+// It must lease through the same consumed-watermark allocator as the HW
+// path. Deterministic trace with no consumer watermark and one stamp per
+// decoded frame (strict-stalest rule, ties keep the lowest index):
+//   f0 -> 0, f1 -> 0 (slot 0 was just stamped, still stalest), f2 -> 1,
+//   f3 -> 2, ... f8 -> 7.
+// The pre-fix blind rotation puts f1 in slot 1 — frame 1 discriminates.
+TEST(SoftwareDecodePoolTest, SoftwarePathLeasesPoolSlots) {
+    const std::string path = FindSdrTestVideo();
+    if (path.empty()) {
+        GTEST_SKIP() << "no SDR test video (set REX_TEST_VIDEO_SDR)";
+    }
+
+    rex::graphics::Device d3d12;
+    if (d3d12.Initialize().IsError()) {
+        GTEST_SKIP() << "D3D12 device unavailable";
+    }
+
+    // Same-adapter D3D11 device + immediate context (the VideoManager
+    // recipe): the decoder needs the context; the device comes from it.
+    Microsoft::WRL::ComPtr<IDXGIFactory6> factory;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->EnumAdapterByLuid(d3d12.Get()->GetAdapterLuid(),
+                                          IID_PPV_ARGS(&adapter)))) {
+        GTEST_SKIP() << "cannot query D3D12 adapter";
+    }
+    Microsoft::WRL::ComPtr<ID3D11Device> dev11;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx11;
+    const UINT createFlags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT |
+                             D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+    if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN,
+                                 nullptr, createFlags, &fl, 1,
+                                 D3D11_SDK_VERSION, &dev11, nullptr, &ctx11))) {
+        GTEST_SKIP() << "D3D11 device creation failed";
+    }
+
+    // Shared fence (D3D12 creates, D3D11 opens): the SW path signals it
+    // after every upload, exactly like the HW path.
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence12;
+    HANDLE fenceHandle = nullptr;
+    if (FAILED(d3d12.Get()->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+                                        IID_PPV_ARGS(&fence12))) ||
+        FAILED(d3d12.Get()->CreateSharedHandle(fence12.Get(), nullptr,
+                                               GENERIC_ALL, nullptr,
+                                               &fenceHandle))) {
+        GTEST_SKIP() << "shared fence creation failed";
+    }
+
+    FfmpegVideoDecoder decoder;
+    const auto openResult =
+        decoder.Open(path, /*useHardware=*/false, ctx11.Get(), fenceHandle);
+    ASSERT_TRUE(openResult.IsSuccess()) << openResult.Error().message;
+
+    const UINT expected[9] = {0, 0, 1, 2, 3, 4, 5, 6, 7};
+    for (UINT i = 0; i < 9; ++i) {
+        rex::wallpaper::VideoFrame frame;
+        ASSERT_TRUE(decoder.DecodeFrame(frame))
+            << "fixture ended at frame " << i;
+        ASSERT_TRUE(frame.valid);
+        ASSERT_EQ(frame.frameIndex, i);
+        EXPECT_EQ(frame.slot, expected[i])
+            << "frame " << i << ": SW path left the slot lease "
+               "(audit §5.2 #4)";
+    }
+
+    decoder.Close();
+    ::CloseHandle(fenceHandle);
 }
