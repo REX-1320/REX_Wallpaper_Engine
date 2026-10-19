@@ -150,8 +150,14 @@ shared::Result<void> SwapChain::Resize(
         m_frameLatencyWaitable = swapChain2->GetFrameLatencyWaitableObject();
     }
 
-    m_swapChain->SetColorSpace1(m_isHdr ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-                                        : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    // Audit 5.6 #13: SetColorSpace1 can fail (unsupported space on this
+    // output) — log instead of silently rendering with the wrong transform.
+    const HRESULT csHr = m_swapChain->SetColorSpace1(
+        m_isHdr ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    if (FAILED(csHr)) {
+        REX_LOG_WARN("SwapChain", "SetColorSpace1 failed (0x{:08X})", csHr);
+    }
 
     auto rtvResult = CreateRenderTargetViews(device);
     if (rtvResult.IsError()) {
@@ -367,8 +373,13 @@ void SwapChain::UpdateHdrSelection() {
         m_frameLatencyWaitable = swapChain2->GetFrameLatencyWaitableObject();
     }
 
-    m_swapChain->SetColorSpace1(hdr ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-                                    : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    // Audit 5.6 #13: log a failed color-space switch (see Resize()).
+    const HRESULT csHr = m_swapChain->SetColorSpace1(
+        hdr ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+            : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    if (FAILED(csHr)) {
+        REX_LOG_WARN("SwapChain", "SetColorSpace1 failed (0x{:08X})", csHr);
+    }
     REX_LOG_INFO("SwapChain", "HDR10 output {}", hdr ? "enabled" : "disabled");
 }
 

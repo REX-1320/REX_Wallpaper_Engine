@@ -23,14 +23,16 @@ public:
     bool Save();
 
     // Per-monitor wallpaper (EDID-keyed)
-    void SetMonitorWallpaper(uint64_t edidHash, const std::string& path);
+    // Audit 5.5 #8: the mutating setters now report persistence failure
+    // (they used to call Save() and swallow its result).
+    bool SetMonitorWallpaper(uint64_t edidHash, const std::string& path);
     std::string GetMonitorWallpaper(uint64_t edidHash) const;
-    void RemoveMonitorWallpaper(uint64_t edidHash);
+    bool RemoveMonitorWallpaper(uint64_t edidHash);
 
     // Playlist persistence
-    void SetString(const std::string& key, const std::string& value);
+    bool SetString(const std::string& key, const std::string& value);
     std::string GetString(const std::string& key, const std::string& def = "") const;
-    void RemoveKey(const std::string& key);
+    bool RemoveKey(const std::string& key);
 
     // Return all keys matching a prefix (for garbage-collecting stale entries).
     std::vector<std::string> GetKeysByPrefix(const std::string& prefix) const;

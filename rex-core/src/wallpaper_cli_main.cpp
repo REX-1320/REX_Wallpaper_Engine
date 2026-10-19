@@ -75,7 +75,11 @@ namespace json = rex::runtime;
 static std::string WidenToUtf8(const std::wstring& wide) {
     if (wide.empty()) return {};
     int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string utf8(size - 1, '\0');
+    // Audit 5.5 #10: mirror the Utf8ToWiden guard — size <= 0 must never
+    // reach the allocation below (size - 1 would wrap into a gigantic
+    // std::string and terminate the process).
+    if (size <= 1) return {};
+    std::string utf8(static_cast<size_t>(size - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, utf8.data(), size, nullptr, nullptr);
     return utf8;
 }
@@ -105,6 +109,19 @@ struct SettingsBundle {
     std::shared_ptr<rex::settings::SettingsService> service;
 };
 
+// Audit 5.5 #9: the settings store used to be opened cwd-relative
+// ("config/settings.json"), so dev shells and packaged Electron (spawned
+// with no cwd) persisted to different files on the same machine. Anchor it
+// to the user profile, matching the %TEMP%\REX convention used for logs.
+static std::string RuntimeSettingsPath() {
+    if (const char* local = std::getenv("LOCALAPPDATA")) {
+        const std::string dir = std::string(local) + "\\REX";
+        CreateDirectoryA(dir.c_str(), nullptr);  // ERROR_ALREADY_EXISTS ok
+        return dir + "\\settings.json";
+    }
+    return "config/settings.json";  // no profile env: keep legacy behaviour
+}
+
 static std::shared_ptr<rex::settings::ISettingsService> CreateSettingsService() {
     static std::shared_ptr<SettingsBundle> bundle; // kept alive for the process
 
@@ -112,7 +129,7 @@ static std::shared_ptr<rex::settings::ISettingsService> CreateSettingsService() 
         auto b = std::make_shared<SettingsBundle>();
         b->bus = std::make_shared<rex::modules::EventBus>();
         b->store = std::make_shared<rex::modules::ConfigurationStore>(
-            "config/settings.json");
+            RuntimeSettingsPath());
 
         auto registry = std::make_unique<rex::settings::SettingsRegistry>();
         auto validator = std::make_unique<rex::settings::ValidationEngine>();
@@ -492,9 +509,11 @@ static int SetImageWallpaper(const std::wstring& file, FillMode fillMode) {
 //
 //   [uint32 LE length][UTF-8 JSON payload]
 //
-// Commands:  INIT, LOAD, PLAY, PAUSE, STOP, UNLOAD, SET_FILL_MODE,
-//            SET_VOLUME, SET_SPEED, SET_LOOP, SET_MUTE, SET_MONITOR, GET_STATUS,
-//            GET_CAPABILITIES, SHUTDOWN
+// Commands:  PING, INIT, LOAD, UNLOAD, PLAY, PAUSE, STOP, SHUTDOWN,
+//            SET_FILL_MODE, SET_VOLUME, SET_SPEED, SET_LOOP, SET_MUTE,
+//            SET_BRIGHTNESS, SET_CONTRAST, SET_SATURATION, SET_AUDIO_MODE,
+//            SET_MONITOR, SET_CLIENT_PID, DETACH_CLIENT,
+//            GET_STATUS, GET_CAPABILITIES, GET_FRAME_SURFACE
 // Responses: {"type":"response","id":N,"ok":true,"data":{...}}
 // Events:    {"type":"event","event":"READY|LOADED|PLAYING|PAUSED|
 //             STOPPED|UNLOADED|ERROR","data":{...}}
@@ -816,7 +835,11 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
         }
         auto parsed = json::Json::Parse(frame);
         if (!parsed) {
-            REX_LOG_WARN("Runtime", "Malformed frame: {}", frame.c_str());
+            // Audit 5.5 #11: the frame can be up to 16 MiB — log its size and
+            // a bounded prefix, not the whole payload (log flood).
+            REX_LOG_WARN("Runtime", "Malformed frame ({} bytes): {}{}",
+                         frame.size(), frame.substr(0, 64),
+                         frame.size() > 64 ? "..." : "");
             WriteResponse(0, false, "malformed frame");
             continue;
         }
@@ -1097,6 +1120,13 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                 WriteResponse(id, false, "runtime not initialized");
                 continue;
             }
+            // Audit 5.5 #4: a missing 'value' used to fall through to the
+            // As*() defaults and silently apply 0/false (e.g. mute ON or
+            // black-level brightness). Reject the command instead.
+            if (!params.Has("value")) {
+                WriteResponse(id, false, cmd + " requires a 'value' field");
+                continue;
+            }
             std::string property;
             std::string value;
             if (cmd == "SET_FILL_MODE") {
@@ -1262,7 +1292,12 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             data.emplace("available", json::Json(true));
             data.emplace("fenceHandle", HexU64(reinterpret_cast<uint64_t>(g_clientSurface.fence)));
             data.emplace("adapterLuid", HexU64(s.adapterLuid));
-            data.emplace("slotCount", json::Json(static_cast<double>(s.slotCount)));
+            // Audit 5.5 #6: emit the CLAMPED count that the handle array
+            // actually has (s.slotCount can exceed kMaxPreviewSlots) plus
+            // whether the handles are client-process duplicates or
+            // process-local debug values.
+            data.emplace("slotCount", json::Json(static_cast<double>(g_clientSurface.slotCount)));
+            data.emplace("duplicated", json::Json(g_clientSurface.duplicated));
             data.emplace("currentSlot", json::Json(static_cast<double>(s.currentSlot)));
             data.emplace("currentFenceValue", HexU64(s.currentFenceValue));
             data.emplace("width", json::Json(static_cast<double>(s.width)));

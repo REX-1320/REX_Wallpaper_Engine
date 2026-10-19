@@ -271,11 +271,11 @@ TEST(FrameSchedulerTest, FS14_FutureFramesNotDroppedThenDue) {
     EXPECT_EQ(scheduler.GetDroppedCount(), 2ULL);
 }
 
-TEST(FrameSchedulerTest, FS15_FullRingOfFutureFallsBackToNewest) {
+TEST(FrameSchedulerTest, FS15_FullRingOfFutureIsRetained) {
     // Decode lapped a loop behind the wrapped wall: 8 unpublished frames,
-    // all still future. Starving would freeze video into repeat/burst
-    // cycles (proven live at 2x); fall back to the newest published frame
-    // and count the bypassed once. A repeat Tick adds nothing.
+    // all still future. The old contract fell back to "newest published"
+    // here (hence the old name) and presented frame 8 — a repeat Tick adds
+    // nothing. The fixed contract RETAINS the frames instead.
     FrameScheduler scheduler;
     for (int i = 0; i < 8; ++i) {
         VideoFrame f{};

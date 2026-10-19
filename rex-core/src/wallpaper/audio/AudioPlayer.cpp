@@ -227,8 +227,6 @@ shared::Result<void> AudioPlayer::Open(std::string_view path) {
     // here also means the 5.1 downmix matrix is actually used, instead of the
     // surround channels being dropped.
     m_channels = 2;
-    m_bytesPerSample = 2;  // we always feed interleaved S16
-
     // Ring: 1 second of audio, but never less than 4x the WASAPI buffer.
     m_ringFrames = std::max<size_t>(static_cast<size_t>(m_sampleRate),
                                     static_cast<size_t>(m_bufferFrames) * 4);
@@ -397,10 +395,15 @@ bool AudioPlayer::OpenEndpoint() {
             Microsoft::WRL::ComPtr<IPropertyStore> props;
             if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props))) {
                 PROPVARIANT name{};
-                if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &name)) &&
-                    name.vt == VT_LPWSTR && name.pwszVal) {
+                const HRESULT nameHr = props->GetValue(PKEY_Device_FriendlyName, &name);
+                if (SUCCEEDED(nameHr) && name.vt == VT_LPWSTR && name.pwszVal) {
                     REX_LOG_INFO(kModule, "render endpoint: {}",
                                  WideToUtf8Str(name.pwszVal));
+                }
+                // Clear whenever GetValue succeeded (audit 5.3 #13): limiting
+                // the clear to the VT_LPWSTR branch leaked every other
+                // allocated type on each endpoint open.
+                if (SUCCEEDED(nameHr)) {
                     PropVariantClear(&name);
                 }
             }
@@ -496,7 +499,10 @@ REX_LOG_INFO(kModule, "WASAPI render endpoint ready ({} frames/buffer, {} ch)",
 void AudioPlayer::ThreadLoop() {
     // All WASAPI/COM work happens on this thread: init here, release before
     // exit so CoUninitialize always pairs with CoInitializeEx on one thread.
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Pair the two explicitly (audit 5.3 #15): S_OK and S_FALSE both need a
+    // CoUninitialize, a failure (e.g. RPC_E_CHANGED_MODE) must not get one.
+    const HRESULT comInitHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool comInitialized = SUCCEEDED(comInitHr);
 
     // Real-time scheduling for glitch-free rendering: without MMCSS this
     // normal-priority thread is preempted by video decode and misses the
@@ -639,7 +645,9 @@ void AudioPlayer::ThreadLoop() {
     }
     m_render.Reset();
     m_client.Reset();
-    CoUninitialize();
+    if (comInitialized) {
+        CoUninitialize();
+    }
 }
 
 // ─── Demux / decode ──────────────────────────────────────────────────────
@@ -1026,16 +1034,20 @@ void AudioPlayer::RenderStep() {
                 have = 0;  // wait for more content (zero-filled below)
             } else {
                 const size_t ch = static_cast<size_t>(m_channels);
-                std::vector<int16_t> content(contentFrames * ch);
+                // Reusable staging (audit 5.3 #11): the old per-callback
+                // std::vector allocated on the MMCSS render thread inside
+                // the ring lock; resize() on a warm buffer does not.
+                m_resampleScratch.resize(contentFrames * ch);
+                int16_t* content = m_resampleScratch.data();
                 const size_t first =
                     std::min(contentFrames, m_ringFrames - m_readPos);
-                std::memcpy(content.data(),
+                std::memcpy(content,
                             m_ring.data() + m_readPos * ch, first * ch * 2);
                 if (contentFrames > first) {
-                    std::memcpy(content.data() + first * ch, m_ring.data(),
+                    std::memcpy(content + first * ch, m_ring.data(),
                                 (contentFrames - first) * ch * 2);
                 }
-                ResampleLinear(content.data(), contentFrames,
+                ResampleLinear(content, contentFrames,
                                m_channels, dst, have);
                 m_readPos = (m_readPos + contentFrames) % m_ringFrames;
                 m_bufferedFrames -= contentFrames;
@@ -1078,7 +1090,14 @@ void AudioPlayer::RenderStep() {
         std::memset(dst + have * static_cast<size_t>(m_channels), 0,
                     (framesAvail - have) * static_cast<size_t>(m_channels) * 2);
     }
-    m_render->ReleaseBuffer(framesAvail, 0);
+    const HRESULT relHr = m_render->ReleaseBuffer(framesAvail, 0);
+    // Audit 5.3 #14: a dropped ReleaseBuffer HRESULT delayed endpoint-loss
+    // detection by one buffer — flag it here like GetBuffer does.
+    if (FAILED(relHr) && IsEndpointLost(relHr)) {
+        REX_LOG_WARN(kModule, "endpoint lost on ReleaseBuffer (0x{:08X}); re-enumerating",
+                     static_cast<unsigned>(relHr));
+        m_endpointLost.store(true, std::memory_order_release);
+    }
     m_renderedFrames.fetch_add(framesAvail, std::memory_order_relaxed);
     // Signed peak of what actually left for the endpoint.
     int peak = 0;

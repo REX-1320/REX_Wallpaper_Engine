@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -64,8 +65,25 @@ public:
         return def;
     }
 
-    int AsInt(int def = 0) const { return static_cast<int>(AsNumber(static_cast<double>(def))); }
-    float AsFloat(float def = 0.0f) const { return static_cast<float>(AsNumber(static_cast<double>(def))); }
+    int AsInt(int def = 0) const {
+        const double n = AsNumber(static_cast<double>(def));
+        // Audit 5.5 #5: 1e999 parses to +inf and static_cast<int>(inf) is
+        // UB. Non-finite input is rejected (def); finite out-of-range
+        // clamps, so a hostile id/maxFps/pid cannot invoke UB.
+        if (!std::isfinite(n)) return def;
+        if (n >= 2147483648.0) return (std::numeric_limits<int>::max)();
+        if (n < -2147483648.0) return (std::numeric_limits<int>::min)();
+        return static_cast<int>(n);
+    }
+
+    float AsFloat(float def = 0.0f) const {
+        const double n = AsNumber(static_cast<double>(def));
+        if (!std::isfinite(n)) return def;
+        constexpr double kFltMax = 3.4028234663852886e38;
+        if (n >= kFltMax) return (std::numeric_limits<float>::max)();
+        if (n <= -kFltMax) return -(std::numeric_limits<float>::max)();
+        return static_cast<float>(n);
+    }
 
     const std::string& AsString() const {
         static const std::string kEmpty;

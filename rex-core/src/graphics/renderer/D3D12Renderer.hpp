@@ -5,7 +5,6 @@
 #include "CommandQueue.hpp"
 #include "FrameContextPolicy.hpp"
 #include "FrameLockPolicy.hpp"
-#include "DescriptorHeapManager.hpp"
 #include "ResourceStateTracker.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
@@ -57,6 +56,10 @@ public:
 
     // ─── Texture Loading ────────────────────────────────────────────────
     shared::Result<void> LoadTexture(std::string_view path);
+    // NOT wired in-tree (audit 5.6 #10): the live video path is DrawVideoFrame
+    // (shared D3D11/D3D12 handles) and static images upload through
+    // LoadTexture. Kept for experiments, but note its per-call WaitForGPU
+    // would serialize the shared command queue if called per frame.
     shared::Result<void> UpdateTexturePixels(
         const uint8_t* pixels, int width, int height, int rowPitch);
     shared::Result<void> UpdateTexturePixels(
@@ -180,6 +183,11 @@ public:
 
 private:
     // ─── Initialization helpers ─────────────────────────────────────────
+    /// Single init core (audit 5.6 #11): the public Initialize overloads
+    /// delegate here. `sharedQueue` == nullptr creates a local command queue.
+    shared::Result<void> InitializeCore(HWND targetWindow, int width, int height,
+                                        ID3D12Device* adoptDevice,
+                                        graphics::CommandQueue* sharedQueue);
     bool CreateRootSignature();
     bool CreatePipelineState(DXGI_FORMAT rtvFormat,
                              Microsoft::WRL::ComPtr<ID3D12PipelineState>& outPs);
@@ -299,7 +307,8 @@ private:
     float m_displayPeakNits = 80.0f;    // tone-mapping target (display or
                                         // SDR reference white in nits)
     float m_inputFormat = 0.0f;         // shader input format (0=NV12, 1=RGBA16, 2=P010)
-    float m_debugMode = 0.0f;           // shader debug (0=normal, 1=Y-only, 2=UV-only)
+    // (m_debugMode removed — audit 5.6 #9: no setter existed, the shader's
+    // Y/UV-only branch was unreachable, and the DWORD now carries SDR white.)
 
     // ─── Fill mode ─────────────────────────────────────────────────────
     FillMode m_fillMode = FillMode::Fill;
@@ -383,9 +392,8 @@ private:
     // ─── Vertex layout ────────────────────────────────────────────────
     struct Vertex { float x, y, u, v; };
 
-    // ─── Audio spectrum constant buffer ────────────────────────────────
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_audioCB;
-    std::array<float, 32>* m_mappedSpectrum = nullptr;
+    // ─── Audio spectrum ────────────────────────────────────────────────
+    // Root constants (b2) uploaded from here; no mapped CB (audit 5.6 #11).
     std::array<float, 32> m_currentSpectrum{};
 };
 

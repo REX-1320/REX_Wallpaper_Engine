@@ -67,22 +67,34 @@ TEST(DisplayCadence, SteadyDwellHasNoSpread) {
 
 TEST(DisplayCadence, DisplayedGapsComeFromSyncQpcDeltas) {
     DisplayCadenceStats st;
-    // 10 ms per frame => 10_000 "micros".
-    for (int i = 0; i < 300; ++i) st.Add(S(1u, static_cast<int64_t>(i) * 10000));
-    EXPECT_DOUBLE_EQ(st.PercentileGapMicros(0.5), 10000.0);
+    // 10 ms per frame. Steps are raw QPC ticks; the getter reports MICROS
+    // (audit 5.6 #12), so the expectation converts with the same factor.
+    constexpr int64_t kStepTicks = 10000;
+    for (int i = 0; i < 300; ++i) {
+        st.Add(S(1u, static_cast<int64_t>(i) * kStepTicks));
+    }
+    EXPECT_DOUBLE_EQ(st.PercentileGapMicros(0.5),
+                     DisplayCadenceStats::TicksToMicros(kStepTicks));
+}
+
+TEST(DisplayCadence, TicksToMicrosUsesTheRealFrequency) {
+    const double hz = DisplayCadenceStats::QpcHz();
+    ASSERT_GT(hz, 0.0);
+    // One full second of ticks must read as exactly 1e6 micros.
+    EXPECT_DOUBLE_EQ(
+        DisplayCadenceStats::TicksToMicros(static_cast<int64_t>(hz)), 1000000.0);
 }
 
 TEST(DisplayCadence, JitterInDeltasShowsInTheTail) {
     DisplayCadenceStats st;
-    // 290 steady frames then a 10-frame stall.
+    // 290 steady frames then one 50% larger step.
     for (int i = 0; i < 300; ++i) {
-        const int64_t step = i >= 290 ? 50000 : 10000;
         st.Add(S(1u, static_cast<int64_t>(i) * 10000 + (i >= 290 ? 5000 : 0)));
-        (void)step;
     }
-    EXPECT_DOUBLE_EQ(st.PercentileGapMicros(0.5), 10000.0);
-    EXPECT_GT(st.PercentileGapMicros(1.0), 10000.0)
-        << "a 10-frame stall must survive the median";
+    EXPECT_DOUBLE_EQ(st.PercentileGapMicros(0.5),
+                     DisplayCadenceStats::TicksToMicros(10000));
+    EXPECT_GT(st.PercentileGapMicros(1.0),
+              DisplayCadenceStats::TicksToMicros(10000));
 }
 
 TEST(DisplayCadence, ResetClearsEverything) {

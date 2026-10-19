@@ -61,8 +61,12 @@ public:
     }
 };
 
-// Video: fill mode via the renderer, speed/loop via the playback controller.
-// Volume/mute have no audio pipeline yet — reported unsupported.
+// Video: fill mode via the renderer, speed/loop via the playback controller,
+// volume/mute via the audio player (audio pipeline landed with P1-7),
+// brightness/contrast/saturation via Engine::SetProperty's adjust pipeline
+// (audit 5.5 #7), rotation/flip via the engine transform. audioMode is a
+// playback property (Engine::SetProperty handles it outside the adapter
+// gate) — listed for capability reporting.
 class VideoAdapter : public BaseAdapter {
 public:
     std::string_view GetType() const override { return "video"; }

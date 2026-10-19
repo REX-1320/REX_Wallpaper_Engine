@@ -57,9 +57,8 @@ cbuffer ColorConstants : register(b0) {
     float4 adj;     // x = brightness, y = contrast, z = saturation, w = paper white nits
     float4 disp;    // x = display peak nits, y = mastering max, z = mastering min, w = MaxCLL
     float3 extra;   // x = inputFormat (0=NV12, 1=RGBA16, 2=P010)
-                    // y = debugMode  (0=normal, 1=Y-only, 2=UV-only)
-                    // z = staticRGBA (1 = static RGBA texture, skip YUV decode)
-    float4 extra2;  // x = SDR diffuse white nits (~100, BT.2408)
+                    // y = staticRGBA (1 = static RGBA texture, skip YUV decode)
+                    // z = SDR diffuse white nits (~100, BT.2408; >1 = valid)
 };
 
 cbuffer AudioConstants : register(b2) {
@@ -158,7 +157,8 @@ float4 main(VSOutput input) : SV_TARGET {
     const float norm = max(adj.w, 1.0);
     float3 rgb;
 
-    if (extra.z > 0.5) {
+    // extra.y = staticRGBA (part of the audit 5.6 #9 lane repack).
+    if (extra.y > 0.5) {
         float4 c = texY.Sample(sam, input.uv);
         rgb = (mode.y > 0.5) ? (PqToLinear(saturate(c.rgb)) / norm)
                              : SrgbToLinear(c.rgb);
@@ -251,25 +251,9 @@ float4 main(VSOutput input) : SV_TARGET {
         rgb = lerp(luma, rgb, adj.z);
     }
 
-    if (extra.y > 0.5 && extra.z < 0.5) {
-        if (extra.y < 1.5) {
-            if (extra.x > 1.5) {
-                float yRaw = texY.Sample(sam, input.uv).r;
-                return float4(yRaw, yRaw, yRaw, 1.0);
-            } else {
-                float y = texY.Sample(sam, input.uv).r;
-                return float4(y, y, y, 1.0);
-            }
-        } else {
-            if (extra.x > 1.5) {
-                float2 uvRaw = texUV.Sample(sam, input.uv).rg;
-                return float4(uvRaw.x, uvRaw.y, 0.5, 1.0);
-            } else {
-                float2 uv = texUV.Sample(sam, input.uv).rg;
-                return float4(uv.x, uv.y, 0.5, 1.0);
-            }
-        }
-    }
+    // (Removed: Y-only / UV-only debug visualization — the only reader of the
+    // old debugMode lane, which had no setter and was always 0. That DWORD is
+    // now reused for SDR white nits; audit 5.6 #9.)
 
     if (mode.w > 0.5) {
         float3 lin;
@@ -285,10 +269,10 @@ float4 main(VSOutput input) : SV_TARGET {
             //
             // Scaling by adj.w here lifted SDR white to 203 nits, ~2x too
             // bright, which reads as washed-out/milky SDR on an HDR panel.
-            // Map SDR white to its own nits (extra2.x) so grade and contrast
+            // Map SDR white to its own nits (extra.z) so grade and contrast
             // survive; only the tone-map TARGET (disp.x, display peak) applies
             // above it.
-            const float sdrWhiteNits = extra2.x > 1.0 ? extra2.x : 100.0;
+            const float sdrWhiteNits = extra.z > 1.0 ? extra.z : 100.0;
             lin = rgb * sdrWhiteNits;
         }
         return float4(LinearToPq((mode.y > 0.5 || extra.x > 1.5) ? lin : mul(lin, BT709_TO_BT2020)), 1.0);
@@ -321,16 +305,29 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
 
 shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int height,
                                                ID3D12Device* adoptDevice) {
+    return InitializeCore(targetWindow, width, height, adoptDevice, nullptr);
+}
+
+// Single init core (audit 5.6 #11): the adopted-device overload and the
+// shared-queue overload used to carry ~200 near-identical lines. The only
+// differences are the local command queue (skipped when the compositor owns
+// a shared one) and the log wording.
+shared::Result<void> D3D12Renderer::InitializeCore(HWND targetWindow, int width, int height,
+                                                   ID3D12Device* adoptDevice,
+                                                   graphics::CommandQueue* sharedQueue) {
     if (m_initialized) {
         return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
                                     "Renderer already initialized");
     }
 
-    REX_LOG_INFO("D3D12", "Initializing D3D12 renderer ({}x{}{})", width, height,
-                 adoptDevice ? " on adopted device" : "");
+    REX_LOG_INFO("D3D12", "Initializing D3D12 renderer ({}x{}{}{})", width, height,
+                 adoptDevice ? " on adopted device" : "",
+                 sharedQueue ? ", shared queue" : "");
 
     m_width  = width;
     m_height = height;
+    // Non-owning; ActiveQueue() prefers it over the local queue created below.
+    if (sharedQueue) m_sharedQueue = sharedQueue;
 
     // ── Device ─────────────────────────────────────────────────────────
     auto devResult = adoptDevice ? m_device.InitializeAdopted(adoptDevice)
@@ -340,9 +337,12 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
     }
 
     // ── Command Queue ──────────────────────────────────────────────────
-    auto qResult = m_commandQueue.Initialize(m_device.Get());
-    if (qResult.IsError()) {
-        return qResult;
+    // A shared queue is owned by the compositor: never initialize a local one.
+    if (!sharedQueue) {
+        auto qResult = m_commandQueue.Initialize(m_device.Get());
+        if (qResult.IsError()) {
+            return qResult;
+        }
     }
 
     // ── Frame-context ring (P0-4): one allocator per in-flight frame ──
@@ -431,27 +431,9 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
         m_copyContexts[i].list->Close(); // created open; Reset() needs closed
     }
 
-    // ── Audio spectrum constant buffer (32 floats, b2) ───────────────
-    {
-        D3D12_HEAP_PROPERTIES hp = {};
-        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC bd = {};
-        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        bd.Width = sizeof(std::array<float, 32>);
-        bd.Height = 1;
-        bd.DepthOrArraySize = 1;
-        bd.MipLevels = 1;
-        bd.Format = DXGI_FORMAT_UNKNOWN;
-        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        bd.SampleDesc.Count = 1;
-        HRESULT hr = m_device.Get()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE,
-            &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-            IID_PPV_ARGS(&m_audioCB));
-        if (SUCCEEDED(hr)) {
-            m_audioCB->Map(0, nullptr, reinterpret_cast<void**>(&m_mappedSpectrum));
-            m_currentSpectrum.fill(0.0f);
-        }
-    }
+    // (Removed: upload-heap audio constant buffer — audit 5.6 #11. RenderFrame
+    // uploads b2 straight from m_currentSpectrum as root constants; the
+    // mapped CB was never read by any draw.)
 
     m_initialized = true;
     REX_LOG_INFO("D3D12", "Renderer initialized successfully");
@@ -461,113 +443,12 @@ shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int
 shared::Result<void> D3D12Renderer::Initialize(HWND targetWindow, int width, int height,
                                                ID3D12Device* adoptDevice,
                                                graphics::CommandQueue* sharedQueue) {
-    if (m_initialized) {
-        return shared::Result<void>(shared::ErrorCode::AlreadyInitialized,
-                                    "Renderer already initialized");
-    }
     if (!sharedQueue || !sharedQueue->Get()) {
         return shared::Result<void>(shared::ErrorCode::InvalidArgument,
                                     "shared queue is null");
     }
-
-    REX_LOG_INFO("D3D12", "Initializing D3D12 renderer ({}x{}, shared queue)", width, height);
-
-    m_width  = width;
-    m_height = height;
-    m_sharedQueue = sharedQueue;
-
-    // ── Device ─────────────────────────────────────────────────────────
-    auto devResult = adoptDevice ? m_device.InitializeAdopted(adoptDevice)
-                                 : m_device.Initialize();
-    if (devResult.IsError()) {
-        return devResult;
-    }
-
-    // Skip local command queue — use the shared one.
-    // ── Frame-context ring (P0-4): one allocator per in-flight frame ──
-    for (UINT i = 0; i < graphics::kFrameContextCount; ++i) {
-        m_frameContexts[i].allocator = m_device.CreateCommandAllocator();
-        if (!m_frameContexts[i].allocator) {
-            return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                        "Failed to create command allocator");
-        }
-        m_frameContexts[i].fenceValue = 0;
-    }
-    m_frameNumber = 0;
-
-    // ── Swap Chain ─────────────────────────────────────────────────────
-    if (m_forceSdr) {
-        m_swapChain.SetForceSdr(true);
-    }
-    auto scResult = m_swapChain.Initialize(
-        m_sharedQueue->Get(), m_device.Get(),
-        targetWindow, width, height);
-    if (scResult.IsError()) {
-        return scResult;
-    }
-
-    // ── SRV heap (shader-visible, 64 slots) ───────────────────────────
-    m_srvHeap = m_device.CreateDescriptorHeap(
-        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 64,
-        D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
-    if (!m_srvHeap) {
-        return shared::Result<void>(shared::ErrorCode::OutOfMemory,
-                                    "Failed to create SRV heap");
-    }
-
-    // ── Root signature ────────────────────────────────────────────────
-    if (!CreateRootSignature()) {
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "Failed to create root signature");
-    }
-
-    // ── Vertex buffer ─────────────────────────────────────────────────
-    if (!CreateVertexBuffer()) {
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "Failed to create vertex buffer");
-    }
-
-    // ── Pipeline state ────────────────────────────────────────────────
-    if (!CreatePipelineState(DXGI_FORMAT_R8G8B8A8_UNORM, m_pipelineState)) {
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "Failed to create SDR pipeline state");
-    }
-    m_isHdrOutput = m_swapChain.IsHDR();
-    if (m_isHdrOutput) {
-        if (!CreatePipelineState(DXGI_FORMAT_R16G16B16A16_FLOAT, m_pipelineStateHdr)) {
-            return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                        "Failed to create HDR pipeline state");
-        }
-    }
-
-    // ── Initialize command list ───────────────────────────────────────
-    m_commandList = m_device.CreateCommandList(
-        m_frameContexts[0].allocator.Get(), m_pipelineState.Get());
-    if (!m_commandList) {
-        return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                    "Failed to create command list");
-    }
-    m_commandList->Close();
-
-    // ── Pre-create copy/upload context ring (P5) ──────────────────────
-    for (UINT i = 0; i < kCopyContextCount; ++i) {
-        m_copyContexts[i].allocator = m_device.CreateCommandAllocator();
-        if (!m_copyContexts[i].allocator) {
-            return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                        "Failed to create copy allocator");
-        }
-        m_copyContexts[i].list =
-            m_device.CreateCommandList(m_copyContexts[i].allocator.Get());
-        if (!m_copyContexts[i].list) {
-            return shared::Result<void>(shared::ErrorCode::UnknownError,
-                                        "Failed to create copy list");
-        }
-        m_copyContexts[i].list->Close();
-    }
-
-    m_initialized = true;
-    REX_LOG_INFO("D3D12", "Renderer initialized with shared queue");
-    return shared::Result<void>();
+    // Single init core (audit 5.6 #11): see InitializeCore.
+    return InitializeCore(targetWindow, width, height, adoptDevice, sharedQueue);
 }
 
 void D3D12Renderer::Shutdown() {
@@ -591,12 +472,7 @@ void D3D12Renderer::Shutdown() {
     m_activeVideoHandle = nullptr;
     m_hasVideoFrame = false;
 
-    // Unmap audio spectrum CB
-    if (m_mappedSpectrum) {
-        m_audioCB->Unmap(0, nullptr);
-        m_mappedSpectrum = nullptr;
-    }
-    m_audioCB.Reset();
+    // Unmap audio spectrum CB (removed with the CB itself — audit 5.6 #11)
     m_currentSpectrum.fill(0.0f);
 
     m_activeColorInfo = VideoColorInfo{};
@@ -949,7 +825,11 @@ void D3D12Renderer::ClearVideoFrame() {
     m_inputFormat = 0.0f;
 }
 
-// ─── Update Texture Pixels (video frames) ────────────────────────────────
+// ─── Update Texture Pixels (debug / experiment path) ─────────────────────
+// No in-tree callers (audit 5.6 #10): per-frame video goes through
+// DrawVideoFrame, static images through LoadTexture. Each call ends in a
+// full WaitForGPU, so wiring this per frame would serialize the shared
+// command queue.
 
 shared::Result<void> D3D12Renderer::UpdateTexturePixels(
     const uint8_t* pixels, int width, int height, int rowPitch) {
@@ -1171,7 +1051,16 @@ shared::Result<void> D3D12Renderer::AcquireCopyContext(
             return shared::Result<void>(shared::ErrorCode::UnknownError,
                                         "CreateCommandList failed");
         }
-        ctx.list->Close();
+        // A list is created OPEN; this Close() must succeed or every later
+        // Reset() starts from an invalid state (audit 5.6 #13).
+        const HRESULT ctxCloseHr = ctx.list->Close();
+        if (FAILED(ctxCloseHr)) {
+            if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) {
+                m_deviceRemoved = true;
+            }
+            return shared::Result<void>(shared::ErrorCode::UnknownError,
+                                        "command list Close failed");
+        }
     }
 
     allocatorOut = ctx.allocator;
@@ -1208,7 +1097,21 @@ bool D3D12Renderer::BeginFrame() {
         }
     }
     ctx.allocator->Reset();
-    m_commandList->Reset(ctx.allocator.Get(), m_pipelineState.Get());
+    const HRESULT listResetHr =
+        m_commandList->Reset(ctx.allocator.Get(), m_pipelineState.Get());
+    // Audit 5.6 #13: unchecked Reset() let a dead command list look alive —
+    // the frame would then submit garbage or fail at Close with no link to
+    // the cause. Treat reset failure like the fence-wait failure above.
+    if (FAILED(listResetHr)) {
+        REX_LOG_ERROR("D3D12", "Command list Reset failed (0x{:08X})",
+                      static_cast<unsigned>(listResetHr));
+        if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) {
+            m_deviceRemoved = true;
+        }
+        m_frameLock.ExitFrame();
+        m_renderMutex.unlock();
+        return false;
+    }
     m_stateTracker.Reset();
     return true;
 }
@@ -1309,6 +1212,9 @@ void D3D12Renderer::RenderFrame() {
         m_isStaticTexture = m_hasTexture && !videoActive;
         float cb[16] = {};
         BuildColorConstants(cb, m_isHdrOutput);
+        // 15 = the whole b0 payload. It cannot be 16: the root-signature
+        // budget is already at 64/64 DWORDs (audit 5.6 #9 — see the
+        // root-signature comment).
         m_commandList->SetGraphicsRoot32BitConstants(1, 15, cb, 0);
 
         // Transform matrix (rotation/flip) for the vertex shader.
@@ -1346,7 +1252,19 @@ void D3D12Renderer::RenderFrame() {
 }
 
 void D3D12Renderer::EndFrame() {
-    m_commandList->Close();
+    const HRESULT closeHr = m_commandList->Close();
+    // Audit 5.6 #13: never ExecuteCommandLists a list that failed to Close —
+    // dropping this frame is safer than submitting corrupted command memory.
+    if (FAILED(closeHr)) {
+        REX_LOG_ERROR("D3D12", "Command list Close failed (0x{:08X})",
+                      static_cast<unsigned>(closeHr));
+        if (IsDeviceRemovedHr(m_device.GetDeviceRemovedReason())) {
+            m_deviceRemoved = true;
+        }
+        m_frameLock.ExitFrame();
+        m_renderMutex.unlock();
+        return;
+    }
     ActiveQueue().Execute(m_commandList.Get());
 
     HRESULT hr = m_swapChain.Present(1, 0);
@@ -1749,8 +1667,12 @@ bool D3D12Renderer::CreateRootSignature() {
     params[0].DescriptorTable.pDescriptorRanges   = &range;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // b0: color constants (mode / adjustments / display metadata) —
-    // 15 floats, updated per frame via SetGraphicsRoot32BitConstants.
+    // b0: color constants (mode / adjustments / display metadata) — 15
+    // DWORDs, the most this signature can carry: descriptor table (1) +
+    // b0 (15) + transform (16) + spectrum (32) = the 64-DWORD root-signature
+    // limit exactly. Audit 5.6 #9: the old layout parked SDR white nits in an
+    // unreachable 16th DWORD; it now shares the third lane of `extra` (see
+    // the shader cbuffer), which IS shipped.
     params[1].ParameterType                    = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[1].Constants.ShaderRegister         = 0;
     params[1].Constants.RegisterSpace          = 0;
@@ -1898,24 +1820,24 @@ void D3D12Renderer::BuildColorConstants(float cb[16], bool hdrOutput) const {
     cb[10] = ci.masteringDisplayMinLuminance;
     cb[11] = ci.maxContentLightLevel;
 
-    // extra: inputFormat (0=NV12, 1=RGBA16, 2=P010), debugMode, staticRGBA
+    // extra: inputFormat (0=NV12, 1=RGBA16, 2=P010), staticRGBA, SDR white.
     cb[12] = m_inputFormat;
-    cb[13] = m_debugMode;
-    cb[14] = m_isStaticTexture ? 1.0f : 0.0f;  // 1 = static RGBA texture
+    cb[13] = m_isStaticTexture ? 1.0f : 0.0f;  // 1 = static RGBA texture
 
-    // extra2: SDR diffuse white (nits). ITU-R BT.2408 defines SDR diffuse
+    // extra.z: SDR diffuse white (nits). ITU-R BT.2408 defines SDR diffuse
     // white as 100 nits; HDR reference/paper white (adj.w, 203 nits) is a
     // different anchor and must not be used to scale SDR content.
-    cb[15] = m_sdrWhiteNits;
+    // (Replaces the old rounded-out 16th DWORD — audit 5.6 #9.)
+    cb[14] = m_sdrWhiteNits;
 }
 
 // ─── Audio Spectrum ──────────────────────────────────────────────────────
 
 void D3D12Renderer::UpdateAudioSpectrum(const std::array<float, 32>& spectrum) {
+    // RenderFrame uploads b2 straight from m_currentSpectrum as root
+    // constants — there is no mapped constant buffer to mirror into
+    // (audit 5.6 #11).
     m_currentSpectrum = spectrum;
-    if (m_mappedSpectrum) {
-        *m_mappedSpectrum = spectrum;
-    }
 }
 
 bool D3D12Renderer::CreateVertexBuffer() {

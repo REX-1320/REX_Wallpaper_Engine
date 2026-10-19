@@ -39,8 +39,12 @@ uint64_t QueryDisplayAdapterLuid(const std::string& monitorDeviceName) {
                         wide.data(), needed);
     wide.resize(static_cast<size_t>(needed) - 1);
 
-    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 0;
+    // One process-wide factory (audit 5.1 #11): this helper runs on the
+    // telemetry/housekeeping paths, and creating a DXGI factory per call
+    // showed up in slow-housekeeping logs. DXGI enumeration is thread-safe;
+    // the function-local static initializes exactly once.
+    static Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (!factory && FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 0;
 
     for (UINT a = 0;; ++a) {
         Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
@@ -62,29 +66,54 @@ uint64_t QueryDisplayAdapterLuid(const std::string& monitorDeviceName) {
 
 } // namespace
 
+// GPU video-memory query, one implementation (audit 5.1 #15): the
+// media-budget gate and the telemetry snapshot used to carry duplicated
+// EnumAdapterByLuid/QueryVideoMemoryInfo chains with two error styles.
+struct GpuMemoryQuery {
+    bool localOk = false;
+    bool nonlocalOk = false;
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+    DXGI_QUERY_VIDEO_MEMORY_INFO nonlocal{};
+    HRESULT hrFactory = E_FAIL;
+    HRESULT hrEnum = E_FAIL;
+    HRESULT hrAs = E_FAIL;
+    HRESULT hrLocal = E_FAIL;
+    HRESULT hrNonlocal = E_FAIL;
+};
+
+// NOTE: ID3D12Device does NOT implement IDXGIDevice — resolve the adapter
+// via its LUID + EnumAdapterByLuid instead.
+static GpuMemoryQuery QueryGpuMemory(uint64_t rendererLuid) {
+    GpuMemoryQuery q;
+    if (rendererLuid == 0) return q;
+    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+    q.hrFactory = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(q.hrFactory)) return q;
+    LUID luid{};
+    luid.LowPart = static_cast<DWORD>(rendererLuid & 0xFFFFFFFFull);
+    luid.HighPart = static_cast<LONG>(rendererLuid >> 32);
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    q.hrEnum = factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
+    if (FAILED(q.hrEnum)) return q;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+    q.hrAs = adapter.As(&adapter3);
+    if (FAILED(q.hrAs)) return q;
+    q.hrLocal = adapter3->QueryVideoMemoryInfo(
+        0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &q.local);
+    q.localOk = SUCCEEDED(q.hrLocal);
+    q.hrNonlocal = adapter3->QueryVideoMemoryInfo(
+        0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &q.nonlocal);
+    q.nonlocalOk = SUCCEEDED(q.hrNonlocal);
+    return q;
+}
+
 // P1 resource envelope: LOCAL video-memory budget for the renderer's
 // adapter (0 when unqueryable — the gate fails open with a warning).
 // Dedicated helper rather than reusing GetTelemetry: that path publishes
 // atomics under m_mutex and must not run mid-LoadScene.
 static uint64_t QueryLocalVideoMemoryBudget(uint64_t rendererLuid) {
-    if (rendererLuid == 0) return 0;
-    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 0;
-    LUID luid{};
-    luid.LowPart = static_cast<DWORD>(rendererLuid & 0xFFFFFFFFull);
-    luid.HighPart = static_cast<LONG>(rendererLuid >> 32);
-    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-    if (FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter)))) {
-        return 0;
-    }
-    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
-    if (FAILED(adapter.As(&adapter3))) return 0;
-    DXGI_QUERY_VIDEO_MEMORY_INFO local{};
-    if (FAILED(adapter3->QueryVideoMemoryInfo(
-            0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
-        return 0;
-    }
-    return static_cast<uint64_t>(local.Budget);
+    const GpuMemoryQuery q = QueryGpuMemory(rendererLuid);
+    return q.localOk ? static_cast<uint64_t>(q.local.Budget) : 0;
 }
 
 Engine::Engine() {
@@ -214,13 +243,6 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
     auto monitors = EnumerateMonitors();
     m_lastMonitorCount = static_cast<int>(monitors.size());
     m_lastMonitors = monitors;
-    for (const auto& m : monitors) {
-        if (m.isPrimary) {
-            m_lastPrimaryWidth  = m.width;
-            m_lastPrimaryHeight = m.height;
-            break;
-        }
-    }
 
     // Start render thread
     m_running = true;
@@ -975,9 +997,17 @@ std::vector<MonitorInfo> Engine::EnumerateMonitors() const {
             info.height   = mi.rcMonitor.bottom - mi.rcMonitor.top;
             info.isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
 
-            // Use wide-char name for the ID
-            char nameBuf[128];
-            WideCharToMultiByte(CP_UTF8, 0, mi.szDevice, -1, nameBuf, sizeof(nameBuf), nullptr, nullptr);
+            // Use wide-char name for the ID. WideCharToMultiByte returns 0
+            // on a too-small buffer (audit 5.1 #10) — the buffer is
+            // zero-initialized, so a truncated copy can never read past the
+            // null terminator; reject the conversion if it fails.
+            char nameBuf[128] = {};
+            const int nameLen = WideCharToMultiByte(
+                CP_UTF8, 0, mi.szDevice, -1, nameBuf,
+                static_cast<int>(sizeof(nameBuf)) - 1, nullptr, nullptr);
+            if (nameLen <= 0) {
+                return TRUE; // skip this monitor, continue enumeration
+            }
             info.id   = nameBuf;
             info.name = info.id;
 
@@ -1217,6 +1247,20 @@ shared::Result<void> Engine::SetProperty(const std::string& property, const std:
     if (property == "loop") {
         return SetLoop(value == "true" || value == "1");
     }
+    // Audit 5.5 #7: the video adapter advertises brightness/contrast/
+    // saturation and the runtime forwards SET_BRIGHTNESS/SET_CONTRAST/
+    // SET_SATURATION, but without these branches the commands fell through
+    // to the final "Unknown property" return even though the adjust
+    // pipeline (SetVideoAdjustments) already existed.
+    if (property == "brightness") {
+        return SetBrightness(static_cast<float>(std::atof(value.c_str())));
+    }
+    if (property == "contrast") {
+        return SetContrast(static_cast<float>(std::atof(value.c_str())));
+    }
+    if (property == "saturation") {
+        return SetSaturation(static_cast<float>(std::atof(value.c_str())));
+    }
     if (property == "rotation") {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_sceneRotation = static_cast<float>(std::atof(value.c_str()));
@@ -1392,60 +1436,35 @@ void Engine::GetTelemetryLocked(EngineTelemetry& out) const {
     }
 
     // GPU memory on the renderer's adapter (LOCAL = dedicated VRAM,
-    // NON_LOCAL = shared/system-memory segment).
-    // NOTE: ID3D12Device does NOT implement IDXGIDevice — resolve the
-    // adapter via GetAdapterLuid() + EnumAdapterByLuid instead.
+    // NON_LOCAL = shared/system-memory segment) — shared query helper
+    // (audit 5.1 #15).
     if (m_renderer && m_videoManager) {
         const uint64_t rendererLuid = m_videoManager->GetD3D12AdapterLuid();
-        HRESULT hrFactory = E_FAIL, hrEnum = E_FAIL, hrAs = E_FAIL,
-                hrLocal = E_FAIL, hrNonLocal = E_FAIL;
-        DXGI_QUERY_VIDEO_MEMORY_INFO local{};
-        DXGI_QUERY_VIDEO_MEMORY_INFO nonlocal{};
-        if (rendererLuid != 0) {
-            Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-            hrFactory = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-            if (SUCCEEDED(hrFactory)) {
-                LUID luid{};
-                luid.LowPart  = static_cast<DWORD>(rendererLuid & 0xFFFFFFFFull);
-                luid.HighPart = static_cast<LONG>(rendererLuid >> 32);
-                Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-                hrEnum = factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
-                if (SUCCEEDED(hrEnum)) {
-                    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
-                    hrAs = adapter.As(&adapter3);
-                    if (SUCCEEDED(hrAs)) {
-                        hrLocal    = adapter3->QueryVideoMemoryInfo(
-                            0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local);
-                        hrNonLocal = adapter3->QueryVideoMemoryInfo(
-                            0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal);
-                    }
-                }
-            }
-        }
+        const GpuMemoryQuery q = QueryGpuMemory(rendererLuid);
 
-        // One-shot diagnostic: budget==0 means the chain broke somewhere,
-        // which would silently blind every downstream comparison.
+        // One-shot diagnostic: a failed step means budget==0, which would
+        // silently blind every downstream comparison.
         static std::atomic<bool> s_gpuMemWarned{false};
         if (!s_gpuMemWarned.exchange(true) &&
-            (rendererLuid == 0 || FAILED(hrFactory) || FAILED(hrEnum) ||
-             FAILED(hrAs) || FAILED(hrLocal) || FAILED(hrNonLocal))) {
+            (rendererLuid == 0 || FAILED(q.hrFactory) || FAILED(q.hrEnum) ||
+             FAILED(q.hrAs) || FAILED(q.hrLocal) || FAILED(q.hrNonlocal))) {
             REX_LOG_WARN("Engine",
                          "GPU memory query incomplete: luid={:016x} "
                          "factory={:08x} enum={:08x} as3={:08x} "
                          "local={:08x} nonlocal={:08x}",
                          static_cast<uint64_t>(rendererLuid),
-                         static_cast<uint32_t>(hrFactory),
-                         static_cast<uint32_t>(hrEnum),
-                         static_cast<uint32_t>(hrAs),
-                         static_cast<uint32_t>(hrLocal),
-                         static_cast<uint32_t>(hrNonLocal));
+                         static_cast<uint32_t>(q.hrFactory),
+                         static_cast<uint32_t>(q.hrEnum),
+                         static_cast<uint32_t>(q.hrAs),
+                         static_cast<uint32_t>(q.hrLocal),
+                         static_cast<uint32_t>(q.hrNonlocal));
         }
-        if (SUCCEEDED(hrLocal)) {
-            out.gpuDedicatedBytes = local.CurrentUsage;
-            out.gpuBudgetBytes    = local.Budget;
+        if (q.localOk) {
+            out.gpuDedicatedBytes = q.local.CurrentUsage;
+            out.gpuBudgetBytes    = q.local.Budget;
         }
-        if (SUCCEEDED(hrNonLocal)) {
-            out.gpuSharedBytes = nonlocal.CurrentUsage;
+        if (q.nonlocalOk) {
+            out.gpuSharedBytes = q.nonlocal.CurrentUsage;
         }
     }
 
@@ -1536,7 +1555,10 @@ void Engine::GetTelemetryLocked(EngineTelemetry& out) const {
         out.syncPeriodMs   = cd.EstimatedPeriodMicros() / 1000.0;
         out.syncRefreshCount = cd.LastSyncRefreshCount();
         out.syncPeriodValid = cd.PeriodSamples() > 0;
-        out.pressureScale = m_pressureScale.load(std::memory_order_relaxed);
+        // Reserved: no GPU-pressure policy drives this yet (audit 5.1 #12
+        // removed the dead atomic); published as a constant so telemetry
+        // consumers keep their field.
+        out.pressureScale = 1;
         out.pressureWaitMeanMs = m_phaseWaitMeanMs.load(std::memory_order_relaxed);
     }
     out.pacingServoCorrMs = m_pacingCorrMs.load(std::memory_order_relaxed);
@@ -1639,6 +1661,8 @@ void Engine::CheckDisplayChanges() {
     auto monitors = EnumerateMonitors();
     int count = static_cast<int>(monitors.size());
 
+    // Primary geometry is consumed below (assigned-monitor update) — only
+    // the m_lastPrimary* members were dead state (audit 5.1 #12).
     int primaryW = 0, primaryH = 0;
     for (const auto& m : monitors) {
         if (m.isPrimary) {
@@ -1664,8 +1688,6 @@ void Engine::CheckDisplayChanges() {
                  count, m_lastMonitorCount);
 
     m_lastMonitorCount = count;
-    m_lastPrimaryWidth  = primaryW;
-    m_lastPrimaryHeight = primaryH;
     m_lastMonitors = monitors;
 
     // Phase 4: a refresh-rate change flips the predicate above — refresh
@@ -2432,8 +2454,9 @@ void Engine::DumpPresentStages() const {
 // ─── P16 content-aware pacing ──────────────────────────────────────────────
 //
 // Sleeps until the next expected frame. Target interval is the SLOWER of
-// maxFps and the decoder's measured cadence, floored at ~15 Hz so pause/
-// resume/unload/SET_* commands stay responsive.
+// maxFps and the decoder's measured cadence, floored at 4 ms (250 Hz, see
+// CadencePolicy::RenderIntervalMs) so pause/resume/unload/SET_* commands
+// stay responsive.
 
 void Engine::PaceLoop(
     std::chrono::high_resolution_clock::time_point frameStart,

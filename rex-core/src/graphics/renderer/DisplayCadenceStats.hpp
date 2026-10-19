@@ -52,6 +52,16 @@ public:
         return hz;
     }
 
+    /// Raw QPC ticks → microseconds (audit 5.6 #12: m_gapMicros stored raw
+    /// ticks while the getters claimed micros — up to ~2.4x off on a 24 MHz
+    /// QPC). 0 Hz (API failure) degrades to treating ticks AS micros so the
+    /// field is never NaN.
+    static double TicksToMicros(int64_t ticks) {
+        const double hz = QpcHz();
+        if (hz <= 0.0) return static_cast<double>(ticks);
+        return static_cast<double>(ticks) * 1e6 / hz;
+    }
+
     // One sample per completed present.
     struct Sample {
         uint32_t presentRefreshCount = 0;  // vblanks this frame occupied
@@ -90,8 +100,9 @@ public:
                 static_cast<int64_t>(s.syncRefreshCount) - prevRefresh;
 
             if (deltaQpc > 0) {
-                // Forward and usable: record the gap and mark the slot valid.
-                m_gapMicros[idx].store(static_cast<double>(deltaQpc),
+                // Forward and usable: record the gap (converted to MICROS —
+                // audit 5.6 #12) and mark the slot valid.
+                m_gapMicros[idx].store(TicksToMicros(deltaQpc),
                                        std::memory_order_relaxed);
                 m_valid[idx].store(true, std::memory_order_relaxed);
                 m_hasGap.store(true, std::memory_order_relaxed);

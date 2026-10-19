@@ -124,7 +124,6 @@ private:
 
     // WASAPI
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> m_enumerator;
-    Microsoft::WRL::ComPtr<IMMDevice> m_device;
     Microsoft::WRL::ComPtr<IAudioClient> m_audioClient;
     Microsoft::WRL::ComPtr<IAudioCaptureClient> m_captureClient;
     WAVEFORMATEX* m_waveFormat = nullptr;

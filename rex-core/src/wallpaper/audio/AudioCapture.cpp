@@ -21,7 +21,6 @@ bool AudioCapture::OpenClient() {
     // this doubles as the device-change re-open path.
     m_captureClient.Reset();
     m_audioClient.Reset();
-    m_device.Reset();
     m_enumerator.Reset();
     if (m_waveFormat) {
         CoTaskMemFree(m_waveFormat);
@@ -88,7 +87,6 @@ bool AudioCapture::Start() {
     auto fail = [this, &coInitialized]() {
         m_captureClient.Reset();
         m_audioClient.Reset();
-        m_device.Reset();
         m_enumerator.Reset();
         if (m_waveFormat) {
             CoTaskMemFree(m_waveFormat);
@@ -137,7 +135,6 @@ void AudioCapture::Stop() {
     if (m_audioClient) m_audioClient->Stop();
     m_captureClient.Reset();
     m_audioClient.Reset();
-    m_device.Reset();
     m_enumerator.Reset();
     if (m_waveFormat) { CoTaskMemFree(m_waveFormat); m_waveFormat = nullptr; }
     // Paired with Start()'s CoInitializeEx: only release when that call

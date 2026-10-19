@@ -80,7 +80,7 @@ public:
         // triggered the 2x defect. Rationale (4K120 H.264, 2026-10-16): the
         // pacing sleep itself caps throughput at ~107 fps (8.33 ms sleep +
         // ~1 ms work < 119.9 needed), so the decoder can NEVER catch up at
-        // burst 1.0 — reserve drains to seconds. 1.0 = off (default).
+        // burst 1.0 — reserve drains to seconds. 1.0 = off.
         // Default 2.0: engages ONLY while behind, where the alternative is
         // sustained failure; at/above water all pacing is unchanged (unit-
         // proven). Override with REX_CATCHUP_BURST (1 = force off).

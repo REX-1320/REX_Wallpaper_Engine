@@ -61,41 +61,10 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     }
     // A reopen must be playable: clear any EOS latch from the previous file.
     m_eosReached.store(false, std::memory_order_release);
-    // Scale the reserve marks to what the 8-slot pool can actually hold at this
-    // source rate. A fixed 100 ms mark is unreachable at >=60 fps and made the
-    // decoder thrash burst->park->burst (measured: schedDrops 204, effFps 52.5).
-    m_decodeAheadPolicy = CadenceController::PolicyFor(m_frameRate);
-
-    // Feature flag / rollback switch. The refill burst ships ON by default
-    // since 2026-10-17 (precondition fix e5bfdf0 landed; A/B in the
-    // DecodeAheadPolicy docs — content meter 1.00x in every ON run).
-    // REX_DECODE_AHEAD > 1 sets an explicit multiplier; "0"/"1" forces the
-    // burst off (rollback); unset keeps the default.
-    if (const char* flag = std::getenv("REX_DECODE_AHEAD")) {
-        const double burst = std::atof(flag);
-        if (burst > 1.0) {
-            m_decodeAheadPolicy.maxBurst = burst;
-            REX_LOG_INFO(kModule,
-                         "decode-ahead ENABLED (burst={:.1f}x, lowWater={:.0f}ms, "
-                         "highWater={:.0f}ms) via REX_DECODE_AHEAD",
-                         burst, m_decodeAheadPolicy.lowWaterMs,
-                         m_decodeAheadPolicy.highWaterMs);
-        } else {
-            m_decodeAheadPolicy.maxBurst = 1.0;
-            REX_LOG_INFO(kModule,
-                         "decode-ahead DISABLED (burst=1.0) via REX_DECODE_AHEAD");
-        }
-    }
-    // Catch-up burst: raises the decode-thread throughput ceiling ONLY while
-    // published content trails the wall clock (reserveMs < 0). Refill pacing
-    // is untouched, so this cannot build the deep reserve behind the 2x
-    // defect. Default on (2.0); set REX_CATCHUP_BURST to override ("1" = off).
-    if (const char* cuFlag = std::getenv("REX_CATCHUP_BURST")) {
-        const double cu = std::atof(cuFlag);
-        m_decodeAheadPolicy.catchUpBurst = cu > 1.0 ? cu : 1.0;
-        REX_LOG_INFO(kModule, "catch-up burst override ({:.1f}x) via REX_CATCHUP_BURST",
-                     m_decodeAheadPolicy.catchUpBurst);
-    }
+    // Policy refresh centralised (audit 5.4 #13): scale the reserve marks
+    // to what the 8-slot pool can actually hold at this source rate, then
+    // apply the env overrides.
+    RefreshDecodeAheadPolicy(/*logOverrides=*/true);
     // Decode pacing servo (default on): cancels the steady sleep overshoot
     // closed-loop. Rollback: REX_DECODE_SERVO=0.
     {
@@ -374,6 +343,55 @@ void VideoPlaybackController::SelectBestStream(int targetWidth, int targetHeight
     m_frameIntervalMs = m_frameRate > 0.0 ? 1000.0 / m_frameRate : 33.333;
     m_width  = decoder->GetWidth();
     m_height = decoder->GetHeight();
+    // Audit 5.4 #13: the reserve marks were scaled to the OPEN-time rate;
+    // an adaptive switch can change the source rate (e.g. 24 -> 60 fps),
+    // so the policy must be re-derived here too.
+    RefreshDecodeAheadPolicy(/*logOverrides=*/false);
+}
+
+void VideoPlaybackController::RefreshDecodeAheadPolicy(bool logOverrides) {
+    // Scale the reserve marks to what the 8-slot pool can actually hold at
+    // this source rate. A fixed 100 ms mark is unreachable at >=60 fps and
+    // made the decoder thrash burst->park->burst (measured: schedDrops 204,
+    // effFps 52.5).
+    m_decodeAheadPolicy = CadenceController::PolicyFor(m_frameRate);
+
+    // Feature flag / rollback switch. The refill burst ships ON by default
+    // since 2026-10-17 (precondition fix e5bfdf0 landed; A/B in the
+    // DecodeAheadPolicy docs — content meter 1.00x in every ON run).
+    // REX_DECODE_AHEAD > 1 sets an explicit multiplier; "0"/"1" forces the
+    // burst off (rollback); unset keeps the default.
+    if (const char* flag = std::getenv("REX_DECODE_AHEAD")) {
+        const double burst = std::atof(flag);
+        if (burst > 1.0) {
+            m_decodeAheadPolicy.maxBurst = burst;
+            if (logOverrides) {
+                REX_LOG_INFO(kModule,
+                             "decode-ahead ENABLED (burst={:.1f}x, lowWater={:.0f}ms, "
+                             "highWater={:.0f}ms) via REX_DECODE_AHEAD",
+                             burst, m_decodeAheadPolicy.lowWaterMs,
+                             m_decodeAheadPolicy.highWaterMs);
+            }
+        } else {
+            m_decodeAheadPolicy.maxBurst = 1.0;
+            if (logOverrides) {
+                REX_LOG_INFO(kModule,
+                             "decode-ahead DISABLED (burst=1.0) via REX_DECODE_AHEAD");
+            }
+        }
+    }
+    // Catch-up burst: raises the decode-thread throughput ceiling ONLY while
+    // published content trails the wall clock (reserveMs < 0). Refill pacing
+    // is untouched, so this cannot build the deep reserve behind the 2x
+    // defect. Default on (2.0); set REX_CATCHUP_BURST to override ("1" = off).
+    if (const char* cuFlag = std::getenv("REX_CATCHUP_BURST")) {
+        const double cu = std::atof(cuFlag);
+        m_decodeAheadPolicy.catchUpBurst = cu > 1.0 ? cu : 1.0;
+        if (logOverrides) {
+            REX_LOG_INFO(kModule, "catch-up burst override ({:.1f}x) via REX_CATCHUP_BURST",
+                         m_decodeAheadPolicy.catchUpBurst);
+        }
+    }
 }
 
 const VideoFrame* VideoPlaybackController::Tick(double targetPts) {

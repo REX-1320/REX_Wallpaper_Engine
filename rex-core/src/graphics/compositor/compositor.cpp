@@ -2,6 +2,8 @@
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 #include <algorithm>
 #include <d3dcompiler.h>
 
@@ -1065,9 +1067,24 @@ bool Compositor::UpdateLayerPixels(uint64_t layerId,
     return true;
 }
 
+// Debug tracing for the file-background path. Gated behind REX_BG_LOG
+// (audit 5.8 #11): it used to append to a hardcoded developer path
+// (C:\Users\munna\...) that exists on no other machine, unconditionally, on
+// every call. Enabled runs write to %TEMP%\REX\rex_bg_log.txt.
 static void LogToFile(const char* msg) {
-    FILE* f = fopen("C:\\Users\\munna\\AppData\\Local\\Temp\\rex_bg_log.txt", "a");
-    if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+    static const bool enabled = std::getenv("REX_BG_LOG") != nullptr;
+    if (!enabled) return;
+    char tmp[MAX_PATH] = {};
+    const DWORD n = GetTempPathA(MAX_PATH, tmp);
+    if (n == 0 || n >= MAX_PATH) return;
+    std::string path(tmp);
+    path += "REX";
+    CreateDirectoryA(path.c_str(), nullptr);
+    path += "\\rex_bg_log.txt";
+    if (FILE* f = fopen(path.c_str(), "a")) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
 }
 
 bool Compositor::SetBackgroundFromFile(const char* filePath) {

@@ -247,7 +247,6 @@ private:
     std::atomic<bool> m_modeFallback{false};
     std::atomic<bool> m_modeChanged{false};  // set by SetOutputMode
     int  m_endpointMixChannels = 2;          // probed per endpoint open
-    int  m_bytesPerSample        = 2;
 
     // ─── WASAPI state (internal thread only) ────────────────────────────
     Microsoft::WRL::ComPtr<IAudioClient>       m_client;
@@ -257,11 +256,17 @@ private:
     // ─── Ring buffer (frames of interleaved int16) ──────────────────────
     std::vector<int16_t> m_ring;
     std::vector<int16_t> m_scratch;  // conversion staging (decode thread)
+    // Tempo-resample staging (render thread, under m_ringMutex): reused so
+    // the MMCSS callback never allocates (audit 5.3 #11).
+    std::vector<int16_t> m_resampleScratch;
     size_t m_ringFrames   = 0;   // capacity in frames
     size_t m_readPos      = 0;   // frames
     size_t m_writePos     = 0;
     size_t m_bufferedFrames = 0;
-    mutable std::mutex m_ringMutex;  // guard against control-thread Clear()
+    // Serialises the ring and its counters across the decode thread
+    // (PushFrameToRing), the render thread (RenderStep) and control-thread
+    // operations (ResizeRing/seek/reset).
+    mutable std::mutex m_ringMutex;
 
     // ─── Control state (atomics) ────────────────────────────────────────
     std::atomic<bool> m_open{false};

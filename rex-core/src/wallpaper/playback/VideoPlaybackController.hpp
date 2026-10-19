@@ -227,6 +227,10 @@ public:
 
 private:
     void DecoderThread();
+    // Re-scale the decode-ahead policy from the CURRENT m_frameRate and
+    // re-apply the env overrides (audit 5.4 #13: an adaptive stream switch
+    // changed the source rate but kept the open-time reserve marks).
+    void RefreshDecodeAheadPolicy(bool logOverrides);
 
     // ─── Owned workers (P1-8 / R15: single ownership mechanism) ──────
     // shared_ptr snapshots: every accessor copies under m_decodeMutex and

@@ -15,6 +15,11 @@ bool RuntimeSettings::Load() {
     std::lock_guard lock(m_mutex);
     m_data.clear();
     if (!std::filesystem::exists(m_file)) return false;
+    // Audit 5.5 #8: cap the load — a corrupt or replaced-oversized file used
+    // to be slurped into memory without bound.
+    std::error_code sizeEc;
+    const auto fileSize = std::filesystem::file_size(m_file, sizeEc);
+    if (sizeEc || fileSize > 4u * 1024u * 1024u) return false;
     std::ifstream in(m_file);
     if (!in.is_open()) return false;
     std::stringstream ss;
@@ -45,29 +50,30 @@ bool RuntimeSettings::Save() {
     if (!out.is_open()) return false;
     out << json;
     out.close();
+    if (!out) return false;  // write failure (disk full, revoked ACL)
     std::error_code ec;
     std::filesystem::rename(tmpPath, m_file, ec);
     return !ec;
 }
 
-void RuntimeSettings::SetMonitorWallpaper(uint64_t edidHash, const std::string& path) {
-    SetString("monitor." + std::to_string(edidHash) + ".wallpaper", path);
+bool RuntimeSettings::SetMonitorWallpaper(uint64_t edidHash, const std::string& path) {
+    return SetString("monitor." + std::to_string(edidHash) + ".wallpaper", path);
 }
 
 std::string RuntimeSettings::GetMonitorWallpaper(uint64_t edidHash) const {
     return GetString("monitor." + std::to_string(edidHash) + ".wallpaper");
 }
 
-void RuntimeSettings::RemoveMonitorWallpaper(uint64_t edidHash) {
+bool RuntimeSettings::RemoveMonitorWallpaper(uint64_t edidHash) {
     std::lock_guard lock(m_mutex);
     m_data.erase("monitor." + std::to_string(edidHash) + ".wallpaper");
-    Save();
+    return Save();
 }
 
-void RuntimeSettings::SetString(const std::string& key, const std::string& value) {
+bool RuntimeSettings::SetString(const std::string& key, const std::string& value) {
     std::lock_guard lock(m_mutex);
     m_data[key] = value;
-    Save();
+    return Save();
 }
 
 std::string RuntimeSettings::GetString(const std::string& key, const std::string& def) const {
@@ -76,10 +82,10 @@ std::string RuntimeSettings::GetString(const std::string& key, const std::string
     return it != m_data.end() ? it->second : def;
 }
 
-void RuntimeSettings::RemoveKey(const std::string& key) {
+bool RuntimeSettings::RemoveKey(const std::string& key) {
     std::lock_guard lock(m_mutex);
     m_data.erase(key);
-    Save();
+    return Save();
 }
 
 std::vector<std::string> RuntimeSettings::GetKeysByPrefix(const std::string& prefix) const {

@@ -99,7 +99,8 @@ private:
     /// (overwrite). Render-thread only; caller checks REX_PERFRAME_CSV.
     void DumpPresentStages() const;
     /// P16: sleep until the next expected frame (decoder cadence clamped
-    /// by maxFps, floor ~15Hz so pause/resume/unload stay responsive).
+    /// by maxFps, floored at 4 ms / 250 Hz by the cadence policy so
+    /// pause/resume/unload stay responsive).
     void PaceLoop(std::chrono::high_resolution_clock::time_point frameStart,
                   bool isVideoScene);
     shared::Result<void> ReinitializeRenderer();
@@ -174,8 +175,6 @@ private:
     std::atomic<uint32_t> m_recoveryCount{0};
     std::atomic<uint32_t> m_deviceResetCount{0};
     int m_lastMonitorCount = 0;
-    int m_lastPrimaryWidth = 0;
-    int m_lastPrimaryHeight = 0;
     // Full last-seen topology: the change predicate compares geometry,
     // identity, primary role and DPI (P0-2 / G3), not just count + size.
     std::vector<MonitorInfo> m_lastMonitors;
@@ -244,12 +243,6 @@ private:
     // Rolling mean of the frame-latency waitable, used as the GPU-pressure
     // signal. Steady state measures 0.00 ms.
     std::atomic<double> m_phaseWaitMeanMs{0.0};
-    // Presentation-rate divisor under GPU pressure: 1 (normal), 2, 4.
-    std::atomic<uint32_t> m_pressureScale{1};
-    // Hysteresis thresholds in ms. Enter above 3 ms of blocked wait, recover
-    // below 1 ms, so a borderline value cannot oscillate the frame rate.
-    static constexpr double kGpuPressureEnterMs = 3.0;
-    static constexpr double kGpuPressureExitMs = 1.0;
     std::atomic<uint64_t> m_phaseFrameIndex{0};
 
     // ─── Pacing servo (Phase B2) ───────────────────────────────────────

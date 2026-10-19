@@ -16,9 +16,11 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 #include "wallpaper/runtime/FrameProtocol.hpp"
+#include "wallpaper/runtime/Json.hpp"
 #include "wallpaper/runtime/SafePath.hpp"
 
 using namespace rex::wallpaper;
@@ -82,4 +84,48 @@ TEST(SafeExistsTest, RealFileIsTrue) {
     EXPECT_TRUE(SafeExists(tmp));
     std::error_code ec;
     std::filesystem::remove(tmp, ec);
+}
+
+// ─── Audit 5.5 #5: numeric coercion safety ──────────────────────────────────
+// The JSON parser accepts 1e999 (finite grammar, inf value). The old
+// `static_cast<int>(AsNumber(...))` was UB on that input; AsInt/AsFloat must
+// reject non-finite and clamp finite out-of-range values instead.
+
+TEST(JsonNumericTest, NonFiniteRejectedWithDefault) {
+    auto j = rex::runtime::Json::Parse("1e999");
+    ASSERT_TRUE(j.has_value());
+    EXPECT_EQ(j->AsInt(7), 7);
+    EXPECT_FLOAT_EQ(j->AsFloat(2.5f), 2.5f);
+}
+
+TEST(JsonNumericTest, OutOfRangeIntClamps) {
+    auto big = rex::runtime::Json::Parse("9999999999");
+    ASSERT_TRUE(big.has_value());
+    EXPECT_EQ(big->AsInt(0), (std::numeric_limits<int>::max)());
+    auto small = rex::runtime::Json::Parse("-9999999999");
+    ASSERT_TRUE(small.has_value());
+    EXPECT_EQ(small->AsInt(0), (std::numeric_limits<int>::min)());
+}
+
+TEST(JsonNumericTest, OutOfRangeFloatClamps) {
+    auto j = rex::runtime::Json::Parse("1e39");
+    ASSERT_TRUE(j.has_value());
+    EXPECT_EQ(j->AsFloat(0.0f), (std::numeric_limits<float>::max)());
+}
+
+TEST(JsonNumericTest, NormalValuesPassThrough) {
+    auto i = rex::runtime::Json::Parse("42");
+    ASSERT_TRUE(i.has_value());
+    EXPECT_EQ(i->AsInt(-1), 42);
+    auto f = rex::runtime::Json::Parse("3.5");
+    ASSERT_TRUE(f.has_value());
+    EXPECT_FLOAT_EQ(f->AsFloat(), 3.5f);
+}
+
+TEST(JsonNumericTest, NonNumericKindsFallBackToDefault) {
+    // An object (or null) is not coercible: the caller's default is returned.
+    auto o = rex::runtime::Json::Parse("{\"a\":1}");
+    ASSERT_TRUE(o.has_value());
+    EXPECT_EQ(o->AsInt(9), 9);
+    EXPECT_FLOAT_EQ(o->AsFloat(1.5f), 1.5f);
 }

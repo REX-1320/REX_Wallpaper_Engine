@@ -634,7 +634,11 @@ void VideoManager::StopMonitor(const std::string& monitorId) {
     std::lock_guard<std::mutex> lock(m_monitorMutex);
     for (auto& entry : m_monitorEntries) {
         if (entry.info.id != monitorId) continue;
-        if (entry.monitorController) entry.monitorController->Close();
+        // Stop, not Close (audit 5.4 #11): the monitor's video must stay
+        // open — resumable and queryable — matching the timeline semantics
+        // of the main controller's Stop(). Close+erase is RemoveMonitor's
+        // job (see the RemoveMonitor path).
+        if (entry.monitorController) entry.monitorController->Stop();
         return;
     }
 }
