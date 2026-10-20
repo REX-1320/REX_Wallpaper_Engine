@@ -243,6 +243,100 @@ float IgnDither(float2 p) {
 #define APPLY_DITHER(signal, pixel) (signal)
 #endif
 
+// ── Upscale (the wallpaper is one fullscreen quad) ────────────────────────
+//
+// A video smaller than the desktop is magnified in this shader, and the
+// sampler's bilinear filter is visibly soft - mpv's gpu-next defaults to
+// --scale=lanczos. The LUMA is resampled with a Catmull-Rom (bicubic)
+// kernel, the "at minimum a Catmull-Rom pass" the colour TODO asks for;
+// the CHROMA keeps the bilinear tap (it is subsampled anyway, and doubling
+// the tap count for it would cost more than it shows).
+//
+// 16 taps (4x4), and only when the source is actually magnified: the
+// magnification factor comes from the UV derivatives (source texels per
+// output pixel), so no extra root constants are needed - the constant
+// budget is exactly 64/64 DWORDs.
+//
+// SampleLevel (not Sample) inside the taps: the derivative-based mip
+// selection is undefined in the loop's control flow, and the pool textures
+// have a single mip level anyway.
+void CatmullRomWeights(float t, out float w0, out float w1, out float w2,
+                        out float w3) {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    w0 = -0.5f * t3 + t2 - 0.5f * t;
+    w1 = 1.5f * t3 - 2.5f * t2 + 1.0f;
+    w2 = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+    w3 = 0.5f * t3 - 0.5f * t2;
+}
+
+float SampleLumaCatmullRom(Texture2D tex, SamplerState sam, float2 uv) {
+    uint w, h;
+    tex.GetDimensions(w, h);
+    const float2 src = float2(w, h);
+    // Uniform control flow: the derivatives must be taken before any branch.
+    const float2 d = float2(ddx(uv.x), ddy(uv.y));
+    const float2 scale = float2(abs(d.x) * src.x, abs(d.y) * src.y);
+    if (scale.x <= 1.0001f && scale.y <= 1.0001f) {
+        return tex.SampleLevel(sam, uv, 0.0).r;   // 1:1 or minified
+    }
+    const float2 pos = uv * src - 0.5;
+    const float2 f = frac(pos);
+    const float2 base = (floor(pos) + 0.5) / src;   // texel centres
+    float wx0, wx1, wx2, wx3;
+    float wy0, wy1, wy2, wy3;
+    CatmullRomWeights(f.x, wx0, wx1, wx2, wx3);
+    CatmullRomWeights(f.y, wy0, wy1, wy2, wy3);
+    float sum = 0.0;
+    float wsum = 0.0;
+    [unroll]
+    for (int j = -1; j <= 2; ++j) {
+        const float wy = (j == -1) ? wy0 : (j == 0) ? wy1 : (j == 1) ? wy2 : wy3;
+        [unroll]
+        for (int i = -1; i <= 2; ++i) {
+            const float wx = (i == -1) ? wx0 : (i == 0) ? wx1 : (i == 1) ? wx2 : wx3;
+            const float s = tex.SampleLevel(
+                sam, base + float2(float(i), float(j)) / src, 0.0).r;
+            sum += s * wx * wy;
+            wsum += wx * wy;
+        }
+    }
+    return sum / (abs(wsum) > 1e-6 ? wsum : 1.0);
+}
+
+float4 SampleRgbCatmullRom(Texture2D tex, SamplerState sam, float2 uv) {
+    uint w, h;
+    tex.GetDimensions(w, h);
+    const float2 src = float2(w, h);
+    const float2 d = float2(ddx(uv.x), ddy(uv.y));
+    const float2 scale = float2(abs(d.x) * src.x, abs(d.y) * src.y);
+    if (scale.x <= 1.0001f && scale.y <= 1.0001f) {
+        return tex.SampleLevel(sam, uv, 0.0);
+    }
+    const float2 pos = uv * src - 0.5;
+    const float2 f = frac(pos);
+    const float2 base = (floor(pos) + 0.5) / src;
+    float wx0, wx1, wx2, wx3;
+    float wy0, wy1, wy2, wy3;
+    CatmullRomWeights(f.x, wx0, wx1, wx2, wx3);
+    CatmullRomWeights(f.y, wy0, wy1, wy2, wy3);
+    float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    [unroll]
+    for (int j = -1; j <= 2; ++j) {
+        const float wy = (j == -1) ? wy0 : (j == 0) ? wy1 : (j == 1) ? wy2 : wy3;
+        [unroll]
+        for (int i = -1; i <= 2; ++i) {
+            const float wx = (i == -1) ? wx0 : (i == 0) ? wx1 : (i == 1) ? wx2 : wx3;
+            const float4 s = tex.SampleLevel(
+                sam, base + float2(float(i), float(j)) / src, 0.0);
+            sum += s * (wx * wy);
+            wsum += wx * wy;
+        }
+    }
+    return sum / (abs(wsum) > 1e-6 ? wsum : 1.0);
+}
+
 float4 main(VSOutput input) : SV_TARGET {
     const float peak = max(disp.x, 100.0);
     // Normalisation reference for PQ/HLG input, in nits.
@@ -271,7 +365,7 @@ float4 main(VSOutput input) : SV_TARGET {
         // regardless of transfer, so the SIGNAL must be read from the colour
         // constants: PQ/HLG content is BT.2020 HDR; SDR transfer is ordinary
         // BT.601/709 video and follows the 8-bit path's math below.
-        float  yRaw  = texY.Sample(sam, input.uv).r;
+        float  yRaw  = SampleLumaCatmullRom(texY, sam, input.uv);
         float2 uvRaw = texUV.Sample(sam, input.uv).rg;
         float y10  = yRaw * 1023.68;
         float cb10 = uvRaw.x * 1023.68;
@@ -322,7 +416,7 @@ float4 main(VSOutput input) : SV_TARGET {
         // RGB video slot (P0-3: software-decode BGRA/RGBA16 pool): already
         // RGB, skip the YUV matrix. Mirrors the static-RGBA branch above
         // plus the P010 branch's transfer split (HLG vs PQ vs SDR).
-        float4 c = texY.Sample(sam, input.uv);
+        float4 c = SampleRgbCatmullRom(texY, sam, input.uv);
         if (mode.y > 1.5) {
             rgb = HlgToLinear(saturate(c.rgb)) / norm;
         } else if (mode.y > 0.5) {
@@ -331,10 +425,10 @@ float4 main(VSOutput input) : SV_TARGET {
             rgb = SrgbToLinear(c.rgb);
         }
     } else if (mode.y > 0.5) {
-        float4 c = texY.Sample(sam, input.uv);
+        float4 c = SampleRgbCatmullRom(texY, sam, input.uv);
         rgb = PqToLinear(saturate(c.rgb)) / norm;
     } else {
-        float  y  = texY.Sample(sam, input.uv).r;
+        float  y  = SampleLumaCatmullRom(texY, sam, input.uv);
         float2 uv = texUV.Sample(sam, input.uv).rg;
 
         float yN, cbN, crN;
@@ -2383,7 +2477,18 @@ bool D3D12Renderer::CreatePipelineState(
            nullptr, nullptr, nullptr, "main", "ps_5_0",
            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &psBlob, &errorBlob);
     if (FAILED(hr)) {
-        REX_LOG_ERROR("D3D12", "Pixel shader compile failed");
+        // Print the HLSL diagnostics: "the shader did not compile" without
+        // the compiler's message is unactionable.
+        if (errorBlob && errorBlob->GetBufferSize() > 0) {
+            const std::string errors(
+                static_cast<const char*>(errorBlob->GetBufferPointer()),
+                errorBlob->GetBufferSize());
+            REX_LOG_ERROR("D3D12", "Pixel shader compile failed:\n{}",
+                          errors.c_str());
+        } else {
+            REX_LOG_ERROR("D3D12", "Pixel shader compile failed (0x{:08X})",
+                          static_cast<unsigned>(hr));
+        }
         return false;
     }
 
