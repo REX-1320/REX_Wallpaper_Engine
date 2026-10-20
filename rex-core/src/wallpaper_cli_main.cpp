@@ -2461,6 +2461,11 @@ int wmain(int argc, wchar_t** argv) {
     float speed = 1.0f;
     bool hardwareAcceleration = true;
     bool forceSdr = false;
+    // The engine pauses the wallpaper when a true full-screen app owns the
+    // foreground (correct behaviour - a full-screen game should not have a
+    // wallpaper animating behind it). A measurement run, or a user who wants
+    // the wallpaper to keep playing, can turn it off.
+    bool pauseOnFullscreen = true;
     HwMode benchHwMode = HwMode::Auto;
     bool benchmark = false;
     double seekSec = 0.0;
@@ -2491,6 +2496,8 @@ int wmain(int argc, wchar_t** argv) {
             hardwareAcceleration = false;
         } else if (arg == L"--force-sdr") {
             forceSdr = true;
+        } else if (arg == L"--no-fullscreen-pause") {
+            pauseOnFullscreen = false;
         } else if (arg == L"--hw") {
             benchHwMode = HwMode::HwOnly;   // benchmark: abort if HW unavailable
         } else if (arg == L"--sw") {
@@ -2516,6 +2523,7 @@ int wmain(int argc, wchar_t** argv) {
                 "  --speed <0.25..4>       playback speed\n"
                 "  --no-hw                 disable hardware acceleration\n"
                 "  --force-sdr             force SDR path in shader (diagnostic: skip HDR/PQ)\n"
+                "  --no-fullscreen-pause   keep playing when a full-screen app is in front\n"
                 "  --hw                    (benchmark) hardware decode ONLY — abort if the\n"
                 "                          codec has no D3D11VA hwaccel\n"
                 "  --sw                    (benchmark) software decode only — no D3D11VA context\n"
@@ -2576,6 +2584,7 @@ int wmain(int argc, wchar_t** argv) {
     WallpaperConfig config;
     config.enableHardwareAcceleration = hardwareAcceleration;
     config.maxFps = maxFps;
+    config.pauseOnFullscreen = pauseOnFullscreen;
 
     auto result = engine->Initialize(config);
     if (result.IsError()) {

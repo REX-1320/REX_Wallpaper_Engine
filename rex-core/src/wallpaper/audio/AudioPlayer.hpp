@@ -108,6 +108,12 @@ public:
     void SetMute(bool mute);
     /// Mute state (single-audio-owner policy proof + UI surfacing).
     bool IsMuted() const { return m_muted.load(std::memory_order_acquire); }
+    /// True when nothing can be heard: muted, or the volume is zero. The
+    /// decode is SUSPENDED in that state - see ThreadLoop.
+    bool IsSilentOutput() const {
+        return m_muted.load(std::memory_order_relaxed) ||
+               m_volume.load(std::memory_order_relaxed) <= 0.0f;
+    }
     /// Playback tempo (P1-13 / R20): the render step consumes speed x device
     /// frames of content per callback (linear resample), so audio stays in
     /// sync with video-paced playback. Rate resample, not pitch-corrected:

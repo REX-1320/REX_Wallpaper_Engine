@@ -307,6 +307,13 @@ void VideoPlaybackController::SetAudioOutputMode(AudioOutputMode mode) {
 void VideoPlaybackController::SetMute(bool mute) {
     std::lock_guard lock(m_decodeMutex);
     if (m_audio) {
+        if (!mute) {
+            // The audio decode is SUSPENDED while nothing can be heard, so
+            // the audio's own position is stale by the muted duration. Re-sync
+            // it to the video's position BEFORE the decode resumes, so the
+            // sound comes back in sync with the picture.
+            m_audio->Seek(m_position.load(std::memory_order_relaxed));
+        }
         m_audio->SetMute(mute);
     }
 }

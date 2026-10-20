@@ -621,6 +621,19 @@ void AudioPlayer::ThreadLoop() {
             std::lock_guard lock(m_ringMutex);
             freeFrames = m_ringFrames - m_bufferedFrames;
         }
+        // Muted (or volume 0): do not decode at all. The wallpaper's audio
+        // is silent by default (the protocol LOAD defaults to mute=true) and
+        // the decode was the expensive part: measured 2026-10-20, the same
+        // 4K clip costs 0.7 % of one core with no audio track and 4.7 % with
+        // 5.1 DTS-HD MA decoding - the audio path cost MORE than the whole
+        // video pipeline. The demuxer simply stops being read (so it keeps
+        // its position), and unmuting re-seeks the audio to the video's
+        // position before the decode resumes (the controller does that; the
+        // seek is request-based and consumed on this thread).
+        if (IsSilentOutput()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
         if (freeFrames >= kMinFreeChunkFrames) {
             if (!DecodeNextChunk()) {
                 if (m_looping.load(std::memory_order_acquire)) {
@@ -1113,7 +1126,11 @@ void AudioPlayer::RenderStep() {
     // Ring ran short of the endpoint period: the tail is zero-filled silence,
     // which is exactly the "beep" artefact. Counted so it can be measured
     // without needing ears.
-    if (have < framesAvail) {
+    // NOT counted while nothing can be heard: the decode is suspended then,
+    // so the ring is empty BY DESIGN and the silence is not an underrun -
+    // counting it made the health line report hundreds of "underruns" for a
+    // muted wallpaper.
+    if (have < framesAvail && !IsSilentOutput()) {
         m_underruns.fetch_add(1, std::memory_order_relaxed);
     }
 }
