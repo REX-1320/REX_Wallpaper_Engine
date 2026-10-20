@@ -2554,6 +2554,19 @@ int wmain(int argc, wchar_t** argv) {
         return SetImageWallpaper(file, fillMode);
     }
 
+    // P3-G5, direct mode too: the instance guard only covered the
+    // persistent --runtime mode, so a headless CLI run fought the app's
+    // runtime for the WorkerW layer. Under that fight the video pipeline
+    // collapsed into a 3.8 s backlog at 2-3 fps (measured 2026-10-20:
+    // reserve +163 ms -> -3831 ms, 242 late frames of ~1 s). Refuse
+    // instead, and say why.
+    const rex::wallpaper::RuntimeInstanceGuard instanceGuard;
+    if (!instanceGuard.IsOwner()) {
+        std::cerr << "REX: another wallpaper runtime already owns the "
+                     "desktop layer; refusing to start\n";
+        return 3;
+    }
+
     auto engine = CreateWallpaperEngine();
     if (!engine) {
         std::cerr << "REX: failed to create wallpaper engine\n";

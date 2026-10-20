@@ -29,7 +29,7 @@ void FrameScheduler::Push(const VideoFrame& frame) {
     }
 }
 
-const VideoFrame* FrameScheduler::Tick(double targetPts) {
+const VideoFrame* FrameScheduler::Tick(double targetPts, bool allowCatchUp) {
     const uint64_t wc = m_writeCount.load(std::memory_order_acquire);
     const uint64_t lc =
         m_watermark.load(std::memory_order_acquire) & kWatermarkMask;
@@ -91,6 +91,9 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
     uint64_t validCount = 0;
     double minValid = std::numeric_limits<double>::infinity();
     double maxValid = -std::numeric_limits<double>::infinity();
+    // The newest VALID frame, whoever it is (it may be in the future).
+    uint64_t newestValid = 0;
+    double newestValidPts = -std::numeric_limits<double>::infinity();
     for (uint64_t w = start; w <= wc; ++w) {
         const VideoFrame& f = m_slots[(w - 1) % kNumSlots];
         if (!f.valid) {
@@ -99,6 +102,10 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
         ++validCount;
         if (f.pts < minValid) minValid = f.pts;
         if (f.pts > maxValid) maxValid = f.pts;
+        if (f.pts >= newestValidPts) {
+            newestValid = w;
+            newestValidPts = f.pts;
+        }
         if (f.pts > limit) {
             continue;
         }
@@ -107,6 +114,23 @@ const VideoFrame* FrameScheduler::Tick(double targetPts) {
             selectedPts = f.pts;
             haveSelection = true;
         }
+    }
+    // Backlog recovery: the caller says the published content is more than
+    // a second behind the wall clock (the renderer stalled, the ring filled,
+    // the decoder blocked). Presenting the newest DUE frame then advances
+    // the content only at the RENDERER's rate, so the ring stays full, the
+    // decoder stays blocked and the backlog never unwinds - it took ~90 s to
+    // recover in the measured case. Presenting the NEWEST published frame
+    // jumps the content forward and drains the ring, which unblocks the
+    // decoder and lets the reserve recover.
+    //
+    // Only with the caller's permission: normally the newest published frame
+    // is ahead of the playhead (the decode-ahead reserve) and presenting it
+    // made the wallpaper read as playing at 2x.
+    if (allowCatchUp && haveSelection && newestValidPts > selectedPts) {
+        selected = newestValid;
+        selectedPts = newestValidPts;
+        m_catchUps.fetch_add(1, std::memory_order_relaxed);
     }
     if (!haveSelection) {
         // Nothing is due. The previously displayed frame stays on screen: the

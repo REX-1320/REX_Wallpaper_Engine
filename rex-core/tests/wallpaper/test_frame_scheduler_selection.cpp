@@ -223,3 +223,47 @@ TEST(FrameSchedulerSelect, EqualPtsRepeatsAreNotCountedAsDrops) {
     EXPECT_EQ(s.GetDroppedCount(), 0u)
         << "equal-PTS selection is a repeat, not a skip";
 }
+
+// 7. Backlog recovery: when the caller allows it (the published content is
+//    more than a second behind the wall clock), Tick may present the NEWEST
+//    published frame instead of the newest DUE one, so the content jumps
+//    forward and the ring drains. Without the permission the old rule holds:
+//    never present a future frame (that was the 2x-read bug).
+TEST(FrameSchedulerSelect, CatchUpJumpsToTheNewestPublishedFrame) {
+    FrameScheduler s;
+    // Five frames published, all in the past relative to a playhead that
+    // has run far ahead (the backlog).
+    for (int i = 0; i < 5; ++i) s.Push(MakeFrame(i, i * kFrame24));
+
+    // Without the permission: the newest DUE frame wins - the newest frame
+    // here is frame 4 (pts 4/24 s), which is still due for a playhead of
+    // 10 s. Use a playhead that makes the newest frame a FUTURE frame so
+    // the difference is visible.
+    FrameScheduler plain;
+    for (int i = 0; i < 5; ++i) plain.Push(MakeFrame(i, i * kFrame24));
+    const VideoFrame* due = plain.Tick(2.0 * kFrame24);
+    ASSERT_NE(due, nullptr);
+    EXPECT_EQ(due->frameIndex, 2u) << "the newest DUE frame is selected";
+
+    // With the permission, a frame that is ahead of the playhead may be
+    // presented (the content jumps forward instead of replaying the backlog).
+    FrameScheduler catcher;
+    for (int i = 0; i < 5; ++i) catcher.Push(MakeFrame(i, i * kFrame24));
+    const VideoFrame* jumped = catcher.Tick(2.0 * kFrame24, /*allowCatchUp=*/true);
+    ASSERT_NE(jumped, nullptr);
+    EXPECT_EQ(jumped->frameIndex, 4u) << "the catch-up presents the newest frame";
+}
+
+// 8. The catch-up must not fire when it is not allowed - the default keeps
+//    the "never show a future frame" contract.
+TEST(FrameSchedulerSelect, CatchUpIsOffByDefault) {
+    FrameScheduler s;
+    for (int i = 0; i < 5; ++i) s.Push(MakeFrame(i, i * kFrame24));
+
+    // A playhead before every published frame: nothing is due, so the
+    // current frame is retained and no future frame is displayed.
+    const VideoFrame* f = s.Tick(-1.0);
+    EXPECT_EQ(f, nullptr);
+    EXPECT_EQ(s.StarvedTicks(), 1u);
+    EXPECT_EQ(s.PendingCount(), 5u) << "the frames stay in the ring";
+}

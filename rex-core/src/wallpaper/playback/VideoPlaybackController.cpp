@@ -11,6 +11,12 @@ namespace rex::wallpaper {
 
 namespace {
 constexpr const char* kModule = "VideoPlaybackController";
+
+// Backlog threshold: the published content is this far behind the wall
+// clock, and the renderer is allowed to jump the content forward (the
+// scheduler's catch-up) instead of replaying the backlog at the renderer's
+// rate. Measured collapse: reserve -3831 ms, 2-3 fps, ~90 s to unwind.
+constexpr double kBacklogRecoveryMs = 1000.0;
 using ms = std::chrono::duration<double, std::milli>;
 double NowSec() {
     return std::chrono::duration<double>(
@@ -37,7 +43,19 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
                                     "controller already open");
     }
 
-    auto decoder = std::make_shared<FfmpegVideoDecoder>();
+    // Reuse the closed decoder from the previous session when possible: it
+    // keeps its shared-texture pool through Close(), and the D3D12 renderer
+    // keeps the matching imports, so a same-generation reopen costs no new
+    // driver import footprint. A decoder left open by an abnormal path is
+    // discarded instead of being reused.
+    std::shared_ptr<FfmpegVideoDecoder> decoder;
+    {
+        std::lock_guard plock(m_decoderMutex);
+        decoder = m_decoder;
+    }
+    if (decoder && decoder->IsOpen()) decoder.reset();
+    if (!decoder) decoder = std::make_shared<FfmpegVideoDecoder>();
+
     shared::Result<void> result = decoder->Open(path, useHardware, context11, fenceHandle);
     if (result.IsError()) {
         return result;
@@ -48,7 +66,7 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
         // Seek/Close snapshots either null or the fully opened decoder.
         std::lock_guard lock(m_decodeMutex);
         std::lock_guard plock(m_decoderMutex);
-        m_decoder = std::move(decoder);
+        m_decoder = decoder;
     }
     m_fenceHandle = fenceHandle;
     m_duration  = m_decoder->GetDuration();
@@ -168,7 +186,8 @@ void VideoPlaybackController::Close() {
         audio = m_audio;
         decoder = m_decoder;
         m_audio.reset();
-        m_decoder.reset();
+        // m_decoder is deliberately kept (closed): it owns the shared-texture
+        // pool the next Open reuses. It dies with the controller.
     }
     if (audio) {
         audio->Close();
@@ -405,7 +424,14 @@ const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
     // stay comparable; a one-iteration transient either bursts or parks,
     // both safe directions).
     m_lastTargetPts.store(wrapped, std::memory_order_relaxed);
-    const VideoFrame* frame = m_scheduler.Tick(wrapped);
+    // Backlog recovery: the published content is more than a second behind
+    // the wall clock (the renderer stalled, the ring filled, the decoder
+    // blocked). Let the scheduler jump the content forward so the ring
+    // drains - otherwise the backlog is an equilibrium and took ~90 s to
+    // unwind in the measured case (reserve -3831 ms, 2-3 fps).
+    const bool inBacklog =
+        m_reserveMs.load(std::memory_order_relaxed) < -kBacklogRecoveryMs;
+    const VideoFrame* frame = m_scheduler.Tick(wrapped, inBacklog);
     if (frame) {
         m_consumerFrameCount++;
         m_framesConsumed.fetch_add(1, std::memory_order_relaxed);

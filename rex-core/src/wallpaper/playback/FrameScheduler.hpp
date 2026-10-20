@@ -70,7 +70,18 @@ public:
     /// (pts <= targetPts + tolerance), or nullptr when nothing is due.
     /// Skipped and overwritten-unseen frames accumulate in the drop
     /// counter. Never blocks.
-    const VideoFrame* Tick(double targetPts);
+    ///
+    /// allowCatchUp: the caller says the pipeline is in a BACKLOG (the
+    /// published content is more than a second behind the wall clock -
+    /// usually because the renderer stalled and the ring filled up). In
+    /// that state Tick may present the NEWEST published frame instead of
+    /// the newest DUE one, so the content jumps forward and the ring
+    /// drains; without it the backlog is an equilibrium that takes tens of
+    /// seconds to unwind (measured: reserve -3831 ms for ~90 s).
+    /// It is off by default because normally the newest published frame is
+    /// AHEAD of the playhead (the decode-ahead reserve), and presenting it
+    /// made the wallpaper read as playing at 2x.
+    const VideoFrame* Tick(double targetPts, bool allowCatchUp = false);
 
     /// Cumulative dropped frames (bypassed by selection + overwritten
     /// unseen; equal-PTS repeats excluded). Written by the consumer in
@@ -176,6 +187,9 @@ private:
     std::atomic<uint64_t> m_primedEpoch{kNeverPrimed};
     // Ticks that found nothing due (frame retained). Normal with a reserve.
     std::atomic<uint64_t> m_starvedTicks{0};
+    // Ticks that jumped the content forward to recover from a backlog (the
+    // caller had to allow it - see Tick).
+    std::atomic<uint64_t> m_catchUps{0};
     // Test-only seam state (see SetTestBeforeCommitHook); written once by
     // a test before any concurrent use, never touched in production.
     BeforeCommitHook m_testHook = nullptr;
