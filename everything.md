@@ -1,7 +1,7 @@
 # REX — Everything
 
 > One-file reference: what REX is, what is in the repo, **what is already DONE**, what is WIP, and where the docs live.
-> Last updated: **2026-10-20** · test suite: **804/804 ctest green** · **mpv parity: libplacebo v7.360.0 reverse-engineered and numerically validated (our CPU port reproduces mpv's own 16-bit captures to 0.1 code/255 over a 24-band PQ ramp); user decision = match mpv, not BT.2390/VLC** · video-pool VRAM: **per-import driver pin root-caused + fixed** (same-generation pool/import reuse, stop-on-image reclaim; live flat VRAM across 6 switches, video→image 0 MB) · stage research: **`research.md`** (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision - four read-only tracks with DONE/FOUNDATION/GAP verdicts, file:line evidence, live-pass checklists) · **video-output research: `research-video.md`** (players/renderers, HDR→SDR tone mapping, decoding & color pipeline, verification + wallpaper prior art - four sourced tracks; verdict: VLC is good-but-dated, not the ceiling → ship **mpv/libplacebo parity**, with BT.2390 + VLC kept as presets) · **measured hardware utilisation vs mpv (RX 6700 XT, 4K AV1/PQ clip):** decode path already at parity (AMD VCN 72-78 % in both), mpv 3D 27 % + compute 73 % (full-resolution peak detection every rendered frame) vs REX 3D 14 % + compute 0 % → our parity pass must be sampled + frame-change-only to stay ~10× cheaper
+> Last updated: **2026-10-20** · test suite: **808/808 ctest green** · **mpv parity: libplacebo v7.360.0 reverse-engineered and numerically validated (our CPU port reproduces mpv's own 16-bit captures to 0.1 code/255 over a 24-band PQ ramp); user decision = match mpv, not BT.2390/VLC** · **measured hardware utilisation vs mpv (RX 6700 XT, 4K clip):** decode path already at parity (AMD VCN ~50 % in both); mpv gpu-next = **3D 27 % + compute 73 %** (full-resolution peak detection every rendered frame) vs REX = **3D 1.4–2.1 % + compute 0 %** (the parity pass is sampled + frame-change-only → mpv's quality at ~1/10 of its GPU cost) · **audio path audited (2026-10-20):** decode is exactly real-time (48 076 vs 48 000 frames/s, **0 underruns**), 5.1→2 ch downmix correct — but the decode runs even when muted and costs more CPU than the whole video pipeline (1.1 % → 4.6–7.7 % of one core) · **crash fixed:** concurrent Seek/Close on a frame-threaded decoder aborted the runtime (FFmpeg `av_assert0(fctx->async_lock)`) → codec-exclusion mutex in the decoder · video-pool VRAM: **per-import driver pin root-caused + fixed** (same-generation pool/import reuse, stop-on-image reclaim; live flat VRAM across 6 switches, video→image 0 MB) · stage research: **`research.md`** (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision - four read-only tracks with DONE/FOUNDATION/GAP verdicts, file:line evidence, live-pass checklists) · **video-output research: `research-video.md`** (players/renderers, HDR→SDR tone mapping, decoding & color pipeline, verification + wallpaper prior art - four sourced tracks; verdict: VLC is good-but-dated, not the ceiling → ship **mpv/libplacebo parity**, with BT.2390 + VLC kept as presets)
 > Detailed per-feature status: [`#project_status.md`](#project_status.md) · Remaining work: [`TODO.md`](TODO.md)
 
 ---
@@ -167,6 +167,20 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
   the gallery 1129 → 1329 px, a tile dragged into the strip producing a chip with its name **and** poster, the membership
   persisted by path, and maximize/close/reopen behaving. `pnpm lint` 0 errors, `pnpm build` clean. The selection/favorites
   half (multi-select, the favorite heart, the Inspector thumbnail) is still open — `TODO.md` P3-5b/c/d.
+- **App colour palette — SHIPPED 2026-10-20** (researched from the Windows 11 / Fluent token system, then implemented):
+  the app's own CSS carried **136 distinct colour values across 447 uses** in 8 files — 22 alpha steps of "white" for
+  text (one at **4.41:1, failing WCAG AA**), three spellings of the accent plus a violet second accent, two danger reds
+  (one at 4.35:1, also failing), panels that differed by **1.04:1** (indistinguishable by fill), and a dark, correct
+  shadcn token set that **zero** of the app's own rules used. It is now **75 tokens** in `index.css` (Windows' two-layer
+  model: base = nav + dock, content = gallery + inspector, raised = menus/dialog; four text steps at 21 / 14.4 / 7.7 : 1;
+  the Windows dark-mode control ramp; one accent hue; status colours that never ship without an icon), with **257
+  declarations** migrated by a role-aware mapping (`app/tools/migrate-palette.cjs`). Two real defects fell out: the
+  gallery's chrome text was **invisible on its own panel** (1.17:1) and the page title was invisible on a light
+  wallpaper — the content layer is now an occluding surface and the title carries its own shadow. The palette is now
+  **guarded**: `pnpm --dir app check:palette` fails on any raw colour literal outside the palette and on any text step
+  under 4.5:1. Live-verified over CDP against the rendered backgrounds (nav 19.6, gallery title 17.99 — was 1.17, dialog
+  15.96–16.5, menu 12.03, all ✓ AA). SPEC
+  [`docs/superpowers/specs/2026-10-20-app-color-palette-design.md`](docs/superpowers/specs/2026-10-20-app-color-palette-design.md).
 - `README.md` roadmap + architecture; `phases.md` wallpaper phase plan
 
 ### Tooling & diagnostics
@@ -383,6 +397,25 @@ Reading: the **decode path is already at parity** — both run FFmpeg→D3D11VA�
 New in-repo tools: `tools/color/parity_check.py` (measures a screenshot, prints the band table, exits non-zero on drift — no third-party packages) and the rewritten `tools/color/shader_port.py` (mirror of the new path + mpv's reference table). The band ramp, the capture procedure and the reference numbers are documented in `tools/color/README.md`.
 
 **Bugs found and fixed on the way:** a 49× brightness error in the first shader draft (the PQ→linear scale was `×10000/203` instead of `÷203` — every HDR frame clipped to white; caught because the desktop capture read 255 on every band), and the driver facts this box imposes on any D3D12 copy path: **buffer→texture copies remove the device** (reproduced in a 60-line program) and a command list's allocator must not be reused while the previous list is in flight. The engine's own path avoids both (D3D11→D3D12 pool blit + per-frame-context readback).
+
+**Audio path audit (2026-10-20).** The wallpaper's audio was audited end-to-end against mpv/libav behaviour on the hardest in-tree case (TheOdyssey IMAX — 4K HEVC Main10 + **DTS-HD MA 5.1**, 48 kHz). **It is healthy**: FFmpeg software decode on a second demuxer; the WASAPI endpoint is opened at the *source* rate with `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`, so Windows does the rate conversion and there is no 44.1↔48 drift; the 6→2 ch downmix is a documented matrix (centre to both, surrounds −3 dB, LFE dropped); every common decoder sample format is converted correctly (`ReadSample`, `AudioPlayer.cpp:844`); and the health log makes it checkable without ears — `audio out: 48076 fps decoded, 48000 fps rendered, 0 underruns, peak 0.514, 6ch -> 2ch @ 48000 Hz`.
+
+| measurement (same clip, 25 s steady state) | value |
+|---|---|
+| audio decode rate | 47 923–48 076 frames/s vs 48 000 rendered (**±0.3 %**, real time) |
+| underruns | **0** over 75 s |
+| video pacing **with** audio | **exactly 24.0 fps** (60 frames / 2.50 s) — identical to the no-audio run |
+| process CPU: no audio track | **1.1 %** of one core |
+| process CPU: 5.1 DTS-HD MA, unmuted | **4.6 %** |
+| process CPU: 5.1 DTS-HD MA, **muted** | **7.7 %** |
+
+The CPU column is the finding: the audio decode costs more than the entire video pipeline, and it runs **even when muted** — which is the default (protocol `LOAD` defaults to `mute=true`). Three gaps filed in `TODO.md`: the muted-but-decoded waste (P2), the naive linear tempo resampler that aliases when `speed ≠ 1` (P2), and the missing A/V-sync correction between the endpoint clock and the video clock (P2 — both clocks are exact to ±0.3 % short-term, but nothing compares them).
+
+**Side finding — a second wallpaper engine collapses the video pipeline.** The Electron supervisor respawns its runtime the moment any runtime process dies, and the runtime refuses a second instance by named mutex, so a headless CLI run and the app fight over the desktop. Under that fight the telemetry showed `decFps` steady at 24.0 while `rendFps` fell 23.8 → 5.1 and **`reserve` went +163 ms → −3831 ms** (a 3.8-second backlog), `schedDrops` 2 → 1616, 242 late frames of ~1 s each, and the wallpaper crawled at 2–3 fps for ~90 s before snapping back. **The engine itself is fine**: with the app stopped the same clip presents exactly 24.0 fps, gapP50 41.68 ms, gapMax 43.06 ms, **zero** late-frame warnings. Filed as a P2 (fast self-healing from a negative reserve + cooperative second-instance handling).
+
+**Crash fixed — concurrent Seek/Close aborted the runtime (FFmpeg frame-thread assert).** The audit surfaced a *flaky test*: `DecoderLifetimeTest.ConcurrentSeekCloseAndReadCompletes` failed ~1 run in 3 with `Assertion fctx->async_lock failed at libavcodec/pthread_frame.c:174` — an FFmpeg **abort**, i.e. the wallpaper runtime dies. Root cause: the software decode path runs a **frame-threaded** decoder (`thread_count = 0`), whose internal async lock is released by `avcodec_receive_frame()`, by `avcodec_flush_buffers()` (Seek) **and** by `avcodec_free_context()` (Close) — so an overlap releases it twice and trips `av_assert0` in `async_unlock()`. The overlap was reachable because `VideoPlaybackController::Close()` frees the codec context *outside* `m_decodeMutex` while a concurrent `Seek()` flushes it (a use-after-free as well). Fix: a codec-exclusion mutex inside `FfmpegVideoDecoder` (recursive — `DecodeFrame` calls `SeekInternal` for the EOF loop wrap) covering `DecodeFrame`, `Seek`/`SeekInternal`, `Flush`, `SelectStreamByResolution` and `Close`, plus a null-context guard in `SeekInternal`. Verified: **24/24** concurrent executions of the previously-flaky test (it failed ~1 in 4 rounds before), full suite **808/808**.
+
+**Also fixed — `SpeedClockTest` was hostage to the monitor's power state.** The engine correctly auto-pauses when the OS reports the console display as off, and this box sleeps the monitor after 300 s of idle — i.e. after any multi-minute build — so the rate test read 0.0009 s instead of ~2 s. The test now holds the display awake (`SetThreadExecutionState(ES_DISPLAY_REQUIRED)`, which also wakes a sleeping monitor), waits for `Running`, and skips with the cause named if there is no live display.
 
 ---
 

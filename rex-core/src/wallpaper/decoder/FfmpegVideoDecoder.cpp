@@ -75,6 +75,9 @@ FfmpegVideoDecoder::FfmpegVideoDecoder() = default;
 
 FfmpegVideoDecoder::~FfmpegVideoDecoder() {
     Close();
+    // Close() deliberately keeps the pool generation alive for reuse; the
+    // destructor is the real teardown boundary (VideoManager shutdown).
+    ReleasePool();
 }
 
 // P1-9: polled by FFmpeg inside every blocking demuxer call on this
@@ -453,6 +456,15 @@ void FfmpegVideoDecoder::Close() {
     m_stopRequested.store(true, std::memory_order_release);
     m_open.store(false, std::memory_order_release);
 
+    // Codec-context exclusion: avcodec_free_context() parks FFmpeg's frame
+    // workers by releasing their async lock - the same lock
+    // avcodec_receive_frame() holds while it runs. Overlapping the two
+    // double-releases it and trips av_assert0(fctx->async_lock)
+    // (libavcodec/pthread_frame.c) - an abort that kills the runtime.
+    // A concurrent Seek()'s avcodec_flush_buffers() does the same, and on a
+    // freed context it is a use-after-free. Serialise the whole teardown.
+    std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
+
     if (m_decCtx) {
         avcodec_free_context(&m_decCtx);
         m_decCtx = nullptr;
@@ -489,18 +501,13 @@ void FfmpegVideoDecoder::Close() {
     m_width = 0;
     m_height = 0;
 
-    for (HANDLE h : m_poolHandles) {
-        if (h) CloseHandle(h);
-    }
-    m_poolHandles.clear();
-    m_poolTex.clear();
-    m_staging.Reset();
-    m_enum.Reset();
-    m_processor.Reset();
-    m_poolW = 0;
-    m_poolH = 0;
+    // Keep the pool generation (textures + NT handles + video processor +
+    // staging texture) alive: the renderer's D3D12 imports reference these
+    // exact handles, and a rebuild on the next session would charge the
+    // driver another permanent per-import footprint. Only per-session lease
+    // bookkeeping is reset here; ReleasePool() is the teardown boundary.
     for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
-    m_poolFormat = DXGI_FORMAT_UNKNOWN;
+    m_consumedFrameIndex.store(-1, std::memory_order_release);
     m_hdrContent = false;
     m_fenceValue = 0;
     m_frameIndex = 0;
@@ -516,12 +523,33 @@ void FfmpegVideoDecoder::Close() {
     m_device11.Reset();
 }
 
+void FfmpegVideoDecoder::ReleasePool() {
+    for (HANDLE h : m_poolHandles) {
+        if (h) CloseHandle(h);
+    }
+    m_poolHandles.clear();
+    m_poolTex.clear();
+    m_staging.Reset();
+    m_enum.Reset();
+    m_processor.Reset();
+    m_poolDevice.Reset();
+    m_poolW = 0;
+    m_poolH = 0;
+    m_poolFormat = DXGI_FORMAT_UNKNOWN;
+    for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
+}
+
 bool FfmpegVideoDecoder::Seek(double seconds) {
     if (!m_open.load(std::memory_order_acquire)) return false;
+    // Codec-context exclusion: the flush below must not overlap a receive
+    // on a frame-threaded decoder (FFmpeg's async lock would be released
+    // twice -> av_assert0 in libavcodec/pthread_frame.c -> abort).
+    std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
     return SeekInternal(seconds);
 }
 
 bool FfmpegVideoDecoder::Flush() {
+    std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
     if (!m_decCtx) return false;
     avcodec_flush_buffers(m_decCtx);
     m_eof = false;
@@ -529,7 +557,11 @@ bool FfmpegVideoDecoder::Flush() {
 }
 
 bool FfmpegVideoDecoder::SeekInternal(double seconds) {
+    std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
     if (!m_fmtCtx || !m_stream) return false;
+    // Close() may have freed the context between the caller's open check and
+    // here; a flush on a freed/null context is a crash (FFmpeg asserts).
+    if (!m_decCtx) return false;
     const auto tSeek0 = Clock::now();
     const int64_t ts = av_rescale_q(static_cast<int64_t>(seconds * AV_TIME_BASE),
                                     AV_TIME_BASE_Q, m_stream->time_base);
@@ -555,6 +587,11 @@ bool FfmpegVideoDecoder::SeekInternal(double seconds) {
 
 void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHeight) {
     if (!m_fmtCtx || !m_open.load(std::memory_order_acquire)) return;
+
+    // Codec-context exclusion: the stream switch frees and reopens the codec
+    // context, so it must not overlap a decode (the frame-thread async lock
+    // would be released twice -> FFmpeg abort).
+    std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
 
     const int64_t targetPixels =
         static_cast<int64_t>(targetWidth) * static_cast<int64_t>(targetHeight);
@@ -790,6 +827,11 @@ VideoColorInfo FfmpegVideoDecoder::ResolveColorInfo() const {
 
 bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
     if (!m_open.load(std::memory_order_acquire) || !m_decCtx) return false;
+    // Codec-context exclusion: the receive below must not overlap a flush
+    // (Seek/Stop) or a close. On a frame-threaded decoder FFmpeg releases its
+    // async lock in both, and a double release trips av_assert0 in
+    // libavcodec/pthread_frame.c - an abort that kills the runtime.
+    std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
 
     // Zero-progress guard. Measured 2026-11: this FFmpeg build's SOFTWARE AV1
     // decoder opens successfully ("software decode", pix_fmt yuv420p) but emits
@@ -1175,7 +1217,8 @@ DXGI_FORMAT FfmpegVideoDecoder::PoolTextureFormat(bool hardwarePath,
 bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
                                     DXGI_FORMAT format) {
     if (m_poolW == width && m_poolH == height &&
-        m_poolTex.size() == kPoolSize && m_poolFormat == format) {
+        m_poolTex.size() == kPoolSize && m_poolFormat == format &&
+        m_poolDevice.Get() == m_device11.Get()) {
         return true;
     }
 
@@ -1294,6 +1337,7 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
     m_poolW = width;
     m_poolH = height;
     m_poolFormat = format;
+    m_poolDevice = m_device11;
     for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
     m_enum = std::move(vpEnum);
     m_processor = std::move(vpProcessor);

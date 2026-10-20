@@ -661,6 +661,29 @@ private:
     std::atomic<bool> m_looping{true};
     bool m_loggedSwFallback        = false;
 
+    // ─── Codec-context exclusion ───────────────────────────────────────
+    //
+    // Every call that touches the FFmpeg codec context must be serialised:
+    // avcodec_receive_frame / avcodec_send_packet / avcodec_flush_buffers /
+    // avcodec_free_context. The software path runs a FRAME-threaded decoder
+    // (thread_count = 0 => FFmpeg spawns frame workers), and that machinery
+    // keeps an internal async lock: avcodec_flush_buffers() and
+    // avcodec_free_context() park the workers by RELEASING that lock, while
+    // avcodec_receive_frame() releases it too while it runs. A flush or a
+    // close that overlaps a receive therefore releases it twice and trips
+    // FFmpeg's av_assert0(fctx->async_lock)
+    // (libavcodec/pthread_frame.c, async_unlock) - an ABORT that kills the
+    // whole wallpaper runtime. The same overlap is a use-after-free on the
+    // context itself.
+    //
+    // It was reachable: VideoPlaybackController::Close() calls
+    // decoder->Close() (which frees the context) OUTSIDE m_decodeMutex,
+    // while a concurrent Seek() -> avcodec_flush_buffers() runs under it.
+    //
+    // Recursive because DecodeFrame() calls SeekInternal() for the EOF loop
+    // wrap while already holding it.
+    mutable std::recursive_mutex m_codecMutex;
+
     double m_duration  = 0.0;
     double m_frameRate = 30.0;
     int    m_width     = 0;
@@ -680,8 +703,20 @@ private:
 
     // ─── Shareable BGRA pool ────────────────────────────────────────────
     // (slot count lives in the public kPoolSize above)
+    //
+    // The pool generation survives Close() so the next Open can reuse the
+    // exact same textures and NT handles: the D3D12 renderer then keeps its
+    // existing imports instead of opening the handles again. That matters
+    // on AMD, whose driver charges a permanent dedicated-VRAM footprint per
+    // imported shared-texture generation (measured: one full 4K pool per
+    // OpenSharedHandle cycle, freed only at process exit). ReleasePool() is
+    // the explicit teardown, called by the destructor.
+    void ReleasePool();
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> m_poolTex;
     std::vector<HANDLE> m_poolHandles;
+    // Device the current pool generation was created on (identity guard:
+    // a video device re-create must not reuse textures from the old device).
+    Microsoft::WRL::ComPtr<ID3D11Device> m_poolDevice;
     std::atomic<UINT64> m_slotFence[kPoolSize]{};
     UINT m_poolW = 0;
     UINT m_poolH = 0;
