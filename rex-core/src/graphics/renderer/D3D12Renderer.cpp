@@ -91,15 +91,42 @@ struct VSOutput {
     float2 uv : TEXCOORD;
 };
 
-static const float3x3 BT2020_TO_BT709 = {
-    1.6605, -0.1246, -0.0182,
-    -0.5876, 1.1323, -0.1006,
-    -0.0728, -0.0077, 1.1187
-};
 static const float3x3 BT709_TO_BT2020 = {
     0.6274, 0.0691, 0.0164,
     0.3293, 0.9195, 0.0880,
     0.0433, 0.0114, 0.8956
+};
+
+// ── HDR -> SDR tone mapping, mpv / libplacebo parity ─────────────────────
+//
+// libplacebo v7.360.0 (the build in mpv 0.41.0) tone-maps the *intensity*
+// channel of the IPT colour space, not each RGB channel: the highlight hue
+// survives the compression instead of being scaled per channel. The matrices
+// below are libplacebo's own:
+//   pl_ipt_rgb2lms(BT.2020)  - source gamut -> LMS
+//   pl_ipt_lms2ipt           - Ebner & Fairchild IPT (1998)
+//   pl_ipt_ipt2lms           - numerically inverted
+//   pl_ipt_lms2rgb(BT.709)   - target gamut <- LMS
+// (see HdrToneMapping.hpp for the curve itself and the CPU-side reference).
+static const float3x3 RGB2020_TO_LMS = {
+    0.41203639, 0.52391191, 0.06405498,
+    0.16666022, 0.72039521, 0.11294612,
+    0.02411236, 0.07547496, 0.90040794
+};
+static const float3x3 LMS_TO_IPT = {
+    0.4000, 0.4000, 0.2000,
+    4.4550, -4.8510, 0.3960,
+    0.8056, 0.3572, -1.1628
+};
+static const float3x3 IPT_TO_LMS = {
+    1.0, 0.0975689, 0.205226,
+    1.0, -0.1138760, 0.133217,
+    1.0, 0.0326151, -0.676887
+};
+static const float3x3 LMS_TO_RGB709 = {
+    6.17353266, -5.32089882, 0.14735489,
+    -1.32403191, 2.56026977, -0.23623862,
+    -0.01159839, -0.26492145, 1.27652634
 };
 
 float3 PqToLinear(float3 e) {
@@ -142,8 +169,32 @@ float3 LinearToSrgb(float3 c) {
     return lerp(hi, lo, step(c, float3(0.0031308, 0.0031308, 0.0031308)));
 }
 
-float3 AcesFit(float3 x) {
-    return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
+// (The former HDR->SDR path used this Hable filmic fit - the curve VLC 3.x
+// ships. It crushed PQ shadows (27 % of a dark HDR frame below code 4 vs
+// mpv's 9 %), which is what the "too much black" report was about. The
+// libplacebo spline below replaced it; the VLC shape stays in git history
+// for the planned "VLC-compatible" preset.)
+
+// HDR -> SDR tone curve, mpv / libplacebo v7.360.0 parity.
+//
+// The spline is solved on the CPU (HdrToneMapping.hpp) and shipped as five
+// floats in the colour constants:
+//   disp.x = source pivot (PQ)   disp.y = destination pivot (PQ)
+//   disp.z = slope at the pivot  disp.w = toe coefficient (Pa)
+//   extra.z = input peak (PQ)
+// The shoulder coefficients (Qa, Qb) are derived here from the same inputs,
+// exactly as libplacebo's spline() derives them.
+float ToneMapSpline(float x) {
+    const float inMax = extra.z;
+    const float imax  = max(inMax - disp.x, 1e-6);
+    const float omax  = 0.58068888 - disp.y;   // PQ(203) - destination pivot
+    const float num   = disp.z * imax - omax;
+    const float qa    = num / (2.0 * imax * imax * imax);
+    const float qb    = -1.5 * num / (imax * imax);
+    const float xs    = x - disp.x;
+    const float y     = xs > 0.0 ? ((qa * xs + qb) * xs + disp.z) * xs
+                                 : (disp.w * xs + disp.z) * xs;
+    return saturate(y + disp.y);
 }
 
 float SampleSpectrum(float x) {
@@ -216,7 +267,11 @@ float4 main(VSOutput input) : SV_TARGET {
             } else {
                 rgb = PqToLinear(saturate(rgb)) / norm;
             }
-            rgb = max(mul(rgb, BT2020_TO_BT709), 0.0);
+            // Stays in the SOURCE gamut (BT.2020): the HDR->SDR tone map
+            // converts the primaries itself (inside the IPT transform),
+            // and the HDR-output path wants BT.2020 anyway. Converting here
+            // and back later lost highlights and mismatched the swap chain's
+            // declared colour space.
         } else {
             // SDR transfer: the 10-bit version of the 8-bit branch below —
             // same matrices, same linearisation (e.g. Main10/bt709 content).
@@ -324,11 +379,434 @@ float4 main(VSOutput input) : SV_TARGET {
     }
 
     if (mode.y > 0.5) {
-        rgb = AcesFit(rgb);
+        // HDR content on an SDR target: mpv / libplacebo parity.
+        //
+        // libplacebo v7.360.0 (mpv 0.41.0) tone-maps the intensity channel
+        // of the IPT colour space and keeps the chroma, so a saturated
+        // highlight keeps its hue instead of being scaled per RGB channel.
+        // The curve itself is the single-pivot polynomial spline whose
+        // coefficients the CPU solved from the measured source peak/average
+        // (HdrToneMapping.hpp).
+        //
+        // rgb arrives linear with 1.0 == paper white (adj.w nits) and in the
+        // SOURCE gamut (BT.2020 for HDR) - the gamut conversion happens
+        // below, inside the tone map, exactly like libplacebo does it.
+        const float3 nits = rgb * norm;
+
+        // 1) source gamut -> LMS -> PQ -> IPT
+        const float3 lms = mul(RGB2020_TO_LMS, nits);
+        const float3 lmspq = LinearToPq(lms);
+        float3 ipt = mul(LMS_TO_IPT, lmspq);
+        const float iOrig = ipt.x;
+
+        // 2) the curve, on intensity only. The input is clamped to the
+        // curve's domain, like libplacebo's LUT sampling does.
+        ipt.x = ToneMapSpline(clamp(ipt.x, 0.00011948, extra.z));
+
+        // 3) hue hull: do not raise saturation more than the curve's own
+        // gamut allows (libplacebo's "hull" clamp).
+        float2 hull = float2(iOrig, ipt.x);
+        hull = ((hull - 6.0) * hull + 9.0) * hull;
+        ipt.yz *= min(iOrig / max(ipt.x, 1e-6), hull.y / max(hull.x, 1e-6));
+
+        // 4) back to linear light in the TARGET gamut (BT.709).
+        // PqToLinear returns absolute nits; dividing by the SDR reference
+        // white (203 cd/m²) puts the value in libplacebo's NORM scale
+        // (1.0 == 203 cd/m²). (Multiplying by 10000/203 here instead would
+        // be 49x too bright and clip everything to white.)
+        const float3 lmsOut = PqToLinear(mul(IPT_TO_LMS, ipt)) / 203.0;
+        rgb = saturate(mul(LMS_TO_RGB709, lmsOut));
+
+        // 5) black-scaled delinearize: the target black (203/1000 cd/m²)
+        // lands on code 0, the SDR reference white (203 cd/m²) on code 1 -
+        // the same mapping libplacebo applies for a 1000:1 SDR target.
+        const float3 signal = (rgb - 0.001) / 0.999;
+        // Gamma 2.2 display transfer, matching the swap chain's
+        // RGB_FULL_G22_NONE_P709 colour space.
+        return float4(pow(saturate(signal), 1.0 / 2.2), 1.0);
     }
     return float4(LinearToSrgb(saturate(rgb)), 1.0);
 }
 )";
+
+// ─── Peak detection (libplacebo's pl_shader_detect_peak) ─────────────────
+//
+// Measures the source peak and average luminance in PQ space so the tone
+// curve can adapt to the content - the same measurement libplacebo takes
+// before it builds its spline. Mirrors lp_sh_colorspace.c:
+//
+//   luma = Rec.2020 Y of the linearised RGB
+//   pq   = PQ(luma), attenuated by smoothstep(0, 0.01, pq)  (libplacebo's
+//          black cutoff: below it a pixel counts as black and is excluded)
+//   yq   = uint(16383 * pq)          (14-bit, like libplacebo's PQ_MAX)
+//
+// The average is the mean over the non-black pixels, the peak the maximum.
+// The pass runs on a 2-pixel stride: the average is unaffected, the peak is
+// marginally conservative, and the pass costs a quarter of a full sweep -
+// mpv re-runs its equivalent at full resolution every rendered frame.
+static const char* g_toneStatsShaderSource = R"(
+Texture2D texY : register(t0);
+Texture2D texUV : register(t1);
+SamplerState sam : register(s0);
+
+cbuffer ToneStatsParams : register(b0) {
+    uint4 dims;   // x=width, y=height, z=transfer (1=PQ, 2=HLG), w=flags
+    float4 misc;  // x=uvScaleX, y=uvScaleY, z=inputFormat, w=unused
+};
+
+RWStructuredBuffer<uint> gStats : register(u0);   // [0]=count [1]=sum [2]=max
+
+float3 PqToLinearNits(float3 e) {
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    float3 p = pow(max(e, 0.0), 1.0 / m2);
+    float3 num = max(p - c1, 0.0);
+    float3 den = c2 - c3 * p;
+    return pow(num / max(den, 1e-9), 1.0 / m1) * 10000.0;
+}
+float LinearToPqNits(float l) {
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    float p = pow(max(l / 10000.0, 0.0), m1);
+    return pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
+}
+float3 HlgToLinearNits(float3 e) {
+    const float a = 0.17883277;
+    const float b = 0.28466892;
+    const float c = 0.55991073;
+    float3 l = (e <= 0.5) ? (e * e) / 3.0 : (exp((e - c) / a) + b) / 12.0;
+    return pow(l, 1.2) * 1000.0;
+}
+
+[numthreads(8,8,1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    const uint x = tid.x * 2u;
+    const uint y = tid.y * 2u;
+    if (x >= dims.x || y >= dims.y) return;
+
+    const float2 uv = (float2(x, y) + 0.5) / float2(dims.x, dims.y) *
+                      float2(misc.x, misc.y);
+
+    float3 nits;
+    if (misc.z > 0.5 && misc.z < 1.5) {
+        // RGB slot: already RGB. SampleLevel, not Sample - a compute shader
+        // has no derivatives.
+        const float4 c = texY.SampleLevel(sam, uv, 0.0);
+        nits = (dims.z == 2u) ? HlgToLinearNits(saturate(c.rgb))
+                              : PqToLinearNits(saturate(c.rgb));
+    } else {
+        // NV12 / P010 planes.
+        const float yRaw = texY.SampleLevel(sam, uv, 0.0).r;
+        const float2 uvRaw = texUV.SampleLevel(sam, uv, 0.0).rg;
+        float yN, cbN, crN;
+        if ((dims.w & 2u) != 0u) {
+            const float y10 = yRaw * 1023.68;
+            const float cb10 = uvRaw.x * 1023.68;
+            const float cr10 = uvRaw.y * 1023.68;
+            if ((dims.w & 1u) != 0u) {
+                yN = y10 / 1023.0;  cbN = cb10 / 1023.0 - 0.5;
+                crN = cr10 / 1023.0 - 0.5;
+            } else {
+                yN = (y10 - 64.0) / 876.0;  cbN = (cb10 - 512.0) / 896.0;
+                crN = (cr10 - 512.0) / 896.0;
+            }
+        } else {
+            if ((dims.w & 1u) != 0u) {
+                yN = yRaw;  cbN = uvRaw.x - 0.5;  crN = uvRaw.y - 0.5;
+            } else {
+                yN = (yRaw - 16.0/255.0) * (255.0/219.0);
+                cbN = (uvRaw.x - 128.0/255.0) * (255.0/224.0);
+                crN = (uvRaw.y - 128.0/255.0) * (255.0/224.0);
+            }
+        }
+        // BT.2020 non-constant-luminance matrix (HDR is always BT.2020).
+        const float3 pq = saturate(float3(
+            yN + 1.4746 * crN,
+            yN - 0.16455 * cbN - 0.57135 * crN,
+            yN + 1.8814 * cbN));
+        nits = (dims.z == 2u) ? HlgToLinearNits(pq) : PqToLinearNits(pq);
+    }
+
+    // Rec.2020 luminance -> PQ -> black cutoff -> 14-bit code.
+    const float luma = dot(nits, float3(0.2627, 0.6780, 0.0593));
+    float pq = LinearToPqNits(luma);
+    pq *= smoothstep(0.0, 0.01, pq);
+    const uint yq = (uint)(16383.0 * pq);
+    if (yq == 0u) return;   // below the black cutoff: not a signal pixel
+
+    InterlockedAdd(gStats[0], 1u);
+    InterlockedAdd(gStats[1], yq);
+    InterlockedMax(gStats[2], yq);
+}
+)";
+
+// ─── Peak detection pass ─────────────────────────────────────────────────
+
+bool D3D12Renderer::CreateToneStatsPipeline() {
+    ID3D12Device* dev = m_device.Get();
+    if (!dev) return false;
+
+    // ── Root signature: 2 SRVs (t0/t1), 1 UAV (u0), 8 constants (b0) ──
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors     = 2;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.RegisterSpace      = 0;
+
+    D3D12_DESCRIPTOR_RANGE uavRange = {};
+    uavRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    uavRange.NumDescriptors     = 1;
+    uavRange.BaseShaderRegister = 0;
+    uavRange.RegisterSpace      = 0;
+
+    D3D12_ROOT_PARAMETER params[3] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[0].DescriptorTable.NumDescriptorRanges = 1;
+    params[0].DescriptorTable.pDescriptorRanges   = &srvRange;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // The UAV is bound through a descriptor table (the SDK's
+    // SetComputeRootUnorderedAccessView only takes a virtual address).
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges   = &uavRange;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    params[2].ParameterType                    = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[2].Constants.ShaderRegister         = 0;
+    params[2].Constants.RegisterSpace          = 0;
+    params[2].Constants.Num32BitValues         = 8;
+    params[2].ShaderVisibility                 = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU       = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV       = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW       = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxLOD         = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters     = 3;
+    desc.pParameters       = params;
+    desc.NumStaticSamplers = 1;
+    desc.pStaticSamplers   = &sampler;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> sigBlob, errorBlob;
+    HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                              &sigBlob, &errorBlob);
+    if (FAILED(hr)) {
+        REX_LOG_ERROR("D3D12", "Tone stats root signature failed: {:08x}", hr);
+        return false;
+    }
+    m_toneStatsRootSignature = m_device.CreateRootSignature(
+        sigBlob->GetBufferPointer(), sigBlob->GetBufferSize());
+    if (!m_toneStatsRootSignature) return false;
+
+    // ── Compute pipeline ──
+    Microsoft::WRL::ComPtr<ID3DBlob> csBlob, csError;
+    hr = D3DCompile(g_toneStatsShaderSource, strlen(g_toneStatsShaderSource),
+                    nullptr, nullptr, nullptr, "main", "cs_5_0", 0, 0,
+                    &csBlob, &csError);
+    if (FAILED(hr)) {
+        REX_LOG_ERROR("D3D12", "Tone stats shader compile failed: {:08x} {}",
+                      hr, csError ? (const char*)csError->GetBufferPointer() : "");
+        return false;
+    }
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature = m_toneStatsRootSignature.Get();
+    psoDesc.CS.pShaderBytecode = csBlob->GetBufferPointer();
+    psoDesc.CS.BytecodeLength  = csBlob->GetBufferSize();
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> computePso;
+    hr = dev->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&computePso));
+    if (FAILED(hr) || !computePso) {
+        REX_LOG_ERROR("D3D12", "Tone stats pipeline state creation failed: {:08x}", hr);
+        return false;
+    }
+    m_toneStatsPipelineState = computePso;
+
+    // ── Per-frame-context resources ──
+    // Two buffers per context: the UAV the compute shader accumulates into
+    // (default heap) and the copy the CPU reads back (readback heap).
+    D3D12_RESOURCE_DESC uavRes = {};
+    uavRes.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uavRes.Width            = 16;   // 4 uints: count, sum, max, spare
+    uavRes.Height           = 1;
+    uavRes.DepthOrArraySize = 1;
+    uavRes.MipLevels        = 1;
+    // DXGI_FORMAT_UNKNOWN, not R32_UINT: this driver rejects a UAV buffer
+    // with a typed format (E_INVALIDARG) and wants a raw buffer - the UAV
+    // view still describes the contents as R32_UINT below.
+    uavRes.Format           = DXGI_FORMAT_UNKNOWN;
+    uavRes.SampleDesc.Count = 1;
+    uavRes.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;   // buffers
+    uavRes.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    D3D12_RESOURCE_DESC readbackRes = uavRes;
+    readbackRes.Format = DXGI_FORMAT_UNKNOWN;
+    readbackRes.Flags  = D3D12_RESOURCE_FLAG_NONE;
+
+    D3D12_HEAP_PROPERTIES defaultHeap = {};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_HEAP_PROPERTIES readbackHeap = {};
+    readbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
+
+    // The UAV descriptors live in the shared CBV_SRV_UAV heap, past the
+    // static texture (slot 0) and the 8 video slots (slots 1..16).
+    const UINT uavBase = 20;
+    const UINT inc = dev->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuBase = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuBase = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+
+    for (UINT i = 0; i < graphics::kFrameContextCount; ++i) {
+        ToneStats& st = m_toneStats[i];
+        st.buffer = m_device.CreateCommittedResource(
+            defaultHeap, D3D12_HEAP_FLAG_NONE, uavRes,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr);
+        if (!st.buffer) {
+            REX_LOG_ERROR("D3D12", "Tone stats buffer creation failed");
+            return false;
+        }
+
+        st.readback = m_device.CreateCommittedResource(
+            readbackHeap, D3D12_HEAP_FLAG_NONE, readbackRes,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr);
+        if (!st.readback) {
+            REX_LOG_ERROR("D3D12", "Tone stats readback creation failed");
+            return false;
+        }
+        void* mapped = nullptr;
+        if (FAILED(st.readback->Map(0, nullptr, &mapped)) || !mapped) {
+            REX_LOG_ERROR("D3D12", "Tone stats readback map failed");
+            return false;
+        }
+        st.mapped = static_cast<uint32_t*>(mapped);
+        ZeroMemory(st.mapped, 16);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format           = DXGI_FORMAT_R32_UINT;
+        uavDesc.ViewDimension    = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Buffer.NumElements = 4;
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu = cpuBase;
+        cpu.ptr += (uavBase + i) * inc;
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu = gpuBase;
+        gpu.ptr += (uavBase + i) * inc;
+        dev->CreateUnorderedAccessView(st.buffer.Get(), nullptr, &uavDesc, cpu);
+        st.uavCpu = cpu;
+        st.uavGpu = gpu;
+    }
+
+    m_toneStatsReady = true;
+    REX_LOG_INFO("D3D12", "Peak-detection pipeline ready (mpv parity)");
+    return true;
+}
+
+void D3D12Renderer::DispatchToneStats(UINT contextIndex,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE srvGpu) {
+    if (!m_toneStatsReady || contextIndex >= graphics::kFrameContextCount) return;
+    ToneStats& st = m_toneStats[contextIndex];
+    if (!st.buffer || !st.readback) return;
+
+    // Re-measure only when the decoded frame changed. The smoothed state
+    // still advances once per rendered frame, so the curve converges exactly
+    // like mpv's (which re-measures the same frame on every render).
+    if (m_statsFrameIndex == m_activeFrameIndex) return;
+    m_statsFrameIndex = m_activeFrameIndex;
+
+    const UINT width  = static_cast<UINT>(m_videoWidth);
+    const UINT height = static_cast<UINT>(m_videoHeight);
+    if (width == 0 || height == 0) return;
+
+    // ── Parameters ──
+    UINT flags = 0;
+    if (m_activeColorInfo.fullRange) flags |= 1u;
+    if (m_inputFormat > 1.5f) flags |= 2u;   // P010: 10-bit planes
+    const bool hlg = m_activeColorInfo.transfer == VideoColorInfo::Transfer::HLG;
+
+    struct ToneStatsConstants {
+        UINT dims[4];    // x=width, y=height, z=transfer, w=flags
+        float misc[4];   // x=uvScaleX, y=uvScaleY, z=inputFormat
+    } params = {};
+    params.dims[0] = width;
+    params.dims[1] = height;
+    params.dims[2] = hlg ? 2u : 1u;
+    params.dims[3] = flags;
+    params.misc[0] = m_videoUvScaleX;
+    params.misc[1] = m_videoUvScaleY;
+    params.misc[2] = m_inputFormat;
+
+    // ── Clear the accumulator ──
+    const UINT zeros[4] = {0, 0, 0, 0};
+    m_commandList->ClearUnorderedAccessViewUint(st.uavGpu, st.uavCpu,
+                                                 st.buffer.Get(), zeros, 0, nullptr);
+
+    // ── Dispatch ──
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
+    m_commandList->SetDescriptorHeaps(1, heaps);
+    m_commandList->SetComputeRootSignature(m_toneStatsRootSignature.Get());
+    m_commandList->SetPipelineState(m_toneStatsPipelineState.Get());
+    m_commandList->SetComputeRootDescriptorTable(0, srvGpu);
+    m_commandList->SetComputeRootDescriptorTable(1, st.uavGpu);
+    m_commandList->SetComputeRoot32BitConstants(2, 8, &params, 0);
+
+    // Each thread samples one pixel of a 2-pixel stride; 8 threads cover
+    // 16 pixels.
+    const UINT groupsX = (width + 15u) / 16u;
+    const UINT groupsY = (height + 15u) / 16u;
+    m_commandList->Dispatch(groupsX, groupsY, 1);
+
+    // ── Copy the result out for the CPU ──
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource   = st.buffer.Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    m_commandList->ResourceBarrier(1, &barrier);
+
+    m_commandList->CopyBufferRegion(st.readback.Get(), 0, st.buffer.Get(), 0, 16);
+
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    m_commandList->ResourceBarrier(1, &barrier);
+
+    st.pending = true;
+    if (!m_loggedStatsDispatch) {
+        m_loggedStatsDispatch = true;
+        REX_LOG_INFO("D3D12", "tone stats dispatched: frame={} {}x{} fmt={}",
+                     m_activeFrameIndex, width, height, m_inputFormat);
+    }
+}
+
+void D3D12Renderer::ConsumeToneStats(UINT contextIndex) {
+    if (!m_toneStatsReady || contextIndex >= graphics::kFrameContextCount) return;
+    ToneStats& st = m_toneStats[contextIndex];
+    if (!st.pending || !st.mapped) return;
+    st.pending = false;
+
+    const uint32_t count = st.mapped[0];
+    const uint32_t sum   = st.mapped[1];
+    const uint32_t peak  = st.mapped[2];
+    if (!m_loggedStatsRead) {
+        m_loggedStatsRead = true;
+        REX_LOG_INFO("D3D12", "tone stats read: count={} sum={} peak={}", count, sum, peak);
+    }
+    if (count == 0) return;   // an all-black frame carries no measurement
+
+    constexpr float kPqScale = 16383.0f;   // libplacebo's 14-bit PQ_MAX
+    m_measuredMaxPq = static_cast<float>(peak) / kPqScale;
+    m_measuredAvgPq = static_cast<float>(sum) / (static_cast<float>(count) * kPqScale);
+}
 
 // ─── Constructor / Destructor ──────────────────────────────────────────────
 
@@ -427,6 +905,15 @@ shared::Result<void> D3D12Renderer::InitializeCore(HWND targetWindow, int width,
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Failed to create root signature");
     }
+
+    // ── Peak detection (tone curve input) ────────────────────────────
+    // Not fatal: without it the tone curve falls back to a static source
+    // peak, the way the engine behaved before mpv parity.
+    CreateToneStatsPipeline();
+    // Until the first measurement lands, assume a 1000 cd/m² source - the
+    // same fallback the engine used before, and close to what most HDR
+    // content actually peaks at.
+    m_toneCurve = tone::BuildSplineCurve(tone::PqEncode(1000.0f), 0.0f);
 
     // ── Vertex buffer ─────────────────────────────────────────────────
     if (!CreateVertexBuffer()) {
@@ -529,6 +1016,23 @@ void D3D12Renderer::Shutdown() {
     m_customPSOHdr.Reset();
     m_customPsActive = false;
     m_rootSignature.Reset();
+
+    // Peak-detection resources (tone curve input).
+    for (auto& st : m_toneStats) {
+        if (st.readback && st.mapped) {
+            st.readback->Unmap(0, nullptr);
+            st.mapped = nullptr;
+        }
+        st.buffer.Reset();
+        st.readback.Reset();
+        st.pending = false;
+    }
+    m_toneStatsPipelineState.Reset();
+    m_toneStatsRootSignature.Reset();
+    m_toneStatsReady = false;
+    m_peakState.Reset();
+    m_statsFrameIndex = UINT64_MAX;
+
     m_srvHeap.Reset();
     m_commandList.Reset();
     for (auto& ctx : m_frameContexts) {
@@ -796,6 +1300,9 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
     m_videoWidth  = frame.width;
     m_videoHeight = frame.height;
     m_activeColorInfo = frame.colorInfo;
+    // The peak-detection pass re-measures only when the decoded frame
+    // changes; this is the key that tells it so.
+    m_activeFrameIndex = frame.frameIndex;
 
     // Crop scale: sample only the active picture, never driver padding.
     // Pool textures may be larger than the frame (e.g. 1920x1152 HW
@@ -840,13 +1347,16 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
 void D3D12Renderer::ClearVideoFrame() {
     std::lock_guard<std::mutex> lock(m_renderMutex);
 
-    ActiveQueue().WaitForGPU();
-    for (auto& slot : m_videoSlots) {
-        slot.resource.Reset();
-        slot.sharedHandle = nullptr;
-        slot.srvGpu = {};
-    }
-    m_videoSlotCount = 0;
+    // The imported slot cache is deliberately retained. The decoder keeps
+    // its pool generation across video sessions, so the next session brings
+    // back the same NT handles and DrawVideoFrame hits this cache instead of
+    // opening them again. Re-importing on every session charged the AMD
+    // driver a permanent dedicated-VRAM footprint per import generation
+    // (measured: a full 4K pool per OpenSharedHandle cycle, freed only at
+    // process exit — releasing imports, trimming and destroying both
+    // devices does not return it). Slots are released in Shutdown() and
+    // retired by the LRU path when a different pool generation arrives.
+    // Nothing is released here, so no GPU drain is needed.
     m_activeVideoHandle = nullptr;
     m_hasVideoFrame = false;
     m_videoWidth  = 0;
@@ -1129,6 +1639,35 @@ bool D3D12Renderer::BeginFrame() {
         }
     }
     ctx.allocator->Reset();
+
+    // The context's fence has completed, so its peak-detection readback
+    // (recorded 2-3 frames ago) is safe to read now.
+    const UINT ctxIndex = graphics::FrameContextIndex(
+        m_frameNumber, graphics::kFrameContextCount);
+    ConsumeToneStats(ctxIndex);
+    // Advance the smoothed source peak once per rendered frame, exactly
+    // like libplacebo's IIR (20-frame smoothing period), and rebuild the
+    // tone curve from it. The measurement itself only changes when the
+    // decoded frame changes, but the smoothing runs per rendered frame -
+    // which is what mpv does too.
+    if (m_measuredMaxPq > 0.0f) {
+        m_peakState.Update(m_measuredMaxPq, m_measuredAvgPq);
+        m_toneCurve = tone::BuildSplineCurve(m_peakState.maxPq, m_peakState.avgPq);
+        // Log the detected peak when it moves materially (2 % of the PQ range
+        // is roughly a 6 % change in nits): the curve's input is the one
+        // thing a screenshot cannot show, and a wrong peak is the difference
+        // between "matches mpv" and "looks plausible" - but a moving scene
+        // must not spam the log.
+        if (std::fabs(m_peakState.maxPq - m_loggedPeakPq) > 0.02f) {
+            m_loggedPeakPq = m_peakState.maxPq;
+            REX_LOG_INFO("D3D12",
+                         "tone peak: max={} nits (PQ {}) avg={} PQ "
+                         "-> srcPivot={} dstPivot={} slope={} inMax={}",
+                         tone::PqDecode(m_peakState.maxPq), m_peakState.maxPq,
+                         m_peakState.avgPq, m_toneCurve.srcPivot,
+                         m_toneCurve.dstPivot, m_toneCurve.slope, m_toneCurve.inMax);
+        }
+    }
     const HRESULT listResetHr =
         m_commandList->Reset(ctx.allocator.Get(), m_pipelineState.Get());
     // Audit 5.6 #13: unchecked Reset() let a dead command list look alive —
@@ -1147,7 +1686,6 @@ bool D3D12Renderer::BeginFrame() {
     m_stateTracker.Reset();
     return true;
 }
-
 void D3D12Renderer::RenderFrame() {
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_swapChain.GetRTVHandle(
         m_swapChain.GetCurrentIndex());
@@ -1201,11 +1739,24 @@ void D3D12Renderer::RenderFrame() {
                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
 
+        // ── Peak detection (HDR -> SDR tone curve input) ──────────────
+        // Measures the source peak / average in PQ space, the same way
+        // libplacebo does before it builds its spline. Only needed when
+        // the shader will actually tone map, and only re-measured when the
+        // decoded frame changed.
+        const bool useHdrPso = m_forceSdr ? false : m_isHdrOutput;
+        const bool hdrInput =
+            m_activeColorInfo.transfer != VideoColorInfo::Transfer::SDR;
+        if (videoActive && hdrInput && !useHdrPso) {
+            DispatchToneStats(
+                graphics::FrameContextIndex(m_frameNumber, graphics::kFrameContextCount),
+                srvToDraw);
+        }
+
         m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
         ID3D12PipelineState* pso = nullptr;
         // --force-sdr: always use SDR PSO (R8G8B8A8_UNORM) even if swap chain
         // is R16F, because our NV12 shader outputs sRGB, not PQ.
-        const bool useHdrPso = m_forceSdr ? false : m_isHdrOutput;
         if (m_customPsActive) {
             pso = useHdrPso ? m_customPSOHdr.Get() : m_customPSO.Get();
         }
@@ -1861,6 +2412,23 @@ void D3D12Renderer::BuildColorConstants(float cb[16], bool hdrOutput) const {
     // different anchor and must not be used to scale SDR content.
     // (Replaces the old rounded-out 16th DWORD — audit 5.6 #9.)
     cb[14] = m_sdrWhiteNits;
+
+    if (!hdrOutput) {
+        // SDR output: the tone curve takes over the `disp` lanes and
+        // extra.z. The shader's HDR->SDR branch reads them as
+        //   disp.x = source pivot (PQ)   disp.y = destination pivot (PQ)
+        //   disp.z = slope at the pivot    disp.w = toe coefficient (Pa)
+        //   extra.z = input peak (PQ)
+        // The display peak / mastering metadata are only consumed by the
+        // HDR-output branch, so they cannot collide here. (The root
+        // signature budget is exactly 64/64 DWORDs - there is no room for
+        // another constant lane.)
+        cb[8]  = m_toneCurve.srcPivot;
+        cb[9]  = m_toneCurve.dstPivot;
+        cb[10] = m_toneCurve.slope;
+        cb[11] = m_toneCurve.pa;
+        cb[14] = m_toneCurve.inMax;
+    }
 }
 
 // ─── Audio Spectrum ──────────────────────────────────────────────────────

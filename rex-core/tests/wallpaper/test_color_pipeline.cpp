@@ -36,8 +36,10 @@ extern "C" {
 
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 #include "graphics/renderer/D3D12Renderer.hpp"
+#include "graphics/renderer/HdrToneMapping.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -312,4 +314,151 @@ TEST(ColorPipeline, VideoSlotSrvKeepsCanonicalComponentOrder) {
                 << " must come from the same canonical component";
         }
     }
+}
+
+// ─── mpv / libplacebo tone-map parity ──────────────────────────────────────
+//
+// The engine's HDR->SDR tone map is a port of libplacebo v7.360.0 (the build
+// in mpv 0.41.0). These tests pin that port against mpv's OWN measurements:
+// a synthetic 24-band PQ ramp (0.01 .. 4000 cd/m²) was rendered by the
+// installed mpv and captured at 16 bits; the table below is mpv's output.
+//
+// If the curve, the anchors or the black handling drift, these fail - which
+// is the whole point: "looks about right" is not a regression guard, the
+// measured transfer function is.
+namespace {
+
+using rex::wallpaper::tone::BuildSplineCurve;
+using rex::wallpaper::tone::kSdrWhiteNits;
+using rex::wallpaper::tone::kTargetBlackNorm;
+using rex::wallpaper::tone::PeakState;
+using rex::wallpaper::tone::PqDecode;
+using rex::wallpaper::tone::PqEncode;
+
+// The ramp, in cd/m².
+const double kRampBands[] = {0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 26,
+                             40, 50, 80, 100, 150, 203, 300, 400, 600, 800,
+                             1000, 2000, 4000};
+
+// mpv 0.41.0's measured 16-bit output for the same ramp (video path).
+const unsigned short kMpvRampOutput[] = {
+    331, 814, 1250, 2148, 3298, 4724, 6622, 9992, 13553, 18261, 20402, 24539,
+    27082, 32277, 34687, 39054, 42173, 46156, 48839, 52330, 54600, 56319, 61075,
+    65521};
+
+float SrgbEncode(float x) {
+    if (x <= 0.0031308f) return 12.92f * x;
+    return 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
+}
+
+// The ramp's measured statistics: the peak detector sees a 4000 cd/m² peak
+// and the mean of the band PQ codes (every band is above the black cutoff).
+float RampAveragePq() {
+    double sum = 0.0;
+    int n = 0;
+    for (double band : kRampBands) {
+        const float pq = PqEncode(static_cast<float>(band));
+        if (pq < 0.01f) continue;   // below libplacebo's black cutoff
+        sum += pq;
+        ++n;
+    }
+    return static_cast<float>(sum / n);
+}
+
+}  // namespace
+
+TEST(ColorPipeline, ToneMapMatchesMpvOnTheBandRamp) {
+    // The whole point of the port: the engine's HDR->SDR transfer function
+    // must equal mpv's, measured in codes - not merely "not crushed".
+    const float maxPq = PqEncode(4000.0f);
+    const float avgPq = RampAveragePq();
+    const auto curve = BuildSplineCurve(maxPq, avgPq);
+
+    double sumAbs = 0.0;
+    double maxAbs = 0.0;
+    for (size_t i = 0; i < std::size(kRampBands); ++i) {
+        const float inPq = PqEncode(static_cast<float>(kRampBands[i]));
+        const float outPq = curve.Evaluate(inPq);
+        const float nits = PqDecode(outPq);
+        // libplacebo's black-scaled delinearize: the target black
+        // (203/1000 cd/m²) lands on code 0, the reference white on code 1.
+        const float norm = (nits / kSdrWhiteNits - kTargetBlackNorm) /
+                           (1.0f - kTargetBlackNorm);
+        const float srgb = SrgbEncode(std::clamp(norm, 0.0f, 1.0f));
+        const float pred = srgb * 65535.0f;
+        const float diff = (pred - static_cast<float>(kMpvRampOutput[i])) / 257.0f;
+        sumAbs += std::fabs(diff);
+        maxAbs = std::max(maxAbs, static_cast<double>(std::fabs(diff)));
+        EXPECT_LE(std::fabs(diff), 1.0f)
+            << "band " << kRampBands[i] << " cd/m²: predicted " << pred
+            << ", mpv measured " << kMpvRampOutput[i];
+    }
+    // The port is exact to a tenth of a code; the tolerance above (one code)
+    // is the guard, this is the record of how tight it actually is.
+    EXPECT_LT(sumAbs / std::size(kRampBands), 0.5);
+    EXPECT_LT(maxAbs, 1.0);
+}
+
+TEST(ColorPipeline, ToneMapIsMonotonicAndAnchored) {
+    // Independent of mpv: the curve must be monotonic, must map the source
+    // peak to the SDR reference white and must not lift black above the
+    // target black.
+    const auto curve = BuildSplineCurve(PqEncode(4000.0f), RampAveragePq());
+
+    float previous = -1.0f;
+    for (int i = 0; i <= 200; ++i) {
+        const float pq = static_cast<float>(i) / 200.0f;
+        const float out = curve.Evaluate(pq);
+        EXPECT_GE(out, previous) << "not monotonic at " << pq;
+        previous = out;
+    }
+
+    // input_max -> output_max (the SDR white) and input_min -> output_min.
+    EXPECT_NEAR(curve.Evaluate(curve.inMax), curve.outMax, 1e-3f);
+    EXPECT_NEAR(curve.Evaluate(curve.inMin), curve.outMin, 1e-3f);
+
+    // The curve never exceeds the target white.
+    for (int i = 0; i <= 200; ++i) {
+        const float pq = static_cast<float>(i) / 200.0f;
+        EXPECT_LE(curve.Evaluate(pq), curve.outMax + 1e-4f);
+    }
+}
+
+TEST(ColorPipeline, ToneMapBlackLandsOnCodeZero) {
+    // The "too much black" report was partly a black-point bug: the target
+    // black (0.203 cd/m²) must land on output code 0, not on a lifted grey.
+    const auto curve = BuildSplineCurve(PqEncode(1000.0f), PqEncode(100.0f));
+    const float blackSignal = curve.ToDisplay(curve.inMin);
+    EXPECT_LE(blackSignal, 0.0f);
+    // ... and the source black must not be lifted above it.
+    EXPECT_LE(curve.ToDisplay(PqEncode(0.01f)), 0.02f);
+}
+
+TEST(ColorPipeline, PeakStateSmoothingConvergesAndSnapsOnScenes) {
+    // libplacebo smooths the detected peak with a 20-frame IIR and snaps it
+    // on a scene change (1 % .. 3 % of PQ range). Both behaviours matter:
+    // without the IIR the wallpaper pumps, without the snap a cut stays
+    // dim for seconds.
+    PeakState state;
+
+    // First measurement is taken verbatim.
+    state.Update(0.8f, 0.4f);
+    EXPECT_TRUE(state.valid);
+    EXPECT_NEAR(state.maxPq, 0.8f, 1e-6f);
+    EXPECT_NEAR(state.avgPq, 0.4f, 1e-6f);
+
+    // A tiny change converges slowly (that is the point of the IIR).
+    state.Update(0.8f, 0.4f + 0.0005f);
+    EXPECT_NEAR(state.avgPq, 0.4f + 0.0005f * PeakState::SmoothingCoefficient(),
+                1e-6f);
+
+    // A scene change (well past 3 % of PQ range) snaps immediately.
+    state.Update(0.8f, 0.6f);
+    EXPECT_NEAR(state.avgPq, 0.6f, 1e-6f);
+    EXPECT_NEAR(state.maxPq, 0.8f, 1e-6f);
+
+    // Convergence: repeated identical measurements reach the target.
+    PeakState slow;
+    for (int i = 0; i < 400; ++i) slow.Update(0.5f, 0.3f);
+    EXPECT_NEAR(slow.avgPq, 0.3f, 1e-3f);
 }

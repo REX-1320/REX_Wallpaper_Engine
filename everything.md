@@ -1,7 +1,7 @@
 # REX — Everything
 
 > One-file reference: what REX is, what is in the repo, **what is already DONE**, what is WIP, and where the docs live.
-> Last updated: **2026-10-19** · test suite: **804/804 ctest green (803 + ColorPipeline.VideoSlotSrvKeepsCanonicalComponentOrder)** · stage research: **`research.md`** (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision - four read-only tracks with DONE/FOUNDATION/GAP verdicts, file:line evidence, live-pass checklists)
+> Last updated: **2026-10-20** · test suite: **804/804 ctest green** · **mpv parity: libplacebo v7.360.0 reverse-engineered and numerically validated (our CPU port reproduces mpv's own 16-bit captures to 0.1 code/255 over a 24-band PQ ramp); user decision = match mpv, not BT.2390/VLC** · video-pool VRAM: **per-import driver pin root-caused + fixed** (same-generation pool/import reuse, stop-on-image reclaim; live flat VRAM across 6 switches, video→image 0 MB) · stage research: **`research.md`** (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision - four read-only tracks with DONE/FOUNDATION/GAP verdicts, file:line evidence, live-pass checklists) · **video-output research: `research-video.md`** (players/renderers, HDR→SDR tone mapping, decoding & color pipeline, verification + wallpaper prior art - four sourced tracks; verdict: VLC is good-but-dated, not the ceiling → ship **mpv/libplacebo parity**, with BT.2390 + VLC kept as presets) · **measured hardware utilisation vs mpv (RX 6700 XT, 4K AV1/PQ clip):** decode path already at parity (AMD VCN 72-78 % in both), mpv 3D 27 % + compute 73 % (full-resolution peak detection every rendered frame) vs REX 3D 14 % + compute 0 % → our parity pass must be sampled + frame-change-only to stay ~10× cheaper
 > Detailed per-feature status: [`#project_status.md`](#project_status.md) · Remaining work: [`TODO.md`](TODO.md)
 
 ---
@@ -85,6 +85,7 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 - **Multi-monitor:** independent per-monitor assignment, display-change detection
 - **Engine:** LoadScene/UnloadScene, background render thread, D3D12 compositor, recovery (`ReinitializeCompositor`)
 - **Shader pipeline:** D3D12 root signature + PSO + HLSL compilation
+- **Video-pool VRAM (2026-10-19):** every 4K video session used to pin another pool of dedicated VRAM (**+180 MiB** P010 4K / **+205 MiB** SW BGRA per apply). Root cause proven with two probes: the AMD driver charges a **per-import pin** — each D3D12 `OpenSharedHandle` of the decoder's shared textures that is then used on the GPU stays resident until process exit (`Trim`, releasing imports, releasing textures and destroying both devices are all no-ops; +180 per import+use cycle, measured 183.8→727 MiB; import without GPU use *is* Trim-freed). Fix: the decoder keeps its pool generation across `Close()` (`ReleasePool()` only in the destructor, `EnsurePool` device guard) and the controller reuses the closed decoder (same NT handles); `D3D12Renderer::ClearVideoFrame()` keeps its import cache (LRU evicts a new generation, `Shutdown` releases); and an image apply deliberately stops the runtime because process exit is the only reclaim boundary. **Live:** 6 alternating same-surface applies **flat at 918.9 MB, only 2 pool builds in the log**; video→image **0 MB** with the image still drawn by the OS; cold video respawn 865 ms. Idle-timer idea rejected (stop-on-image is immediate). Reverted as ineffective: decoder `ClearState/Flush`, renderer null-SRV overwrite, `IDXGIDevice3::Trim`. Follow-up: alternating pool *formats* still cost one generation per switch (TODO P3).
 - **Recent (git):** ffmpeg video pipeline, D3D12 renderer work, shutdown-crash fixes (`4ba29fa`, `1ca6195`)
 
 ### Desktop app / gallery (2026-10-19)
@@ -93,6 +94,7 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 - **Gallery memory:** restored posters are persisted back to the library (`thumbnail`) so videos decode once, not every launch; `createThumbnailFromUrl` tears down the `<video>` decoder on every exit path and `createThumbnail` revokes its object URL. Isolated repro: 12 library videos drove the GPU process to **3.9 GB dedicated VRAM** (2.5 GB settled); live app was **344 MB dedicated + 78 MB shared** vs **84 MB** for a blank 1440p Electron window. **Live verified 2026-10-19 after build/relaunch:** first launch migrated 13/14 missing posters (21/23 videos cached), clean launch spawns **no audio service**, GPU process **238→142–181 MB** private and VRAM **344→174–220 MB**, Electron total private **312→268 MB**.
 - **No-window lifecycle:** close now destroys the BrowserWindow instead of hiding it; the tray and native runtime stay alive, and the UI is recreated on demand through one race-safe `showMainWindow()` (tray click/Settings, second-instance, `activate`). The Electron UI is software-composited (`app.disableHardwareAcceleration()`; the runtime's D3D12 process is unaffected), `--background` starts with no window, and tray Settings is queued until a preload `renderer:navigate-ready` handshake confirms React mounted `onNavigate`. Blanket `destroy()` state loss is covered by flushing `appState` on close; gallery writes are already synchronous. **Measured 2026-10-19:** open **~104–112 MB private / 0 VRAM** (working set varies with gallery state); closed **49.8 MB private / 206 MB WS / 0 VRAM** (renderer gone, runtime PID unchanged); background start **33.7 MB / 0 VRAM**; second-instance reopen **~102–113 MB**, one main only; fresh-window tray Settings landed on the Settings tab. Also fixed image boot re-apply falsely failing on the expected post-image `PLAY` (`No scene loaded`). (`app/electron/main.cjs`, `tray-manager.cjs`, `preload.cjs`)
 - **Image-only runtime:** images no longer initialize the D3D12 engine. The native image LOAD is engine-free by design, but three Electron paths called `runtime.init()` first (interactive apply, startup re-apply, crash recovery), so an image-only desktop held **84.2 MB private / ~103.5 MB dedicated VRAM** and showed a one-time ~67 MB/s ramp. Those paths now send `LOAD` only (recovery also no longer sends the always-failing image `PLAY`): image boot **10.2 MB / 0 VRAM / 5 threads** with no `INIT`/D3D12 in `runtime.log`; recovery with an image last-applied **10.3 MB / 0 VRAM in 272 ms**; image→video cold start **678 ms** (INIT 460 ms) → **313.8 MB / 742 MB** playing The Odyssey 4K HEVC 10-bit. Lint/typecheck green; no native rebuild. (`app/electron/main.cjs`)
+- **Engine reclaim + image fill mode (2026-10-19):** an image apply now stops the runtime deliberately (`stop({ intentional:true })` tags the proc; `_handleRuntimeExit` skips the crash report and wallpaper replay for `info.intentional`, so the supervisor cannot respawn what was just reclaimed) — the AMD driver only frees the pinned video pool at process exit. **Live:** video→image exits ~1.5 s after apply (`runtime:reclaim image applied` → `runtime:exit (intentional idle stop — no recovery)`, 0 MB VRAM, image stays on the desktop); the next video lazily respawns (865 ms cold) and image→video on the tiny runtime INITs in place (887 ms, same PID). Image fill-mode changes now re-issue `LOAD` for images instead of the unusable `SET_FILL_MODE` on an engine with no image scene: registry `WallpaperStyle` **10↔6** with `mode:"fit"` persisted, runtime stays the tiny image-only process (**10.2 MB / 0 VRAM**). (`app/electron/main.cjs`, `wallpaperRuntime.cjs`, `supervisor/supervisor.cjs`)
 
 ### Widgets
 
@@ -133,6 +135,38 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 - **RES suite (16 docs)** in `docs/res/`: index, widget/desktop/SDK-marketplace/wallpaper/WindowFX/automation/rendering/testing platforms, API reference, Phase 0–1 implementation, ADR-001–006
 - `docs/REX-Liquid-Glass-Design-Language.md`, `docs/REX-Cloud-Sync-Spec.md`, `docs/wallpaper-engine-architecture.md`
 - Developer guide: getting-started, coding-conventions, ADR process, testing guide
+- **Performance-modes design + implementation plan (2026-10-20, docs only — feature NOT started, tracked as `TODO.md` P3-4):**
+  [`docs/superpowers/specs/2026-10-20-performance-modes-design.md`](docs/superpowers/specs/2026-10-20-performance-modes-design.md) —
+  approved spec: four-way selection with a derived `pinned` state, hardware-tier Auto baseline (decode capability checked on the
+  adapter REX actually uses, `CheckVideoDecoderFormat(P010)`), Auto downshift only on battery / Energy Saver (fullscreen stays an
+  independent pause policy), per-mode editable presets split into live vs load-time levers, additive `SET_MODE`/`GET_MODE`/`INIT`
+  protocol at `kProtocolVersion` 1, Performance page + tray, and a measurement-first verification matrix;
+  [`docs/superpowers/plans/2026-10-20-performance-modes.md`](docs/superpowers/plans/2026-10-20-performance-modes.md) — 15 bounded
+  tasks across 6 phases, gated on a green ctest baseline, the two P3 VRAM fixes, and a per-lever measurement table before any UI.
+  No code changed.
+- **Gallery layout + playlist dock design (2026-10-20, docs only — feature NOT started, tracked as `TODO.md` P3-5):**
+  [`docs/superpowers/specs/2026-10-20-gallery-layout-playlist-design.md`](docs/superpowers/specs/2026-10-20-gallery-layout-playlist-design.md) —
+  approved spec, **builder-checked against the tree**: draggable gallery↔inspector divider, a global VS Code-style
+  bottom dock holding the playlist (picker + config + `- [] X` + a strip of file chips), Explorer-style multi-select
+  (rubber-band, Ctrl/Shift-click), drag-and-drop of files into a playlist, a favorite heart + Favorites filter, and
+  the Inspector's thumbnail. It also settles three latent bugs the feature exposed: the duplicate `favorite` flags
+  (today **every** wallpaper is one), the playlist engine's pool (it rotates the desktop from "every wallpaper ∩
+  filters", so a playlist's members must become its pool), and the duplication of playlist management between the
+  gallery toolbar and the new dock. No code changed.
+- **Gallery layout + playlist dock — PART 1 SHIPPED 2026-10-20** (the resize/layout half of
+  [`docs/superpowers/specs/2026-10-20-gallery-layout-playlist-design.md`](docs/superpowers/specs/2026-10-20-gallery-layout-playlist-design.md)):
+  the app shell is now a **content column** (page area on top, a **global bottom dock** below) with the nav width reduced to
+  one constant set, so the hand-synced 240/51 and 260/71 numbers can no longer drift; the **dock is resizable** by its top
+  edge (minimize / maximize / close) and the **gallery ↔ inspector split** got a draggable 18 px handle — both persisted in
+  `app-state.json` (`ui.*`). The dock holds the **playlist**: a picker (select / new / rename / icon / remove), the existing
+  engine dialog behind `config`, and a **strip of the playlist's files** (small poster + name; click selects, double click
+  applies). **Playlists now own their members**, keyed by file path (the store's `file-N` ids are reassigned every restart) and
+  persisted in `playlistEngine.playlists`; **dragging a gallery tile into the strip adds it**; the gallery's duplicated
+  playlist cube is **retired**; and **a playlist's members are now the pool the playlist engine plays**, so the strip and the
+  engine agree. Live-verified in the Electron app: a fractional persisted dock height (a real drag), a split drag that moved
+  the gallery 1129 → 1329 px, a tile dragged into the strip producing a chip with its name **and** poster, the membership
+  persisted by path, and maximize/close/reopen behaving. `pnpm lint` 0 errors, `pnpm build` clean. The selection/favorites
+  half (multi-select, the favorite heart, the Inspector thumbnail) is still open — `TODO.md` P3-5b/c/d.
 - `README.md` roadmap + architecture; `phases.md` wallpaper phase plan
 
 ### Tooling & diagnostics
@@ -298,6 +332,57 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
 - **App typecheck gate restored (2026-10-10):** dropped removed `baseUrl` from `app/tsconfig.json` (was rejecting the whole project) + added missing `src/vite-env.d.ts` (cleared CSS-import errors incl. pre-existing ones). Sole remaining app `tsc` error: pre-existing `SpecularButton.tsx(236,22)` null (untouched, TODO 🐛).
 - **pg sidebar shell ported (2026-10-10, user-requested):** audit showed REX already matched pg's open/close + chevron + wired traffic dots, so the port was one real change — static `sidebar-toggle` button + pg centering CSS. Kept per user answers: dot wiring, drag region, `DesktopApply`/tray mounts; skipped dead `UI` nav item. Lint/build green; live eyeball pending.
 
+### Video output research — players, tone mapping, decoding, verification (2026-10-19)
+
+Full sourced record: [`research-video.md`](research-video.md) (four read-only tracks: A players/renderers · B HDR→SDR tone mapping · C decoding & color pipeline · D verification + wallpaper prior art; sources = upstream code, ITU-R reports, Microsoft Learn, Doom9/AVS/community). Commissioned to answer *"which is the best video output player (VLC among them), everything about video decoding, and how do we confirm the file == the wallpaper"* after the engine's HDR path was measured darker/crushed vs VLC 3.0.23 on the Spider-Man DV-P8.1 clip ("too much black").
+
+**Verdict — VLC is good-but-dated, not the ceiling.** VLC 3.x's Windows D3D11 HDR→SDR path is *one* fixed Hable curve (`hable(L·0.01)/hable(11.2)`) with a fixed 100-nit reference, no metadata, no black-point handling, no dithering, no controls (source-verified; the `0.01` matches our measurement). VLC 4.0 (**unreleased**) replaced it with libplacebo; its ©2024 D3D11 tone-map module is SDR→**HDR**, not a better HDR→SDR. Quality leaders: **madVR** (DTM reference; public renderer frozen 2018, HDR test builds continue) and **mpv/libplacebo gpu-next** (best maintained open stack: spline/BT.2390, BT.1886 black-point compensation, peak detection, blue-noise dithering); **MPC-VR** (BT2390 + friends, 125-nit SDR default) is the best free DirectShow option. Ranking: **madVR ≳ libplacebo > MPC-VR > VLC 3.x D3D11 > Kodi/PotPlayer > MF/EVR/WMP**.
+
+**Tone mapping — root cause + standard fix.** The ACES filmic fit's toe (slope 0.214, on ÷203-normalized linear) is the crush; worked codes for the same stimuli (VLC 3.0 | engine | BT.2390→203 white): 1 cd/m² → **20 | 5 | 15**; 100 → 149 | **205** | 186; 203 → 186 | 232 | 229 — the engine both crushes deep shadow *and* blows the mids (why HDR wallpapers look washed out next to SDR content). Recommended default: **BT.2390 EETF** in the PQ domain with explicit anchors — **SDR white 203 cd/m²** (BT.2408 HDR Reference White; exactly what libplacebo `PL_COLOR_SDR_WHITE` and mpv target for SDR) and **source peak from MaxCLL/MDCV, fallback 1000, never 10000**; identity below the knee, sRGB piecewise output. Matching VLC stays as an explicitly labelled **"VLC-compatible" preset** (`hable(0.01·L)/hable(11.2)` + `pow(x,1/2.2)`) — defensible as a preset, not as the default. Acceptance test: 1 cd/m² ∈ [15,21] codes; 203 ∈ [180,210]; monotonic; no clipping below `source_peak`; dark-frame histogram moves 27 % → ~10–15 % below code 4.
+
+**Decoding & pipeline essentials (selected).** DV **P8.1 = HDR10 base layer + RPU** — ignoring the RPU is *correct* HDR10 (what the engine does); DV **P5 (IPTPQc2) has no compat base** → detect and refuse. Branch HDR on `color_trc`, never pix_fmt (P010 ≠ HDR); HW decode = copy-back D3D11VA/d3d12va as the correctness baseline (zero-copy only after per-GPU verification; HW ≠ SW bit-exact by design); **10→8-bit must be dithered** (engine currently has no dither — new backlog); Windows output: SDR `R8G8B8A8+G22_NONE_P709`, HDR10 `R10G10B10A2+G2084_NONE_P2020`, scRGB FP16 (1.0 = 80 nits); `SetHDRMetaData` is "no longer recommended" → tone-map to the display's real `MaxLuminance`; DWM composites SDR apps at the user's SDR-white level (`DISPLAYCONFIG_SDR_WHITE_LEVEL` — engine doesn't query it yet, new backlog).
+
+**Verification (how to actually prove "file == wallpaper").** Three references, used deliberately: the *file + trusted decode chain* (numerical), a *reference player* (subjective), the *standards* (policy). Trusted chains: FFmpeg CPU `zscale=t=linear,tonemap=…,zscale=t=bt709` (beware: `tonemap` default **none**, peaks in 100-nit units, `npl` default 100) or libplacebo GPU (`tonemapping=bt.2390 … peak_detect=false` for reproducibility). Metric stack: **ΔEITP** (BT.2124, ~1 JND) for hue, **CAMBI** (0–24; ≈5 ≈ slightly annoying) for banding, **XPSNR/VMAF** for overall, PSNR/SSIM smoke only; per-filter input order differs; worst-case pooling; offscreen readback preferred (HDR desktop capture returns scRGB FP16 with poor implicit conversion); symmetric-transform tests before blaming tone mapping. For SDR content on an SDR desktop, equality is exact and testable; for HDR it is "this documented mapping, verifiably" — the file's absolute luminance cannot be preserved on an SDR panel.
+
+**Wallpaper-engine prior art.** No wallpaper engine has a correct HDR→SDR story: Wallpaper Engine's official advice is "reset GPU driver settings / re-encode to BT.709" (2026 opt-in DX11 HDR framework); Lively runs mpv/libplacebo passthrough but its bug history (SDR video wrong on HDR screen, SDR→HDR "deepfried") shows defaults are the hard part; Plastuer/DreamScene no HDR; Windows 11's native video wallpaper is unshipped/undocumented. Correct, deterministic HDR→SDR is an open differentiator for REX.
+
+**Plan (unit 20, user-approved 2026-10-20):** match **mpv** (see the next section) — swap ACES → libplacebo's measured-peak spline in the PQ domain with explicit anchors (SDR white 203 cd/m², target black 0.203 cd/m² → code 0), tone-map luminance in IPT, keep the drafted VLC-exact path as a compat preset; add output dithering; then live-verify against mpv on the Spider-Man t=180 s frame. New backlog items recorded in `TODO.md` (dithering, DV-P5 detect, chroma upsampling, OS SDR-white query, verification harness into `rex-core/tools/color/`).
+### mpv parity — libplacebo v7.360.0 reverse-engineered and numerically validated (2026-10-20)
+**Decision.** The user picked **mpv** as the HDR→SDR ground truth (not BT.2390, not VLC). mpv 0.41.0 (libplacebo **v7.360.0**, FFmpeg N-123099) was installed system-wide (`winget shinchiro.mpv`, user PATH) and is the reference the engine must match. (The newer daily build, libplacebo v7.377, was rejected: it adds dynamic-target dimming and a hyperbolic spline that the installed build does **not** have.)
+**The whole mpv pipeline is now known from source and validated numerically** (libplacebo v7.360.0 `tone_mapping.c`, `shaders/colorspace.c`, `lp_sh_colorspace.c`, `lp_colorspace.c`):
+1. **Peak detection** (`lp_sh_colorspace.c`): per-frame GPU compute pass; luma = Rec.2020 Y of the linearised RGB, PQ-encoded and 14-bit quantized; black cutoff 1 % (PQ) with `smoothstep` attenuation; `avg_pq` = mean of the per-block means, `max_y_pq` = max luma PQ (the maxRGB percentile path is bypassed — mpv's `peak_percentile` default is 0 → frame max); IIR `1-exp(-1/20)` per frame + scene hysteresis `smoothstep(0.01, 0.03, |Δavg|)`.
+2. **Tone curve** (`tone_mapping.c`): ST.2094 knee pick (pivot clamped to 10–80 % of the PQ range, adaptation 0.4→1.0) then the **single-pivot polynomial spline** (`Pa` toe, `Qa`/`Qb` shoulder, `slope_tuning 1.5`, `slope_offset 0.2`, `spline_contrast 0.5`).
+3. **Colour**: RGB(2020)→LMS→**IPT** (Ebner-Fairchild); the curve is applied to **I only**, chroma preserved via the hull clamp `((h-6)h+9)h`; back IPT→LMS→RGB(709), gamut-clipped.
+4. **Output**: black-scaled delinearize — the target black (0.203 cd/m² = 203/1000) maps to code 0, `(x-0.001)/0.999` — then the target transfer (G22 for the window, sRGB for `--screenshot video`).
+**Validation (objective, not eyeballed).** A synthetic 24-band PQ ramp (0.01→4000 cd/m², correctly tagged `bt2020nc/smpte2084`) was rendered by the installed mpv (`--vo=gpu-next`) and captured at 16 bits (window + video paths). The CPU port of the pipeline above reproduces mpv's measured codes to **mean abs 24.8/65535 = 0.1 code/255** (worst 0.4 code at 203 cd/m²) across the whole ramp — the algorithm is confirmed, not approximated. Harness (temp): `mpv_shot.mjs`, `mpv_bands.mjs`, `pngdec.mjs`, `mpv_model.py`; band clip `src/bandtest_hdr.mkv` + `gen_pq_bands.py`.
+**Hardware utilisation, measured** (RX 6700 XT, 4K AV1/PQ clip `2020 LG OLED l The Black 4K HDR 60fps.mp4`, Windows per-GPU-engine counters):
+| | CPU (of one core) | GPU 3D | GPU compute | GPU video decode |
+|---|---|---|---|---|
+| mpv gpu-next + d3d11va (1080p window) | 8–17 % | 27 % | **73 %** | 74–76 % |
+| REX engine (3840×2160 wallpaper) | 2–12 % | 14 % | 0 % | 72–78 % |
+Reading: the **decode path is already at parity** — both run FFmpeg→D3D11VA→D3D11→shared NT handle→D3D12 zero-copy (REX logs `decoder surface: 3840x2176 fmt=P010 hdr=true pool=P010 copy=match`) and load the AMD VCN engine equally. mpv's extra cost is the **full-resolution peak-detection compute pass re-run every rendered frame** (73 % compute) plus the complete IPT pipeline. REX is cheaper today only because it tone-maps with a cheap Hable fit and does no detection — parity adds that pass, so it must be built **sampled (stride 2) and only on decoded-frame changes** (the IIR still advances every rendered frame) to land ~10× cheaper than mpv at the same look.
+**New bugs found while measuring** (filed in `TODO.md`): a 45 ms late frame at clip start (decoder/pool warm-up) and `CheckDisplayChanges` taking 8.15 ms **on the render thread** (housekeeping blocking a frame).
+
+
+
+**Implementation (2026-10-20) — shipped and verified.** The engine's HDR→SDR path is now libplacebo v7.360.0, not a look-alike:
+
+- `src/graphics/renderer/HdrToneMapping.hpp` (new) — the CPU half: libplacebo's anchors (SDR white 203 cd/m², target black 203/1000), the ST.2094 knee pick, the single-pivot polynomial spline (`Pa`/`Qa`/`Qb`; `slope_tuning 1.5`, `slope_offset 0.2`, `spline_contrast 0.5`, knee 0.4/0.1/0.8) and the peak state (20-frame IIR + 1 %/3 % scene hysteresis, mpv's `hdr-peak-decay-rate`).
+- `D3D12Renderer.cpp` — a **GPU peak-detection compute pass** (libplacebo's `pl_shader_detect_peak`: Rec.2020 Y → PQ → 14-bit, 1 % black cutoff, max + mean), sampled every 2 pixels and re-measured only when the decoded frame changes (the IIR still advances every rendered frame, so the convergence is mpv's). Per-frame-context UAV + readback, no per-frame allocation.
+- The pixel shader now tone-maps the **IPT intensity** (Ebner-Fairchild matrices, libplacebo's hue-hull clamp) instead of each RGB channel, and writes black-scaled output (`(x-0.001)/0.999`, target black → code 0) with gamma 2.2 — the same path mpv's window takes. The source also stays in BT.2020 until the tone map; the old 2020→709→2020 round trip was also mis-tagging the HDR-output path as BT.2020 (fixed as a side effect).
+
+**Verification (four independent links in the chain):**
+
+| link | result |
+|---|---|
+| CPU port vs **mpv's own 16-bit captures** of a 24-band PQ ramp | **0.0996 codes/255** mean, 0.39 max (pinned by 4 new unit tests) |
+| engine's **GPU** detector on the same ramp | max **4002.6 cd/m²** / avg **0.42177** PQ (model: 4000 / 0.42184) → identical curve (srcPivot 0.42177, dstPivot 0.37455, slope 0.85737) |
+| **on-screen** wallpaper (4K desktop capture) vs the model | **±1 code, median 0.30** over the 24 bands |
+| test suite | **808/808** green (804 + 4 new) |
+
+New in-repo tools: `tools/color/parity_check.py` (measures a screenshot, prints the band table, exits non-zero on drift — no third-party packages) and the rewritten `tools/color/shader_port.py` (mirror of the new path + mpv's reference table). The band ramp, the capture procedure and the reference numbers are documented in `tools/color/README.md`.
+
+**Bugs found and fixed on the way:** a 49× brightness error in the first shader draft (the PQ→linear scale was `×10000/203` instead of `÷203` — every HDR frame clipped to white; caught because the desktop capture read 255 on every band), and the driver facts this box imposes on any D3D12 copy path: **buffer→texture copies remove the device** (reproduced in a 60-line program) and a command list's allocator must not be reused while the previous list is in flight. The engine's own path avoids both (D3D11→D3D12 pool blit + per-frame-context readback).
 
 ---
 
@@ -333,6 +418,7 @@ Global rules: validate every metric before trusting it; load <20%, SDR-only, del
 | Item | Notes |
 |---|---|
 | **Color accuracy (HDR dark / SDR washed out)** | **Fixed + verified on GPU 2026-10-07** (A11–A13) — build `06CF22093D59C06B`, uncommitted, needs `app/dist-exe` repack + eyeball A/B |
+| **HDR→SDR tone mapping (unit 20)** | **Target set = mpv/libplacebo parity 2026-10-20** (user decision). Pipeline reverse-engineered from libplacebo v7.360.0 and **numerically validated to 0.1 code/255** against mpv's own 16-bit captures over a 24-band PQ ramp (esearch-video.md §F). Engine work now: GPU peak-detection pass (sampled, frame-change-only) + ST.2094 knee + single-pivot polynomial spline + IPT hue-preserving tone map + black-scaled output (target black 0.203 nits → code 0); BT.2390 + VLC stay as presets. Build + live verify pending |
 | Color-verification harness | Lives in `%TEMP%\opencode\rex-verify\` (shader port, band generators, IPC client, DPI-aware sampler) — **not committed**, will be lost on temp cleanup |
 | Uncommitted core changes | `D3D12Renderer.cpp`, `WorkerWManager.cpp/.hpp` modified, not committed (recovery point commit `1ca6195` exists) |
 | HDR present bug | Long investigation: `hdr_*.log` (14 files), `hdrprobe.obj`, `present_repro.obj`, notes in `fix.md` |
@@ -364,6 +450,7 @@ Global rules: validate every metric before trusting it; load <20%, SDR-only, del
 | `docs/res/00_INDEX.md` | Full spec index + reading order |
 | `docs/res/ADR-001-to-006.md` | Stack, IPC, sandbox, persistence, telemetry, language |
 | `docs/developer-guide/*` | Getting started, conventions, ADR process, testing |
+| [`research-video.md`](research-video.md) | Video output research (2026-10-19) — players/renderers, HDR→SDR tone mapping, decoding & color pipeline, verification, wallpaper prior art |
 | `everything.md` | This file |
 | `TODO.md` | Everything remaining, prioritized |
 

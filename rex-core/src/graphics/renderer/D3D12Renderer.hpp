@@ -5,6 +5,7 @@
 #include "CommandQueue.hpp"
 #include "FrameContextPolicy.hpp"
 #include "FrameLockPolicy.hpp"
+#include "HdrToneMapping.hpp"
 #include "ResourceStateTracker.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
@@ -224,6 +225,51 @@ private:
 
     // ─── Fill Mode Viewport ────────────────────────────────────────────
     void ComputeFillViewport(D3D12_VIEWPORT& vp, D3D12_RECT& scissor) const;
+
+    // ─── HDR tone mapping (mpv / libplacebo parity) ────────────────────
+    /// Per-frame-context resources for the peak-detection pass: the UAV the
+    /// compute shader accumulates into and the readback copy the CPU
+    /// consumes. One pair per in-flight frame, so the GPU never overwrites
+    /// a buffer the CPU has not read yet.
+    struct ToneStats {
+        Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+        uint32_t* mapped = nullptr;
+        D3D12_CPU_DESCRIPTOR_HANDLE uavCpu{};
+        D3D12_GPU_DESCRIPTOR_HANDLE uavGpu{};
+        bool pending = false;   // readback holds an unconsumed measurement
+    };
+    ToneStats m_toneStats[graphics::kFrameContextCount]{};
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_toneStatsRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_toneStatsPipelineState;
+    D3D12_CPU_DESCRIPTOR_HANDLE m_toneStatsUavCpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE m_toneStatsUavGpu{};
+    bool m_toneStatsReady = false;
+
+    /// Smoothed source peak / scene average (PQ codes) and the tone curve
+    /// derived from them.
+    tone::PeakState    m_peakState;
+    tone::ToneMapCurve m_toneCurve;
+    /// The latest raw measurement (PQ codes) from the GPU.
+    float m_measuredMaxPq = 0.0f;
+    float m_measuredAvgPq = 0.0f;
+    /// Last peak logged, so the info line only appears on a real change.
+    float m_loggedPeakPq = -1.0f;
+    bool  m_loggedStatsDispatch = false;
+    bool  m_loggedStatsRead = false;
+    /// Decoded frame the bound video texture belongs to, and the frame the
+    /// last peak-detection dispatch was issued for.
+    uint64_t m_activeFrameIndex = 0;
+    uint64_t m_statsFrameIndex = UINT64_MAX;
+
+    /// Creates the compute root signature, pipeline state and per-frame
+    /// resources for the peak-detection pass. Failure is not fatal: the
+    /// renderer then falls back to a static source peak.
+    bool CreateToneStatsPipeline();
+    /// Records the peak-detection dispatch for the given frame context.
+    void DispatchToneStats(UINT contextIndex, D3D12_GPU_DESCRIPTOR_HANDLE srvGpu);
+    /// Folds a finished measurement into the smoothed peak state.
+    void ConsumeToneStats(UINT contextIndex);
 
     // ─── Shared primitives ─────────────────────────────────────────────
     graphics::Device       m_device;
