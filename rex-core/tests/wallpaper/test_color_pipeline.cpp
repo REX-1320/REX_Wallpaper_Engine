@@ -37,6 +37,7 @@ extern "C" {
 #include "wallpaper/decoder/FfmpegVideoDecoder.hpp"
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "graphics/renderer/HdrToneMapping.hpp"
+#include "graphics/renderer/OutputDither.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -461,4 +462,18 @@ TEST(ColorPipeline, PeakStateSmoothingConvergesAndSnapsOnScenes) {
     PeakState slow;
     for (int i = 0; i < 400; ++i) slow.Update(0.5f, 0.3f);
     EXPECT_NEAR(slow.avgPq, 0.3f, 1e-3f);
+}
+
+// The output dither amplitude is one code of the OUTPUT depth, so it is
+// decided per back-buffer format. The pixel shader is compiled per pipeline
+// state with that depth as TARGET_BITS; this pins the rule the shader is
+// compiled from (the FP16 HDR output is not quantised and must not dither).
+TEST(ColorPipeline, OutputDitherMatchesTheTargetDepth) {
+    // mpv-parity 10-bit SDR swapchain.
+    EXPECT_EQ(rex::graphics::OutputDitherBits(DXGI_FORMAT_R10G10B10A2_UNORM), 10);
+    // The 8-bit fallback for drivers that refuse the 10-bit buffer.
+    EXPECT_EQ(rex::graphics::OutputDitherBits(DXGI_FORMAT_R8G8B8A8_UNORM), 8);
+    // The HDR output is FP16 - not quantised, so no dither.
+    EXPECT_EQ(rex::graphics::OutputDitherBits(DXGI_FORMAT_R16G16B16A16_FLOAT), 0);
+    EXPECT_EQ(rex::graphics::OutputDitherBits(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB), 0);
 }

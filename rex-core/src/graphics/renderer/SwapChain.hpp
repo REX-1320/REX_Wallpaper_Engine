@@ -128,7 +128,17 @@ private:
 
     HANDLE  m_frameLatencyWaitable = nullptr;
     UINT    m_bufferCount = 3;
-    DXGI_FORMAT m_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    // SDR back buffer: 10-bit UNORM (R10G10B10A2) - the same format mpv's
+    // window uses (measured on mpv 0.41.0: "swapchain R10G10B10A2_UNORM,
+    // color space RGB_FULL_G22_NONE_P709"). 8-bit UNORM truncates the
+    // gradient into visible steps (the banding TODO); 10-bit gives 1024
+    // levels per channel and the dither in the pixel shader removes the
+    // last of it. Falls back to 8-bit if the driver refuses the format
+    // (see SwapChain::Initialize / UpdateHdrSelection).
+    DXGI_FORMAT m_format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    /// Sticky: the driver rejected a 10-bit SDR back buffer, so every
+    /// later refresh uses 8-bit UNORM instead of retrying.
+    bool m_sdrTenBitUnsupported = false;
     bool    m_isHdr = false;
     DisplayCadenceStats m_cadence{};
     // DXGI reports PresentRefreshCount as a running total since swap-chain

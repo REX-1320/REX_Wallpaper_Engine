@@ -177,9 +177,15 @@ Core (C++20)  ←── IPC: named pipes + protobuf ──→  Shell/UI
   declarations** migrated by a role-aware mapping (`app/tools/migrate-palette.cjs`). Two real defects fell out: the
   gallery's chrome text was **invisible on its own panel** (1.17:1) and the page title was invisible on a light
   wallpaper — the content layer is now an occluding surface and the title carries its own shadow. The palette is now
-  **guarded**: `pnpm --dir app check:palette` fails on any raw colour literal outside the palette and on any text step
-  under 4.5:1. Live-verified over CDP against the rendered backgrounds (nav 19.6, gallery title 17.99 — was 1.17, dialog
-  15.96–16.5, menu 12.03, all ✓ AA). SPEC
+  **guarded**: `pnpm --dir app check:palette` fails on any raw colour literal outside the palette, on any `var()` that
+  does not resolve, and on any text step under 4.5:1. Live-verified over CDP against the rendered backgrounds (nav 18.5,
+  gallery title 17.09 — was 1.17, dialog 15.96–16.52, menu 12.03, all ✓ AA). The palette is **"Obsidian & Champagne"**:
+  warm obsidian neutrals, champagne-tinted whites, and **one champagne hue in five shades** (15.6 / 13.0 / 9.4 / 6.0 /
+  decorative-only), each assigned to the surface it is used on, with champagne hairlines instead of white ones. The
+  champagne appears in the chrome (the active nav item is a champagne chip, the selected tile gets a champagne ring), and
+  the **background effect** now works: the window's system-drawn DWM Mica was being hidden by an opaque white layer, so
+  it is now a translucent champagne wash over the Mica — with **no filters anywhere** (the dock's `backdrop-filter` was
+  a per-frame GPU pass competing with the wallpaper's own present). SPEC
   [`docs/superpowers/specs/2026-10-20-app-color-palette-design.md`](docs/superpowers/specs/2026-10-20-app-color-palette-design.md).
 - `README.md` roadmap + architecture; `phases.md` wallpaper phase plan
 
@@ -417,6 +423,19 @@ The CPU column is the finding: the audio decode costs more than the entire video
 
 **Also fixed — `SpeedClockTest` was hostage to the monitor's power state.** The engine correctly auto-pauses when the OS reports the console display as off, and this box sleeps the monitor after 300 s of idle — i.e. after any multi-minute build — so the rate test read 0.0009 s instead of ~2 s. The test now holds the display awake (`SetThreadExecutionState(ES_DISPLAY_REQUIRED)`, which also wakes a sleeping monitor), waits for `Running`, and skips with the cause named if there is no live display.
 
+**10-bit SDR output + dithering (2026-10-20).** The wallpaper now leaves the engine in the same shape mpv's window is in:
+
+| | before | now |
+|---|---|---|
+| SDR back buffer | `R8G8B8A8_UNORM` (8-bit, 256 levels) | **`R10G10B10A2_UNORM`** (10-bit, 1024 levels — the exact format mpv 0.41.0's window uses) |
+| output quantisation | truncation (banding) | **dither**: Interleaved Gradient Noise at one code of the output depth, added to the encoded signal |
+| colour space | `RGB_FULL_G22_NONE_P709` | unchanged (the same space mpv declares) |
+| HDR output | `R16G16B16A16_FLOAT` | unchanged (FP16 is not quantised, so it does not dither) |
+
+The dither amplitude is compiled into the pixel shader per pipeline state (`TARGET_BITS` = 10 / 8 / 0) and the rule lives in `graphics/renderer/OutputDither.hpp`, pinned by `ColorPipeline.OutputDitherMatchesTheTargetDepth` — the shader and the test cannot drift. The swapchain falls back to 8-bit UNORM if a driver refuses the 10-bit buffer (at creation *and* on a later resize, and the refusal is remembered so it is not retried every refresh), and the SDR pipeline state is rebuilt when the format changes, because a PSO's RTV format must match the buffer it renders into. On an 8-bit *desktop* the DWM's own dither handles the final 10→8 step, so the visible banding is gone either way; on a 10-bit desktop (Windows 11's per-monitor "Desktop mode" setting) the engine now delivers true 10-bit.
+
+Two things had to change to get there: the pixel shader is now split across two literals (MSVC caps a single raw string literal at 16 KB and the shader had just crossed it), and the dither rule moved out of the renderer into a testable header. Suite **809/809**.
+
 ---
 
 ## Forward plan — by priority (2026-10-15)
@@ -451,7 +470,8 @@ Global rules: validate every metric before trusting it; load <20%, SDR-only, del
 | Item | Notes |
 |---|---|
 | **Color accuracy (HDR dark / SDR washed out)** | **Fixed + verified on GPU 2026-10-07** (A11–A13) — build `06CF22093D59C06B`, uncommitted, needs `app/dist-exe` repack + eyeball A/B |
-| **HDR→SDR tone mapping (unit 20)** | **Target set = mpv/libplacebo parity 2026-10-20** (user decision). Pipeline reverse-engineered from libplacebo v7.360.0 and **numerically validated to 0.1 code/255** against mpv's own 16-bit captures over a 24-band PQ ramp (esearch-video.md §F). Engine work now: GPU peak-detection pass (sampled, frame-change-only) + ST.2094 knee + single-pivot polynomial spline + IPT hue-preserving tone map + black-scaled output (target black 0.203 nits → code 0); BT.2390 + VLC stay as presets. Build + live verify pending |
+| **HDR→SDR tone mapping (unit 20)** | **Target set = mpv/libplacebo parity 2026-10-20** (user decision). Pipeline reverse-engineered from libplacebo v7.360.0 and **numerically validated to 0.1 code/255** against mpv's own 16-bit captures over a 24-band PQ ramp (
+esearch-video.md §F). Engine work now: GPU peak-detection pass (sampled, frame-change-only) + ST.2094 knee + single-pivot polynomial spline + IPT hue-preserving tone map + black-scaled output (target black 0.203 nits → code 0); BT.2390 + VLC stay as presets. Build + live verify pending |
 | Color-verification harness | Lives in `%TEMP%\opencode\rex-verify\` (shader port, band generators, IPC client, DPI-aware sampler) — **not committed**, will be lost on temp cleanup |
 | Uncommitted core changes | `D3D12Renderer.cpp`, `WorkerWManager.cpp/.hpp` modified, not committed (recovery point commit `1ca6195` exists) |
 | HDR present bug | Long investigation: `hdr_*.log` (14 files), `hdrprobe.obj`, `present_repro.obj`, notes in `fix.md` |

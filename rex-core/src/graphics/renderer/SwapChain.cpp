@@ -49,6 +49,18 @@ shared::Result<void> SwapChain::Initialize(
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain1;
     hr = factory->CreateSwapChainForHwnd(
         commandQueue, hwnd, &desc, nullptr, nullptr, &swapChain1);
+    if (FAILED(hr) && desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+        // 10-bit SDR is the mpv-parity target, but it is not universal:
+        // a driver that refuses R10G10B10A2_UNORM as an SDR back buffer
+        // must still get a working wallpaper. Fall back to 8-bit UNORM.
+        REX_LOG_WARN("SwapChain",
+                     "10-bit back buffer refused (0x{:08X}); using 8-bit UNORM",
+                     static_cast<unsigned>(hr));
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        m_format = desc.Format;
+        hr = factory->CreateSwapChainForHwnd(
+            commandQueue, hwnd, &desc, nullptr, nullptr, &swapChain1);
+    }
     if (FAILED(hr)) {
         return shared::Result<void>(shared::ErrorCode::DriverError,
                                     "CreateSwapChainForHwnd failed");
@@ -64,7 +76,10 @@ shared::Result<void> SwapChain::Initialize(
     // output the window currently sits on.
     UpdateHdrSelection();
     REX_LOG_INFO("SwapChain", "Back buffer: {} ({})",
-                 m_isHdr ? "R16G16B16A16_FLOAT HDR10" : "R8G8B8A8_UNORM SDR",
+                 m_isHdr ? "R16G16B16A16_FLOAT HDR10"
+                        : (m_format == DXGI_FORMAT_R10G10B10A2_UNORM
+                               ? "R10G10B10A2_UNORM SDR 10-bit"
+                               : "R8G8B8A8_UNORM SDR 8-bit"),
                  m_isHdr ? "PQ/BT.2020" : "sRGB/BT.709");
 
     // Set max frame latency to 2 for smooth vsync-aligned pacing
@@ -331,8 +346,10 @@ void SwapChain::UpdateHdrSelection() {
         // (advanced color) is intentionally treated as SDR for now.
         hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
     }
-    const DXGI_FORMAT fmt = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
-                                : DXGI_FORMAT_R8G8B8A8_UNORM;
+    DXGI_FORMAT fmt = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                          : (m_sdrTenBitUnsupported
+                                 ? DXGI_FORMAT_R8G8B8A8_UNORM
+                                 : DXGI_FORMAT_R10G10B10A2_UNORM);
     if (hdr == m_isHdr && fmt == m_format) return;
 
     // R1: ResizeBuffers fails while back-buffer references are held, so
@@ -348,6 +365,19 @@ void SwapChain::UpdateHdrSelection() {
     // the color space is a per-swap-chain property.
     HRESULT hr = m_swapChain->ResizeBuffers(m_bufferCount, 0, 0, fmt,
         DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+    if (FAILED(hr) && fmt == DXGI_FORMAT_R10G10B10A2_UNORM) {
+        // The driver refuses a 10-bit SDR back buffer: fall back to 8-bit
+        // UNORM and remember it, so the next refresh does not retry a
+        // format this driver has already rejected.
+        REX_LOG_WARN("SwapChain",
+                     "10-bit back buffer refused on resize (0x{:08X}); "
+                     "falling back to 8-bit UNORM",
+                     static_cast<unsigned>(hr));
+        m_sdrTenBitUnsupported = true;
+        fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+        hr = m_swapChain->ResizeBuffers(m_bufferCount, 0, 0, fmt,
+            DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+    }
     if (FAILED(hr)) {
         REX_LOG_WARN("SwapChain", "format change resize failed: {:08x}",
                      static_cast<unsigned long>(hr));

@@ -295,6 +295,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_pipelineState;     // SDR back buffer
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_pipelineStateHdr;  // R16F back buffer
+    /// The back-buffer format the SDR pipeline state was compiled for.
+    /// The swapchain can fall back from 10-bit to 8-bit UNORM at runtime
+    /// (a driver that refuses R10G10B10A2), and a PSO's RTV format must
+    /// match the buffer it renders into - so the format is tracked and the
+    /// PSO is rebuilt when it changes.
+    DXGI_FORMAT m_sdrPsoFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_customPSO;         // custom PS (SDR)
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_customPSOHdr;      // custom PS (R16F)
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_vertexBuffer;

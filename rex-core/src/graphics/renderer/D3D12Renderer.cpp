@@ -1,6 +1,7 @@
 
 #include "D3D12Renderer.hpp"
 #include "graphics/renderer/HdrSyncPolicy.hpp"
+#include "graphics/renderer/OutputDither.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include <shared/Logger.hpp>
 #include <d3dcompiler.h>
@@ -66,7 +67,10 @@ VSOutput main(VSInput input) {
 }
 )";
 
-static const char* g_pixelShaderSource = R"(
+// The pixel shader is split across two literals: MSVC caps a single raw
+// string literal at 16 KB and the shader grew past that. The two halves
+// are concatenated when the shader is compiled.
+static const char* g_pixelShaderSourceA = R"(
 Texture2D texY : register(t0);
 Texture2D texUV : register(t1);
 SamplerState sam : register(s0);
@@ -210,6 +214,34 @@ float SampleSpectrum(float x) {
     float vhi = spec[slotH][laneH];
     return lerp(vlo, vhi, t);
 }
+)";
+
+static const char* g_pixelShaderSourceB = R"(
+// ── Output dither ─────────────────────────────────────────────────────────
+//
+// The SDR back buffer is a UNORM target, so the final write quantises the
+// encoded signal to a whole number of codes: 1024 levels on the 10-bit
+// swapchain (mpv's window format), 256 on the 8-bit fallback. Truncating
+// a smooth gradient into discrete steps is the banding the colour TODO
+// filed. mpv dithers by default (--dither=fruit, a blue-noise template);
+// this does the same job with Interleaved Gradient Noise (Jimenez) - a
+// fine, high-frequency pattern that reads like blue noise but needs no
+// texture and no extra pass.
+//
+// The amplitude is ONE CODE of the target depth, added to the ENCODED
+// signal (after the transfer function, where the quantisation actually
+// happens). TARGET_BITS is compiled per pipeline state from the
+// back-buffer format, so the amplitude always matches the target; the
+// FP16 HDR output is not quantised and dithers not at all.
+float IgnDither(float2 p) {
+    return frac(52.9829189f * frac(dot(p, float2(0.06711056f, 0.00583715f)))) - 0.5f;
+}
+#if TARGET_BITS > 0
+#define APPLY_DITHER(signal, pixel) \
+    saturate((signal) + IgnDither(pixel) * (1.0 / float((1 << TARGET_BITS) - 1)))
+#else
+#define APPLY_DITHER(signal, pixel) (signal)
+#endif
 
 float4 main(VSOutput input) : SV_TARGET {
     const float peak = max(disp.x, 100.0);
@@ -423,9 +455,10 @@ float4 main(VSOutput input) : SV_TARGET {
         const float3 signal = (rgb - 0.001) / 0.999;
         // Gamma 2.2 display transfer, matching the swap chain's
         // RGB_FULL_G22_NONE_P709 colour space.
-        return float4(pow(saturate(signal), 1.0 / 2.2), 1.0);
+        return float4(APPLY_DITHER(pow(saturate(signal), 1.0 / 2.2),
+                                   input.pos.xy), 1.0);
     }
-    return float4(LinearToSrgb(saturate(rgb)), 1.0);
+    return float4(APPLY_DITHER(LinearToSrgb(saturate(rgb)), input.pos.xy), 1.0);
 }
 )";
 
@@ -922,9 +955,12 @@ shared::Result<void> D3D12Renderer::InitializeCore(HWND targetWindow, int width,
     }
 
     // ── Pipeline state ────────────────────────────────────────────────
-    // One PSO per back-buffer format: SDR (8-bit UNORM) and HDR (16-bit
-    // float). The shader branches on the HDR flag via root constants.
-    if (!CreatePipelineState(DXGI_FORMAT_R8G8B8A8_UNORM, m_pipelineState)) {
+    // One PSO per back-buffer format: SDR (10-bit UNORM, 8-bit on a driver
+    // that refuses it) and HDR (16-bit float). The shader branches on the
+    // HDR flag via root constants; the dither amplitude is compiled in
+    // from the target depth.
+    m_sdrPsoFormat = m_swapChain.GetBackBufferFormat();
+    if (!CreatePipelineState(m_sdrPsoFormat, m_pipelineState)) {
         return shared::Result<void>(shared::ErrorCode::UnknownError,
                                     "Failed to create SDR pipeline state");
     }
@@ -1973,6 +2009,24 @@ void D3D12Renderer::SyncHdrStateLocked() {
     const auto action = graphics::PlanHdrSync(
         m_isHdrOutput, m_swapChain.IsHDR(),
         m_pipelineStateHdr.Get() != nullptr);
+    // The SDR back-buffer format can change under us (the swapchain falls
+    // back from 10-bit to 8-bit UNORM when the driver refuses the 10-bit
+    // buffer). A PSO's RTV format must match the buffer it renders into,
+    // so rebuild the SDR pipeline state when the format moved.
+    if (!m_swapChain.IsHDR()) {
+        const DXGI_FORMAT liveFormat = m_swapChain.GetBackBufferFormat();
+        if (liveFormat != m_sdrPsoFormat) {
+            REX_LOG_INFO("D3D12", "SDR back-buffer format changed to {}; "
+                                   "rebuilding the pipeline state",
+                         liveFormat == DXGI_FORMAT_R10G10B10A2_UNORM
+                             ? "R10G10B10A2_UNORM" : "R8G8B8A8_UNORM");
+            if (CreatePipelineState(liveFormat, m_pipelineState)) {
+                m_sdrPsoFormat = liveFormat;
+            } else {
+                REX_LOG_ERROR("D3D12", "SDR pipeline state rebuild failed");
+            }
+        }
+    }
     if (action.updateFlag) {
         m_isHdrOutput = m_swapChain.IsHDR();
         REX_LOG_INFO("D3D12", "HDR output {} (swapchain {})",
@@ -2313,7 +2367,19 @@ bool D3D12Renderer::CreatePipelineState(
     Microsoft::WRL::ComPtr<ID3D12PipelineState>& outPs) {
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob, errorBlob;
 
-    HRESULT hr = D3DCompile(g_pixelShaderSource, strlen(g_pixelShaderSource),
+    // The dither amplitude is one code of the OUTPUT depth, so it is
+    // compiled into the shader per target format: 10-bit for the mpv-parity
+    // R10G10B10A2 swapchain, 8-bit for the fallback, none for the FP16 HDR
+    // output (which is not quantised). The rule lives in OutputDither.hpp
+    // so the shader and the tests cannot drift apart.
+    const int targetBits = graphics::OutputDitherBits(rtvFormat);
+    // std::string(...) on the first half: two const char* would be pointer
+    // arithmetic, not concatenation.
+    const std::string source =
+        "#define TARGET_BITS " + std::to_string(targetBits) + "\n" +
+        std::string(g_pixelShaderSourceA) + g_pixelShaderSourceB;
+
+    HRESULT hr = D3DCompile(source.c_str(), source.size(),
            nullptr, nullptr, nullptr, "main", "ps_5_0",
            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &psBlob, &errorBlob);
     if (FAILED(hr)) {
