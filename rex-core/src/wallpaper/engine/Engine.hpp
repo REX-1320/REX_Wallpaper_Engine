@@ -106,6 +106,10 @@ private:
     shared::Result<void> ReinitializeRenderer();
     shared::Result<void> HandleDeviceLoss();
     void CheckDisplayChanges();
+    /// Housekeeping worker thread: runs the display-topology probe off the
+    /// render thread (on the render thread it blocked a frame for
+    /// 415-1084 ms - measured 2026-10-20).
+    void HousekeepingLoop();
     /// Auto-pause/resume while a full-screen app owns the foreground.
     void CheckFullScreenPause();
     /// Suspend sources (P3 / G1+G2): session lock, console display off,
@@ -192,6 +196,12 @@ private:
     std::shared_ptr<AudioCapture> m_audioCapture;
     std::unique_ptr<IRendererAdapter> m_adapter;
     std::thread m_renderThread;
+    // The housekeeping worker (display-topology probe). The render thread
+    // only raises the request flag; the worker does the (slow) probe so a
+    // frame is never blocked by it.
+    std::thread m_housekeepingThread;
+    std::atomic<bool> m_housekeepingStop{true};
+    std::atomic<bool> m_housekeepingRequested{false};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_recoveryNeeded{false};
     // True while ReinitializeRenderer has detached the renderer/video

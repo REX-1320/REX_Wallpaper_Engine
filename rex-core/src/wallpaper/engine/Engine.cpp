@@ -248,6 +248,11 @@ shared::Result<void> Engine::Initialize(const WallpaperConfig& config) {
     m_running = true;
     m_renderThread = std::thread(&Engine::RenderLoop, this);
 
+    // Housekeeping worker: the display-topology probe runs here so it can
+    // never block a frame (see HousekeepingLoop).
+    m_housekeepingStop.store(false, std::memory_order_release);
+    m_housekeepingThread = std::thread(&Engine::HousekeepingLoop, this);
+
     SetState(EngineState::Initialized);
     m_clock.Start(PositionClock::Now());
 
@@ -313,6 +318,14 @@ shared::Result<void> Engine::Shutdown() {
     // it to observe m_running==false and exit cleanly.
     if (m_renderThread.joinable()) {
         m_renderThread.join();
+    }
+
+    // The housekeeping worker touches the renderer and the video manager, so
+    // it must be stopped BEFORE the teardown below. The render thread is
+    // already gone, so no new probe can be requested.
+    m_housekeepingStop.store(true, std::memory_order_release);
+    if (m_housekeepingThread.joinable()) {
+        m_housekeepingThread.join();
     }
 
     // Render thread is fully stopped — no further concurrent access to
@@ -1657,8 +1670,40 @@ void Engine::Update(double deltaTime) {
     }
 }
 
-void Engine::CheckDisplayChanges() {
-    auto monitors = EnumerateMonitors();
+// ─── Housekeeping worker ──────────────────────────────────────────────────
+//
+// The display-topology probe runs here instead of on the render thread: a
+// DXGI output enumeration plus GetDpiForMonitor blocked the render thread
+// for 415 ms and 1084 ms on a contended desktop (measured 2026-10-20), which
+// the wallpaper showed as a one-second freeze. The render thread only
+// raises a request flag; this worker picks it up, does the probe and applies
+// the result. Nothing on the render thread ever waits for it.
+void Engine::HousekeepingLoop() {
+    while (!m_housekeepingStop.load(std::memory_order_acquire)) {
+        if (!m_housekeepingRequested.exchange(false, std::memory_order_acq_rel)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        // A shutdown may have started between the flag and here; the probe
+        // touches the renderer and the video manager, so it must not run
+        // past the teardown.
+        if (!m_running.load(std::memory_order_acquire)) {
+            break;
+        }
+        const auto start = std::chrono::high_resolution_clock::now();
+        CheckDisplayChanges();
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - start).count();
+        if (ms >= 50.0) {
+            REX_LOG_WARN("Engine",
+                         "slow housekeeping: CheckDisplayChanges took "
+                         "{:.2f} ms (housekeeping thread)",
+                         ms);
+        }
+    }
+}
+
+void Engine::CheckDisplayChanges() {    auto monitors = EnumerateMonitors();
     int count = static_cast<int>(monitors.size());
 
     // Primary geometry is consumed below (assigned-monitor update) — only
@@ -1980,20 +2025,15 @@ void Engine::RenderLoop() {
 
 
         // ── Periodically check for display topology changes ─────────────
+        //
+        // The probe (a DXGI output enumeration + GetDpiForMonitor) can
+        // block for tens of milliseconds - measured at 415 ms and 1084 ms
+        // on a contended desktop - and it used to run ON the render thread
+        // inside the frame budget, which showed up as a one-second late
+        // frame. It is now requested from a dedicated worker thread; the
+        // render thread only sets a flag and never waits for it.
         if (m_frameCount.load(std::memory_order_relaxed) % 120 == 0) {
-            const auto housekeepingStart = high_resolution_clock::now();
-            CheckDisplayChanges();
-            const double housekeepingMs = duration<double, std::milli>(
-                high_resolution_clock::now() - housekeepingStart).count();
-            // This runs ON the render thread inside the frame budget. A DXGI
-            // output query plus GetDpiForMonitor can block for tens of ms,
-            // which shows up as a late frame — invisible in any average FPS.
-            if (housekeepingMs >= 4.0) {
-                REX_LOG_WARN("Engine",
-                             "slow housekeeping: CheckDisplayChanges took "
-                             "{:.2f} ms on the render thread",
-                             housekeepingMs);
-            }
+            m_housekeepingRequested.store(true, std::memory_order_release);
         }
 
         // ── Desktop host / shell restart + device-loss recovery ────────
