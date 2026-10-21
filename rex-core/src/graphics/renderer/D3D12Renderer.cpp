@@ -277,8 +277,16 @@ float SampleLumaCatmullRom(Texture2D tex, SamplerState sam, float2 uv) {
     const float2 src = float2(w, h);
     // Uniform control flow: the derivatives must be taken before any branch.
     const float2 d = float2(ddx(uv.x), ddy(uv.y));
+    // scale = source texels per OUTPUT pixel. A magnified source (the video
+    // is smaller than the desktop) therefore has scale < 1, and a 1:1 or
+    // minified source has scale >= 1.
+    //
+    // The kernel exists for the UPSCALE path, so the early-out must be the
+    // other way round: the inverted test (scale <= 1) meant the kernel never
+    // ran on an upscale - the one case it exists for - while a minified
+    // source paid for 16 taps it did not need.
     const float2 scale = float2(abs(d.x) * src.x, abs(d.y) * src.y);
-    if (scale.x <= 1.0001f && scale.y <= 1.0001f) {
+    if (scale.x >= 1.0001f && scale.y >= 1.0001f) {
         return tex.SampleLevel(sam, uv, 0.0).r;   // 1:1 or minified
     }
     const float2 pos = uv * src - 0.5;
@@ -311,7 +319,7 @@ float4 SampleRgbCatmullRom(Texture2D tex, SamplerState sam, float2 uv) {
     const float2 src = float2(w, h);
     const float2 d = float2(ddx(uv.x), ddy(uv.y));
     const float2 scale = float2(abs(d.x) * src.x, abs(d.y) * src.y);
-    if (scale.x <= 1.0001f && scale.y <= 1.0001f) {
+    if (scale.x >= 1.0001f && scale.y >= 1.0001f) {
         return tex.SampleLevel(sam, uv, 0.0);
     }
     const float2 pos = uv * src - 0.5;
