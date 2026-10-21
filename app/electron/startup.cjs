@@ -96,4 +96,24 @@ function loginItemSettings(enabled, appPath, opts = {}) {
   return { openAtLogin: !!enabled, args }
 }
 
-module.exports = { saveLastApplied, loadLastApplied, clearLastApplied, loginItemSettings, mergeLiveUpdate }
+// Is the login item registered?
+//
+// `getLoginItemSettings().openAtLogin` is NOT that answer on Windows: it is
+// derived from a registry entry keyed by the app's identity, so it reads FALSE
+// in a development build even though the entry was written (the dev exe is
+// electron.exe, and the entry is named after the dev app). The platform's own
+// record of what it registered - `launchItems` - is the reliable answer.
+//
+// Measured (dev build, after setLoginItemSettings({openAtLogin: true})):
+//   openAtLogin: false, executableWillLaunchAtLogin: true,
+//   launchItems: [{ enabled: true, scope: 'user' }]
+function loginItemEnabled(state) {
+  if (!state || typeof state !== 'object') return false
+  if (Array.isArray(state.launchItems) && state.launchItems.length > 0) {
+    return state.launchItems.some((item) => item && item.enabled)
+  }
+  if (state.openAtLogin === true) return true
+  return !!state.executableWillLaunchAtLogin
+}
+
+module.exports = { saveLastApplied, loadLastApplied, clearLastApplied, loginItemSettings, loginItemEnabled, mergeLiveUpdate }

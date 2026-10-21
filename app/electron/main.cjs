@@ -67,6 +67,18 @@ function applyLoginItem(enabled) {
   app.setLoginItemSettings(settings)
 }
 
+// Is the login item actually registered? The rule lives in startup.js (pure,
+// tested): getLoginItemSettings().openAtLogin is unreliable on Windows - in a
+// dev build it reads FALSE even though the entry was written, because it is
+// derived from an identity-keyed registry entry. launchItems is the truth.
+function loginItemEnabled() {
+  try {
+    return startup.loginItemEnabled(app.getLoginItemSettings())
+  } catch {
+    return false
+  }
+}
+
 // The engine's INIT knobs the app owns. maxFps is the presentation cap
 // (0 = uncapped) and hardwareAcceleration is the HW-decode switch; both are
 // read when the runtime process starts.
@@ -933,10 +945,11 @@ app.whenReady().then(() => {
       if (enabled != null) {
         applyLoginItem(enabled)
         logLine('settings: login item', enabled ? 'enabled' : 'disabled')
+        // The tray shows the same preference; rebuild it so its checkbox
+        // cannot disagree with the page.
+        try { trayManager?.rebuildMenu() } catch {}
       }
-      let openAtLogin = false
-      try { openAtLogin = app.getLoginItemSettings().openAtLogin } catch {}
-      return { enabled: openAtLogin, startMinimized: appState?.get('startup.startMinimized') !== false }
+      return { enabled: loginItemEnabled(), startMinimized: appState?.get('startup.startMinimized') !== false }
     } catch (err) {
       logLine('app:login-item ERROR', err.message)
       return { enabled: false, startMinimized: true }
@@ -1057,11 +1070,7 @@ app.whenReady().then(() => {
     onPauseWallpaper: () => pauseWallpaper(),
     onResumeWallpaper: () => resumeWallpaper(),
     isLoginItemEnabled: () => {
-      try {
-        return app.getLoginItemSettings().openAtLogin
-      } catch {
-        return false
-      }
+      return loginItemEnabled()
     },
     onToggleLoginItem: (enabled) => {
       try {

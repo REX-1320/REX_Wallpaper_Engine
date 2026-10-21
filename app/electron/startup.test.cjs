@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { loginItemSettings } = require('./startup.cjs')
+const { loginItemSettings, loginItemEnabled } = require('./startup.cjs')
 
 test('a packaged app registers the executable itself', () => {
   const s = loginItemSettings(true)
@@ -30,4 +30,25 @@ test('disabling the login item never carries the background flag', () => {
   const s = loginItemSettings(false, 'D:\\REX_doc\\app')
   assert.equal(s.openAtLogin, false)
   assert.deepEqual(s.args, ['D:\\REX_doc\\app', '--background'])
+})
+
+// The read-back that broke the "Launch at login" switch: in a dev build
+// getLoginItemSettings() reports openAtLogin: false even though the entry was
+// written, so the switch snapped back to off.
+test('the login item state comes from launchItems, not from openAtLogin', () => {
+  const devState = {
+    launchItems: [{ name: 'electron.app.Electron', path: 'C:/electron.exe', args: ['D:/app'], scope: 'user', enabled: true }],
+    executableWillLaunchAtLogin: true,
+    openAtLogin: false,
+  }
+  assert.equal(loginItemEnabled(devState), true)
+
+  const packagedState = { launchItems: [{ name: 'REX', path: 'C:/REX.exe', scope: 'user', enabled: true }], openAtLogin: true }
+  assert.equal(loginItemEnabled(packagedState), true)
+})
+
+test('a disabled or missing login item reads as off', () => {
+  assert.equal(loginItemEnabled({ launchItems: [{ enabled: false }], openAtLogin: false, executableWillLaunchAtLogin: false }), false)
+  assert.equal(loginItemEnabled({ openAtLogin: false, executableWillLaunchAtLogin: false }), false)
+  assert.equal(loginItemEnabled(null), false)
 })
