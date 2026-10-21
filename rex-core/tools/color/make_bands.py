@@ -124,9 +124,15 @@ if __name__ == "__main__":
     print("PQ ramp: %d bands, %d px each ->" % (n, span), base + r"\ramp_pq.yuv")
     print("PQ codes (10-bit):", codes)
     print("encode with:")
-    print('  ffmpeg -f rawvideo -pix_fmt yuv420p10le -s 1920x1080 '
+    # The range has to be set on the INPUT side: ffmpeg only propagates it
+    # into the encoder (and the clip's VUI) when the rawvideo frames carry
+    # it. A limited-range clip makes the decoder expand the 10-bit PQ codes,
+    # and the ramp then peaks at 8274 nits instead of 4000 - the whole
+    # parity comparison is measured against a shifted ramp.
+    print('  ffmpeg -stream_loop 24 -color_range pc '
+          '-f rawvideo -pix_fmt yuv420p10le -s 1920x1080 '
           '-i "%s\\ramp_pq.yuv" -c:v libx265 -preset ultrafast -crf 0 '
           '-x265-params "lossless=1:colorprim=bt2020:transfer=smpte2084:'
           'colormatrix=bt2020nc" -pix_fmt yuv420p10le '
           '-color_primaries bt2020 -color_trc smpte2084 '
-          '-colorspace bt2020nc "%s\\ramp_pq.mp4"' % (base, base))
+          '-colorspace bt2020nc -color_range pc "%s\\ramp_pq.mp4"' % (base, base))
