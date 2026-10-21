@@ -126,6 +126,21 @@ public:
     static void ResampleLinear(const int16_t* src, size_t srcFrames,
                                int channels, int16_t* dst, size_t dstFrames);
 
+    /// Windowed-sinc resample of interleaved S16 (P1-13 tempo path).
+    ///
+    /// Linear interpolation folds the spectrum back over itself when the
+    /// rate changes: a tone near Nyquist is attenuated and anything above it
+    /// is aliased into an audible whistle. mpv and libav resample with a
+    /// polyphase FIR. This is an 8-tap Blackman-windowed sinc with the
+    /// cutoff at min(1, 1/ratio), so speeding the content up lowers the
+    /// cutoff and filters the aliasing band out instead of folding it in.
+    ///
+    /// Pure and deterministic - the unit tests pin the pass-through case and
+    /// the near-Nyquist tone the linear version destroyed.
+    static void ResampleWindowedSinc(const int16_t* src, size_t srcFrames,
+                                     int channels, int16_t* dst,
+                                     size_t dstFrames);
+
     // ─── Testable seams ────────────────────────────────────────────────
     // The decode loop and the sample conversion are exposed as pure
     // functions so the state machine and the channel mix can be verified

@@ -118,6 +118,75 @@ float AudioPlayer::GetDownmixCoefficients(int srcChannels, int dstChannels,
     return 0.0f;   // LFE (index 3) and the far-side surrounds land here
 }
 
+void AudioPlayer::ResampleWindowedSinc(const int16_t* src, size_t srcFrames,
+                                       int channels, int16_t* dst,
+                                       size_t dstFrames) {
+    constexpr double kPi = 3.14159265358979323846;
+    if (!src || !dst || channels <= 0 || dstFrames == 0 || srcFrames == 0) {
+        return;
+    }
+    if (srcFrames <= 1 || dstFrames <= 1) {
+        for (size_t i = 0; i < dstFrames; ++i) {
+            for (int c = 0; c < channels; ++c) {
+                dst[i * static_cast<size_t>(channels) + c] = src[c];
+            }
+        }
+        return;
+    }
+    // Source frames per output frame. Above 1 the content is stretched
+    // (slowed down) and nothing has to be filtered; below 1 it is
+    // compressed (sped up) and the cutoff must come down with it.
+    const double step =
+        static_cast<double>(srcFrames - 1) / (dstFrames - 1);
+    // The cutoff is in CYCLES PER SOURCE SAMPLE, so Nyquist is 0.5. A
+    // decimation by D needs 0.5/D, otherwise the band that is about to be
+    // folded back is not filtered out (the unit test pins this: a tone
+    // above the new Nyquist must vanish).
+    const double cutoff = 0.5 * std::min(1.0, 1.0 / std::max(1e-6, step));
+    constexpr int kHalfTaps = 4;   // 8 taps in total
+
+    // Blackman window over the tap span, and a sinc at the cutoff.
+    auto window = [](double t) {
+        if (t < -1.0 || t > 1.0) return 0.0;
+        return 0.42 + 0.5 * std::cos(kPi * t) +
+               0.08 * std::cos(2.0 * kPi * t);
+    };
+    auto sinc = [cutoff](double x) {
+        if (std::abs(x) < 1e-9) return cutoff;
+        const double px = kPi * cutoff * x;
+        return cutoff * std::sin(px) / (kPi * x);
+    };
+
+    std::vector<double> acc(static_cast<size_t>(channels), 0.0);
+    for (size_t i = 0; i < dstFrames; ++i) {
+        const double pos = static_cast<double>(i) * step;
+        const long centre = static_cast<long>(std::lround(pos));
+        std::fill(acc.begin(), acc.end(), 0.0);
+        double wsum = 0.0;
+        for (int k = -kHalfTaps + 1; k <= kHalfTaps; ++k) {
+            const long idx = centre + k;
+            if (idx < 0 || idx >= static_cast<long>(srcFrames)) continue;
+            const double dist = pos - static_cast<double>(idx);
+            const double w = window(dist / kHalfTaps) * sinc(dist);
+            if (w == 0.0) continue;
+            for (int c = 0; c < channels; ++c) {
+                acc[static_cast<size_t>(c)] +=
+                    w * static_cast<double>(
+                             src[idx * static_cast<size_t>(channels) + c]);
+            }
+            wsum += w;
+        }
+        if (std::abs(wsum) < 1e-9) wsum = 1.0;   // fall back to the raw frame
+        for (int c = 0; c < channels; ++c) {
+            double v = acc[static_cast<size_t>(c)] / wsum;
+            if (v < -32768.0) v = -32768.0;
+            else if (v > 32767.0) v = 32767.0;
+            dst[i * static_cast<size_t>(channels) + c] =
+                static_cast<int16_t>(std::lround(v));
+        }
+    }
+}
+
 void AudioPlayer::ResampleLinear(const int16_t* src, size_t srcFrames,
                                  int channels, int16_t* dst,
                                  size_t dstFrames) {
@@ -1060,8 +1129,8 @@ void AudioPlayer::RenderStep() {
                     std::memcpy(content + first * ch, m_ring.data(),
                                 (contentFrames - first) * ch * 2);
                 }
-                ResampleLinear(content, contentFrames,
-                               m_channels, dst, have);
+                ResampleWindowedSinc(content, contentFrames,
+                                   m_channels, dst, have);
                 m_readPos = (m_readPos + contentFrames) % m_ringFrames;
                 m_bufferedFrames -= contentFrames;
             }
