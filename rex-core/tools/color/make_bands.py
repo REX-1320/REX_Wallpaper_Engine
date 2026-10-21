@@ -18,10 +18,24 @@ NITS_HDR = [10, 40, 100, 203, 400, 600, 800, 1000]
 SDR_CODES = [0, 32, 64, 96, 128, 160, 192, 224]
 
 # The mpv-parity ramp: 24 PQ bands (0.01 .. 4000 cd/m2), left to right, each
-# band 1/24 of the width. The values match MPV_BANDS in shader_port.py - the
-# same list the engine's parity check measures against.
-PQ_BANDS_NITS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 26, 40, 50, 80,
-                 100, 150, 200, 300, 500, 800, 1200, 2000, 3000, 4000]
+# band 1/24 of the width.
+#
+# The band values come from shader_port.MPV_BANDS - the single source of
+# truth. That list is the one mpv 0.41.0's own measurements (MPV_MEASURED_
+# 16BIT) were captured on, so the fixture, the parity model and the mpv
+# reference can never drift apart.
+#
+# They DID drift: this file used to carry its own copy of the list, which
+# unit 22 (e18de18) changed to [.. 200, 300, 500, 800, 1200, 2000, 3000 ..]
+# while shader_port.py kept [.. 203, 300, 400, 600, 800, 1000, 2000 ..]. The
+# parity check then compared the clip against the wrong band values and
+# reported a +7..+17 code "regression" on the bright bands that the engine
+# never had - the clip really did contain 500/800/1200/2000/3000 nits.
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shader_port import MPV_BANDS as PQ_BANDS_NITS  # noqa: E402
 
 
 def write_png16(path, w, h, rows):
