@@ -565,32 +565,19 @@ enum AVPixelFormat FfmpegVideoDecoder::GetHwFormat(
         if (*f != AV_PIX_FMT_D3D11) {
             continue;
         }
-        // Pre-size the hardware frames: FFmpeg then allocates the decoded
-        // surfaces once, at the known size, instead of re-allocating them
-        // whenever the resolution changes mid-stream.
-        AVBufferRef* frames = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
-        if (frames) {
-            AVHWFramesContext* fc =
-                reinterpret_cast<AVHWFramesContext*>(frames->data);
-            fc->format = AV_PIX_FMT_D3D11;
-            fc->sw_format = ctx->pix_fmt;   // the software format behind it
-            fc->width = ctx->width;
-            fc->height = ctx->height;
-            if (av_hwframe_ctx_init(frames) >= 0) {
-                ctx->hw_frames_ctx = frames;   // FFmpeg takes ownership
-                REX_LOG_INFO(kModule,
-                             "hardware frames pre-sized: {}x{} (sw format {})",
-                             ctx->width, ctx->height,
-                             av_get_pix_fmt_name(ctx->pix_fmt));
-                return AV_PIX_FMT_D3D11;
-            }
-            // The driver refused the pre-sized context: let FFmpeg allocate
-            // the frames itself rather than failing the decode.
-            av_buffer_unref(&frames);
-            REX_LOG_WARN(kModule,
-                         "hardware frames context could not be pre-sized; "
-                         "letting the decoder allocate them");
-        }
+        // Do NOT pre-allocate the hardware frames context here.
+        //
+        // FFmpeg's D3D11VA decoder creates the decode texture ITSELF (it
+        // keeps it in the frames context's user_opaque) and its pool_init()
+        // refuses a context the caller allocated: "AVD3D11VAFramesContext.
+        // texture not set" -> "Failed setup for format d3d11" -> the hwaccel
+        // never initialises and the stream falls back to SOFTWARE decode.
+        // Measured 2026-10-21 on a 4K 60 fps 8-bit HEVC clip (the user's
+        // own wallpaper): pre-sized -> software decodePath=SW_BGRA8 and a
+        // ~170 ms late frame every 2.7 s; without the pre-sizing the same
+        // clip decodes on the GPU. The allocation churn this was meant to
+        // avoid (a re-allocation when the resolution changes mid-stream) is
+        // a far smaller cost than a 4K software decode.
         return AV_PIX_FMT_D3D11;
     }
     return formats[0];

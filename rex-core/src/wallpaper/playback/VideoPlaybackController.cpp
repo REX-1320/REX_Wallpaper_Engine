@@ -443,6 +443,17 @@ void VideoPlaybackController::CheckAvSync() {
     if (!audio) {
         return;
     }
+    if (!audio->HasAudio()) {
+        // No audio track in this media (or the stream never opened): the
+        // audio position stays at 0 for the whole playback, so the watchdog
+        // would measure the ENTIRE video position as "drift" and re-seek the
+        // audio every few seconds. Each of those re-seeks also blocked the
+        // render thread for ~170 ms (measured on a 4K 60 fps clip with no
+        // audio track: a visible hitch every 2.8 s). There is nothing to
+        // sync against, so the watchdog must not run at all.
+        m_avSyncBaselineValid = false;
+        return;
+    }
     if (audio->IsSilentOutput()) {
         // Silent: the decode is suspended, so the audio position is frozen.
         // Forget the baseline so the next audible check starts clean.
