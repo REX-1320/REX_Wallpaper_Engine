@@ -24,7 +24,7 @@ Competitor space: Rainmeter + Wallpaper Engine + StartAllBack + Seelen UI, unifi
 
 | State | Count |
 |---|---|
-| ✅ Done | ~132 |
+| ✅ Done | ~135 |
 | 🟡 Partial/stub | ~24 |
 | ⬜ Not started | ~164 |
 
@@ -415,6 +415,18 @@ The panel was rebuilt around what the runtime can actually do (research: [`resea
 - **The panel scrolls again** - the poster used to consume the whole column (the scroll area had **0 px**), so the properties below were unreachable. The poster shrinks, the scroll area keeps a 180 px floor, and scrollbars are now hidden app-wide while every container still scrolls.
 
 Live evidence: silent file -> "This file has no audio track." with only Speed/Loop; movie -> Mute/Volume/Speed/Loop/Output; image -> Fill/Fit/Stretch/Center/Tile; a fit change lands in `last-wallpaper.json` (`mode: fit`); mute persists in the library entry; after a restart the settings re-hydrate (Fit active, Mute checked) and the boot wallpaper shows "On desktop"; `wallpaper:pause ok` / `wallpaper:resume ok` in the log; 24 node:test cases green, build/lint/palette green.
+
+### Global settings - shipped (2026-10-21)
+
+Research: [`research-settings.md`](research-settings.md) · plan: [`docs/superpowers/plans/2026-10-21-global-settings.md`](docs/superpowers/plans/2026-10-21-global-settings.md).
+
+- **The Settings page existed only as a heading.** The nav item, the tray item and the `PAGES` table all pointed at a page with no body - only the Wallpapers tab rendered anything. It is now a real page: **Startup** (launch at login, start minimised, restore the last wallpaper at launch), **Window** (remember size and position, "On close: keep in tray / quit REX"), **Engine** (frame-rate cap, hardware decoding, and the engine's own live telemetry), **New wallpapers** (defaults for fit mode, muted, volume, brightness - applied to new imports only), **Files** (the real paths, each openable, plus clearing the cached posters) and **About** (the real version). The `PAGES` table is read for the first time: the page head now shows its subtitle.
+- **The engine's colour controls are no longer stranded.** Brightness / contrast / saturation were implemented, advertised by the video adapter and applied per frame by the renderer - the app simply never sent them. They are now a **Picture** group in the Inspector, persisted per file, restored on apply and on the boot replay, and gated to videos (the static adapter has no colour pipeline).
+- **The engine's own measurements are now visible.** `GET_STATUS` reports ~60 telemetry fields; there was no IPC for it at all. The Engine panel shows the live frame rate, scheduler drops, A/V drift, VRAM, HDR state and the property list the engine can apply - and it never starts the engine to answer the question.
+- **Window bounds are remembered, safely.** The bounds are validated against the live display list before use, so a window whose monitor was unplugged cannot open off-screen; the rule is a pure module with its own tests.
+- **The palette guard is green again.** It had been failing on a raw colour literal in `PlaylistDock.css`; the dock's steel ground is now a token.
+
+Live: the frame cap took the panel from 118.3 fps to 13.8 fps on a 120 fps source; "restore at launch = off" left the desktop alone at boot; a close with "quit REX" left no process behind while the default still keeps the app in the tray; a newly imported file took the defaults (Fit, muted) while a file already in the library kept its own values. 49 node:test cases green, build/lint/palette green.
 
 ### Video output research — players, tone mapping, decoding, verification (2026-10-19)
 
