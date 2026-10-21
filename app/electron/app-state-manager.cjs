@@ -18,13 +18,27 @@ class AppStateManager {
     return {
       version: CURRENT_STATE_VERSION,
       window: { x: null, y: null, width: 1280, height: 720, maximized: false },
-      ui: { lastPage: 'Wallpapers', sidebarCollapsed: false, inspectorVisible: true },
+      ui: {
+        lastPage: 'Wallpapers',
+        sidebarCollapsed: false,
+        inspectorVisible: true,
+        // Remember the window's size and position between launches.
+        rememberWindowBounds: true,
+        // Gallery <-> inspector split (px). null = even 50/50 split.
+        gallerySplitPx: null,
+        // Bottom playlist dock.
+        panelHeight: 220,
+        panelOpen: true,
+        panelMinimized: false,
+        panelMaximized: false,
+        panelPlaylistId: null,
+      },
       recent: { wallpapers: [], wallpaperIndex: -1 },
       theme: { themeId: 'midnight-glass', colorTokens: {} },
       tray: { minimizeToTray: true, closeToTray: true },
       wallpaperSettings: {}, // per-wallpaper settings keyed by normalized path (Phase 2)
       wallpaper: { assignments: {}, playback: { position: 0, volume: 1.0, paused: false } },
-      playlistEngine: {}, // reserved: UI-only playlist state (Phase 4)
+      playlistEngine: { playlists: [] }, // UI-only playlist state: [{ id, name, icon, members }]
     }
   }
 
@@ -165,7 +179,9 @@ class AppStateManager {
         ...(saved.wallpaper || {}),
         playback: { ...def.wallpaper.playback, ...(saved.wallpaper?.playback || {}) },
       },
-      playlistEngine: { ...(saved.playlistEngine || {}) },
+      // The defaults must be spread FIRST: a state file written before the
+      // playlist key existed would otherwise drop `playlists` entirely.
+      playlistEngine: { ...def.playlistEngine, ...(saved.playlistEngine || {}) },
     }
   }
 

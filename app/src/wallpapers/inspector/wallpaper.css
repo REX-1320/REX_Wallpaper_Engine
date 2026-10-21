@@ -21,7 +21,7 @@
   flex-shrink: 0;
   overflow: hidden;
   border-radius: 14px;
-  border: 1px dashed rgba(255, 255, 255, 0.3);
+  border: 1px dashed var(--stroke-strong);
   cursor: pointer;
   background:
     radial-gradient(120% 120% at 15% 20%, rgba(255, 255, 255, 0.06) 0%, transparent 45%),
@@ -37,7 +37,7 @@
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--text-disabled);
   pointer-events: none;
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
   display: none;
@@ -54,7 +54,7 @@
   gap: 4px;
   padding: 20px;
   box-sizing: border-box;
-  color: #fff;
+  color: var(--text-primary);
   pointer-events: none;
   will-change: transform, opacity;
   transform-origin: center;
@@ -102,8 +102,8 @@
 .wallpaper-visual-chip {
   padding: 2px 7px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--stroke-strong);
+  background: var(--fill-inverse);
   font-size: 9px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -116,8 +116,245 @@
   right: 8px;
   padding: 2px 6px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--surface-sunken);
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.08em;
+}
+
+/* ── The inspector's property sections ─────────────────────────────────────
+   A card per group with a brass eyebrow, an icon in a champagne chip and a
+   hairline — not a plain bordered box. */
+
+.prop-section {
+  border: 1px solid var(--stroke-subtle);
+  border-radius: 14px;
+  background: var(--fill-rest);
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+
+.prop-section:hover {
+  border-color: var(--stroke-default);
+}
+
+.prop-section-head{
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  transition: background 0.15s ease;
+}
+
+.prop-section-head:hover {
+  background: var(--fill-hover);
+}
+
+.prop-section-icon{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: 7px;
+  background: var(--fill-strong);
+  border: 1px solid var(--stroke-default);
+  color: var(--text-secondary);
+}
+
+.prop-section-chevron {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  transition: transform 0.2s ease, color 0.15s ease;
+}
+
+.prop-section-head:hover .prop-section-chevron {
+  color: var(--text-secondary);
+}
+
+.prop-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 10px 10px;
+}
+
+/* The inspector's header: the wallpaper's poster, its name and its meta. */
+
+.insp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--stroke-subtle);
+  background: linear-gradient(180deg, rgba(255, 248, 235, 0.03), transparent);
+}
+
+/* The preview is its own block, not a chip beside the name: full panel width,
+   450 px tall (1.5x the previous 300 px block), so the selected wallpaper is
+   recognisable before you read a single property. Capped at 50 vh and allowed
+   to shrink, so the properties below always keep a scrollable strip. */
+.insp-poster {
+  flex: 0 1 auto;
+  height: min(450px, 50vh);
+  min-height: 140px;
+  margin: 10px 12px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--fill-strong);
+  border: 1px solid var(--stroke-default);
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.35);
+  color: var(--text-tertiary);
+}
+
+.insp-poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.insp-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.insp-meta{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.insp-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  height: 100%;
+  min-height: 240px;
+  padding: 24px;
+  text-align: center;
+}
+
+.insp-empty-icon{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  background: var(--fill-strong);
+  border: 1px solid var(--stroke-default);
+  color: var(--text-secondary);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.insp-empty-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.insp-empty-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  max-width: 22ch;
+}
+
+/* -- Inspector v1: primary actions + engine-backed controls --------------- */
+.insp-primary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.insp-applied {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--stroke-default);
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+
+.insp-hint {
+  margin: 6px 0 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+.fit-modes {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.fit-mode {
+  height: 26px;
+  padding: 0 2px;
+  border: 1px solid var(--stroke-subtle);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.fit-mode:hover {
+  background: var(--fill-hover);
+  color: var(--text-secondary);
+}
+
+.fit-mode.active {
+  border-color: var(--stroke-strong);
+  background: var(--fill-strong);
+  color: var(--text-primary);
+}
+
+.fit-modes-inline {
+  padding: 2px 0;
+}
+
+.insp-path {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--stroke-subtle);
+  border-radius: 8px;
+  background: var(--fill-rest);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  user-select: text;
 }

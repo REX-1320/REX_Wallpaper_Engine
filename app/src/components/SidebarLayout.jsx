@@ -1,53 +1,33 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion } from 'motion/react'
 import './SidebarLayout.css'
-import { Home, Component, Settings, User, Bell, ChevronLeft, ChevronRight, Minus, Square, X, Blocks, Search, Image, Palette, LayoutGrid, Paintbrush, Store, Download, Star, Gauge, Package, Activity, FlaskConical, Info } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Minus, Square, X, Search, Image, Settings, Info, User } from 'lucide-react'
 import Glass_effect from './Glass_effect'
 import ShinyText from './ShinyText'
 import DesktopApply from '../wallpapers/DesktopApply'
+import PlaylistDock from '../wallpapers/PlaylistDock'
+import { setLayoutState, useLayoutState } from '../state/layout'
+
+// The nav column's geometry lives here, in one place: the sidebar's animated
+// width and the content column's offset are derived from the same numbers,
+// so the gap between them can never drift.
+const SIDEBAR_W = 240
+const SIDEBAR_CLOSED_W = 51
+const CONTENT_GAP = 20
+const DOCK_MIN_HEIGHT = 120
+const DOCK_MAX_RATIO = 0.7
 
 const NAV_GROUPS = [
-  {
-    label: 'Menu',
-    items: [
-      { icon: Home, label: 'Home' },
-      { icon: Component, label: 'Buttons' },
-      { icon: Settings, label: 'Settings' },
-      { icon: User, label: 'Profile' },
-      { icon: Bell, label: 'Alerts' },
-      { icon: Blocks, label: 'shadcn' },
-    ],
-  },
   {
     label: 'Desktop',
     items: [
       { icon: Image, label: 'Wallpapers' },
-      { icon: Palette, label: 'Themes' },
-      { icon: LayoutGrid, label: 'Widgets' },
-      { icon: Paintbrush, label: 'Personalization' },
-    ],
-  },
-  {
-    label: 'Discover',
-    items: [
-      { icon: Store, label: 'Marketplace' },
-      { icon: Download, label: 'Downloads' },
-      { icon: Star, label: 'Collections' },
-    ],
-  },
-  {
-    label: 'System',
-    items: [
-      { icon: Gauge, label: 'Performance' },
-      { icon: Package, label: 'Modules' },
-      { icon: Activity, label: 'Activity' },
-      { icon: Settings, label: 'Settings' },
     ],
   },
   {
     label: 'Advanced',
     items: [
-      { icon: FlaskConical, label: 'Developer' },
+      { icon: Settings, label: 'Settings' },
       { icon: Info, label: 'About' },
     ],
   },
@@ -58,6 +38,10 @@ function SidebarLayout({ active, onSelect, children }) {
   const [searchOpen, setSearchOpen] = useState(false)
   const [maximized, setMaximized] = useState(false)
   const searchInputRef = useRef(null)
+  const layout = useLayoutState()
+  const [liveHeight, setLiveHeight] = useState(null)
+  const dragStartRef = useRef(null)
+  const liveHeightRef = useRef(null)
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus()
@@ -92,6 +76,25 @@ function SidebarLayout({ active, onSelect, children }) {
   // stay clickable carries `-webkit-app-region: no-drag` in the CSS instead
   // (traffic-light dots, search pill, sidebar toggle).
 
+  const effectiveHeight = liveHeight ?? layout.panelHeight
+
+  const onDockResize = (delta) => {
+    if (dragStartRef.current == null) dragStartRef.current = effectiveHeight
+    const max = Math.round(window.innerHeight * DOCK_MAX_RATIO)
+    const next = Math.min(Math.max(DOCK_MIN_HEIGHT, dragStartRef.current - delta), max)
+    liveHeightRef.current = next
+    setLiveHeight(next)
+  }
+
+  const onDockCommit = () => {
+    // Only the committed value is persisted — dragging writes on every frame
+    // otherwise, and the state file is flushed to disk.
+    if (liveHeightRef.current != null) setLayoutState({ panelHeight: liveHeightRef.current })
+    dragStartRef.current = null
+    liveHeightRef.current = null
+    setLiveHeight(null)
+  }
+
   return (
     <div className="window">
       <DesktopApply />
@@ -107,14 +110,19 @@ function SidebarLayout({ active, onSelect, children }) {
         <div className="titlebar-controls">
           <button
             type="button"
+            className="titlebar-dot yellow"
+            aria-label="Minimize"
+            onClick={winControls.minimize}
+          >
+            <Minus size={13} />
+          </button>
+          <button
+            type="button"
             className={`titlebar-dot green${maximized ? ' maximized' : ''}`}
             aria-label={maximized ? 'Restore' : 'Maximize'}
             onClick={winControls.toggleMaximize}
           >
             <Square size={11} />
-          </button>
-          <button type="button" className="titlebar-dot yellow" aria-label="Minimize" onClick={winControls.minimize}>
-            <Minus size={13} />
           </button>
           <button type="button" className="titlebar-dot red" aria-label="Close" onClick={winControls.close}>
             <X size={13} />
@@ -157,7 +165,7 @@ function SidebarLayout({ active, onSelect, children }) {
       </motion.div>
 
       <h3 className="sidebar-heading">
-        <ShinyText text="Y0!" color="#8f8f8f" shineColor="#ffffff" speed={3} />
+        <ShinyText text="Y0!" color="var(--gold-classic)" shineColor="var(--gold-bright)" speed={3} />
       </h3>
 
       <motion.aside
@@ -166,7 +174,7 @@ function SidebarLayout({ active, onSelect, children }) {
         animate={{
           x: 0,
           opacity: 1,
-          width: open ? 240 : 51,
+          width: open ? SIDEBAR_W : SIDEBAR_CLOSED_W,
         }}
         transition={{ type: 'spring', stiffness: 180, damping: 24 }}
       >
@@ -182,7 +190,7 @@ function SidebarLayout({ active, onSelect, children }) {
         <nav className="sidebar-nav">
           {NAV_GROUPS.map((group, gi) => (
             <div key={group.label} className="sidebar-group">
-              {open && <h4 className="sidebar-group-title">{group.label}</h4>}
+              <h4 className="sidebar-group-title">{group.label}</h4>
               {group.items.map(({ icon: Icon, label }, i) => (
                 <motion.a
                   key={label}
@@ -195,12 +203,11 @@ function SidebarLayout({ active, onSelect, children }) {
                   initial={{ x: -20, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}
                   transition={{ delay: 0.15 + (gi * 4 + i) * 0.06, type: 'spring', stiffness: 200, damping: 20 }}
-                  whileHover={{ scale: 1.03 }}
-                  whileTap={{ scale: 0.97 }}
+                  whileTap={{ scale: 0.98 }}
                   title={label}
                 >
                   <Icon size={18} />
-                  {open && <span className="sidebar-label">{label}</span>}
+                  <span className="sidebar-label">{label}</span>
                 </motion.a>
               ))}
             </div>
@@ -209,11 +216,32 @@ function SidebarLayout({ active, onSelect, children }) {
       </motion.aside>
 
       <motion.main
-        className="window-content"
-        animate={{ left: open ? 260 : 71 }}
+        className={`content-col${layout.panelMaximized ? ' dock-maximized' : ''}`}
+        initial={{ left: SIDEBAR_W + CONTENT_GAP }}
+        animate={{ left: open ? SIDEBAR_W + CONTENT_GAP : SIDEBAR_CLOSED_W + CONTENT_GAP }}
         transition={{ type: 'spring', stiffness: 180, damping: 24 }}
       >
-        {children}
+        <div className="page-area">{children}</div>
+        {/* The playlist dock belongs to the Wallpapers page — the playlists are
+            wallpapers' playlists, so it does not follow the user onto
+            Settings/About. Its size and state are remembered either way. */}
+        {active === 'Wallpapers' ? (
+          <PlaylistDock
+            height={effectiveHeight}
+            open={layout.panelOpen}
+            minimized={layout.panelMinimized}
+            maximized={layout.panelMaximized}
+            onResize={onDockResize}
+            onCommitResize={onDockCommit}
+            onMinimize={() =>
+              setLayoutState({ panelMinimized: !layout.panelMinimized, panelMaximized: false })
+            }
+            onMaximize={() =>
+              setLayoutState({ panelMaximized: !layout.panelMaximized, panelMinimized: false })
+            }
+            onClose={() => setLayoutState({ panelOpen: false })}
+          />
+        ) : null}
       </motion.main>
     </div>
   )

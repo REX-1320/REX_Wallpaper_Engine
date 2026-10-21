@@ -9,6 +9,17 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   setDesktopVideo: (options) => ipcRenderer.invoke('wallpaper:video', options),
   updateWallpaper: (options) => ipcRenderer.invoke('wallpaper:update', options),
   getCapabilities: () => ipcRenderer.invoke('wallpaper:capabilities'),
+  // Transport: pause/resume the applied wallpaper (tray + Inspector).
+  pauseWallpaper: () => ipcRenderer.invoke('wallpaper:pause'),
+  resumeWallpaper: () => ipcRenderer.invoke('wallpaper:resume'),
+  // Scene main re-applied at boot (last-wallpaper.json); the inspector adopts
+  // it as "on desktop" without reloading.
+  getLastApplied: () => ipcRenderer.invoke('wallpaper:last-applied'),
+  // Container probe: does the file have an audio track?
+  getMediaInfo: (filePath) => ipcRenderer.invoke('wallpaper:media-info', { path: filePath }),
+  // The engine's own telemetry (GET_STATUS) for the Settings page. Reports
+  // `available: false` when the runtime is not running - it never starts one.
+  getStatus: () => ipcRenderer.invoke('wallpaper:status'),
 
   // Runtime events: { event, data } with events READY/LOADED/PLAYING/
   // PAUSED/STOPPED/UNLOADED/ERROR. Returns an unsubscribe function.
@@ -23,12 +34,22 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   // Cached gallery thumbnails.
   saveThumbnail: (id, dataUrl) => ipcRenderer.invoke('wallpaper:save-thumbnail', { id, dataUrl }),
   deleteThumbnail: (path) => ipcRenderer.invoke('wallpaper:delete-thumbnail', { path }),
+  // HEVC posters: a short-lived, GPU-enabled process decodes one frame when
+  // this software-composited window cannot (see thumb-worker.cjs).
+  fallbackThumbnail: (filePath, maxSize) =>
+    ipcRenderer.invoke('wallpaper:fallback-thumbnail', { path: filePath, maxSize }),
 
   // Persisted UI state (AppStateManager in main).
   appState: {
     get: (keyPath) => ipcRenderer.invoke('app-state:get', keyPath),
     set: (keyPath, value) => ipcRenderer.invoke('app-state:set', keyPath, value),
   },
+
+  // App-level settings (the Settings page).
+  loginItem: (enabled) => ipcRenderer.invoke('app:login-item', { enabled }),
+  getPaths: () => ipcRenderer.invoke('app:paths'),
+  openPath: (target) => ipcRenderer.invoke('app:open-path', { target }),
+  clearPosters: () => ipcRenderer.invoke('app:clear-posters'),
 
   // Persisted gallery library (WallpaperLibrary in main). add() is the
   // authoritative persisted-path dedup: same normalized path returns the
@@ -62,6 +83,10 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   onNavigate: (callback) => {
     const listener = (_event, page) => callback(page)
     ipcRenderer.on('navigate', listener)
+    // The listener is mounted: main may now deliver a destination queued by
+    // the tray (e.g. "Settings" on a freshly created window). did-finish-load
+    // is too early -- React registers this effect after the document loads.
+    ipcRenderer.send('renderer:navigate-ready')
     return () => ipcRenderer.removeListener('navigate', listener)
   },
 })

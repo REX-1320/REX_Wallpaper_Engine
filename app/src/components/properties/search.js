@@ -10,7 +10,7 @@ export function matchesQuery(children, query) {
   if (!query) return Children.toArray(children)
   return Children.toArray(children).filter((child) => {
     if (!isValidElement(child)) return false
-    const label = child.props?.label ?? child.props?.title ?? ''
+    const label = child.props?.label ?? child.props?.title ?? child.props?.['aria-label'] ?? ''
     return label.toLowerCase().includes(query)
   })
 }

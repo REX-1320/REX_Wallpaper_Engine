@@ -82,11 +82,18 @@ function mergeLiveUpdate(entry, applied, values) {
 // In a packaged app the executable IS the app, so args suffice. In dev the
 // executable is bare Electron and the app folder must be argv[1] — without
 // it Windows launches a default Electron window instead of REX.
-function loginItemSettings(enabled, appPath) {
+//
+// `startMinimized` (default true) adds --background: the login item then
+// starts the tray and the wallpaper without opening the window.
+function loginItemSettings(enabled, appPath, opts = {}) {
+  const startMinimized = opts.startMinimized !== false
+  const args = []
+  if (appPath) args.push(appPath)
+  if (startMinimized) args.push('--background')
   if (appPath) {
-    return { openAtLogin: !!enabled, path: process.execPath, args: [appPath, '--background'] }
+    return { openAtLogin: !!enabled, path: process.execPath, args }
   }
-  return { openAtLogin: !!enabled, args: ['--background'] }
+  return { openAtLogin: !!enabled, args }
 }
 
 module.exports = { saveLastApplied, loadLastApplied, clearLastApplied, loginItemSettings, mergeLiveUpdate }

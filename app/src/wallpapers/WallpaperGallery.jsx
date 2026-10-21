@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDown, ArrowUp, Check, Folder, FolderOpen, ListMusic, ListPlus, Monitor, Pencil, Plus, Settings2, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, FolderOpen, ListMusic, ListPlus, Monitor, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   DropdownMenu,
@@ -9,22 +9,25 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { detectFileType, isSupportedWallpaperType, splitNewFiles, PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS, TYPE_META } from './registry'
+import { detectFileType, isSupportedWallpaperType, splitNewFiles, PLAYLIST_ICONS, TYPE_META } from './registry'
 import {
-  deletePlaylist,
+  addPlaylistMembers,
+  applyWallpaper,
   deleteWallpaper,
+  isPlaylistMember,
   loadWallpaperFile,
-  renamePlaylist,
   selectWallpaper,
-  setPlaylistIcon,
   updateWallpaperProperty,
   useWallpaperStore,
 } from './store'
 import DisplaySection from './inspector/sections/DisplaySection'
-import PlaylistEngineDialog from './playlist/PlaylistEngineDialog'
 import { playlistEngine } from './playlist/engine'
-import { createThumbnailFromUrl, deleteThumbnail, toFileUrl } from './thumbnail'
+import { createThumbnailFallback, createThumbnailFromUrl, deleteThumbnail, saveThumbnail, toFileUrl } from './thumbnail'
+import { setThumb } from './thumbCache'
+import { setLayoutState } from '../state/layout'
 import { buildFileRecord, galleryAdd, galleryGet, galleryList, galleryRemove, galleryRestoreFile } from './gallery'
+
+const DND_MIME = 'application/x-rex-wallpaper-paths'
 
 const SORT_OPTIONS = [
   { key: 'name', label: 'Name' },
@@ -37,48 +40,26 @@ export default function WallpaperGallery() {
   const [files, setFiles] = useState([])
   const [sort, setSort] = useState({ by: 'name', dir: 'asc' })
   const [displayOpen, setDisplayOpen] = useState(false)
-  const [playlistOpen, setPlaylistOpen] = useState(false)
-  const [folders, setFolders] = useState([])
-  const [editingId, setEditingId] = useState(null)
   const [editName, setEditName] = useState('')
   const [editingFile, setEditingFile] = useState(null)
   const [menu, setMenu] = useState(null)
   const [previewId, setPreviewId] = useState(null)
-  const [settingsTarget, setSettingsTarget] = useState(null)
   const thumbsRef = useRef(new Map())
   const [, forceThumbs] = useState(0)
   const fileInputRef = useRef(null)
   const cubeRef = useRef(null)
-  const playlistCubeRef = useRef(null)
-  const { wallpapers, playlists, selectedId } = useWallpaperStore()
+  const { wallpapers, playlists, selectedId, appliedId } = useWallpaperStore()
   const selectedWallpaper = wallpapers.find((w) => w.id === selectedId) ?? null
 
   const getThumb = useCallback((id) => thumbsRef.current.get(id) ?? null, [])
 
-  const startRename = (folder) => {
-    setEditingId(folder.id)
-    setEditName(folder.name)
-  }
-
-  const createFolder = () => {
-    const base = 'New folder'
-    let name = base
-    let i = 2
-    while (folders.some((f) => f.name === name)) name = `${base} (${i++})`
-    const id = crypto.randomUUID()
-    setFolders((prev) => [...prev, { id, name }])
-    setEditingId(id)
-    setEditName(name)
-  }
-
-  const commitRename = (target) => {
-    const name = editName.trim() || target.name
-    if (target.id.startsWith('pl-')) renamePlaylist(target.id, name)
-    else setFolders((prev) => prev.map((f) => (f.id === target.id ? { ...f, name } : f)))
-    setEditingId(null)
-  }
-
-  const cancelRename = () => setEditingId(null)
+  // The playlist dock renders outside the gallery, so posters are also kept
+  // in a shared cache keyed by the file's path.
+  const cacheThumb = useCallback((record) => {
+    const key = record?.path ?? record?.name
+    if (!key) return
+    setThumb(key, { dataUrl: record.thumbDataUrl ?? null, posterPath: record.thumbPath ?? null })
+  }, [])
 
   const startFileRename = (record) => {
     setEditingFile(record.id)
@@ -99,12 +80,18 @@ export default function WallpaperGallery() {
     setEditingFile(null)
   }
 
-  const addToPlaylist = async (record, playlistName) => {
+  // Adding a file to a playlist does two things: it joins the playlist's
+  // membership (keyed by path, so a file can be in several playlists) and it
+  // becomes that playlist's ACTIVE playlist for the file — the engine reads
+  // `playlist.currentPlaylist` to decide which rule set governs the file.
+  const addToPlaylist = async (record, playlist) => {
     setMenu(null)
+    const member = record.path ?? record.name
+    if (member) addPlaylistMembers(playlist.id, [member])
     let w = wallpapers.find((x) => x.info.source === record.name)
     let id = w?.id
     if (!id) id = await loadWallpaperFile(record.file, record.path ?? null)
-    if (id) updateWallpaperProperty(id, ['playlist', 'currentPlaylist'], playlistName)
+    if (id) updateWallpaperProperty(id, ['playlist', 'currentPlaylist'], playlist.name)
   }
 
   const removeFile = async (record) => {
@@ -215,7 +202,10 @@ export default function WallpaperGallery() {
         if (cached) r.thumbDataUrl = cached
       }
       for (const r of restored) {
-        if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
+        if (r.thumbDataUrl) {
+          thumbsRef.current.set(r.id, r.thumbDataUrl)
+          cacheThumb(r)
+        }
       }
       forceThumbs((n) => n + 1)
       setFiles((prev) => [...prev, ...restored])
@@ -224,14 +214,53 @@ export default function WallpaperGallery() {
       for (const r of restored) {
         if (cancelled || r.thumbDataUrl || !r.thumbUrl) continue
         try {
-          const thumb = await createThumbnailFromUrl(
+          let thumb = await createThumbnailFromUrl(
             r.thumbUrl,
             r.isVideo,
           )
+          let fallbackPath = null
+          if (!thumb && r.isVideo && r.path) {
+            // Software-composited Chromium has no HEVC decoder; the main
+            // process decodes one frame in a short-lived GPU worker instead.
+            const fallback = await createThumbnailFallback(r.path, 480)
+            if (fallback) {
+              thumb = fallback.dataUrl
+              fallbackPath = fallback.path
+            }
+          }
           if (cancelled || !thumb) continue
           r.thumbDataUrl = thumb
+          if (fallbackPath) r.thumbPath = fallbackPath
           thumbsRef.current.set(r.id, thumb)
+          cacheThumb(r)
           forceThumbs((n) => n + 1)
+          // Persist the freshly decoded poster. Older library entries (and
+          // entries whose cache file was cleaned) carry thumbnail: '' and
+          // would otherwise seek into the source video on EVERY launch --
+          // 4K decoders, tens of MB of VRAM each, plus slow startup.
+          if (r.path && r.libraryItem && !r.libraryItem.thumbnail) {
+            let thumbPath = fallbackPath
+            if (!thumbPath) {
+              try {
+                thumbPath = await saveThumbnail(r.id, thumb)
+              } catch {
+                thumbPath = null
+              }
+            }
+            if (thumbPath) {
+              try {
+                r.thumbPath = thumbPath
+                r.libraryItem.thumbnail = thumbPath
+                await galleryAdd(
+                  r.path,
+                  r.libraryItem.type ?? (r.isVideo ? 'video' : 'auto'),
+                  { thumbnail: thumbPath },
+                )
+              } catch {
+                // poster cache is best-effort
+              }
+            }
+          }
         } catch {
           // poster failed: the tile stays, just without an image
         }
@@ -252,18 +281,15 @@ export default function WallpaperGallery() {
   }, [])
 
   useEffect(() => {
-    if (!displayOpen && !playlistOpen) return
+    if (!displayOpen) return
     const onPointerDown = (e) => {
       const target = e.target
       if (target.closest?.('[data-radix-popper-content-wrapper]') || target.closest?.('.playlist-context-menu')) return
-      if (displayOpen && cubeRef.current && !cubeRef.current.contains(target)) setDisplayOpen(false)
-      if (playlistOpen && playlistCubeRef.current && !playlistCubeRef.current.contains(target)) {
-        setPlaylistOpen(false)
-      }
+      if (cubeRef.current && !cubeRef.current.contains(target)) setDisplayOpen(false)
     }
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [displayOpen, playlistOpen])
+  }, [displayOpen])
 
   useEffect(() => {
     if (!menu) return
@@ -319,7 +345,8 @@ export default function WallpaperGallery() {
       const first = allDupes[0]
       const existing = first && wallpapers.find((w) => w.info.source === first.name)
       if (existing) {
-        selectWallpaper(existing.id)
+        // Re-importing a known file is an explicit action: apply it.
+        applyWallpaper(existing.id)
         e.target.value = ''
         return
       }
@@ -331,7 +358,14 @@ export default function WallpaperGallery() {
     }
     const records = await Promise.all(freshList.map((f) => buildFileRecord(f, realPaths.get(f) ?? null)))
     for (const r of records) {
-      if (r.thumbDataUrl) thumbsRef.current.set(r.id, r.thumbDataUrl)
+      if (r.thumbDataUrl) {
+        thumbsRef.current.set(r.id, r.thumbDataUrl)
+        cacheThumb(r)
+      }
+      // These files are new to the library, so the Settings page's defaults
+      // apply to them (a file that was already in the library keeps its own
+      // values).
+      r.isNewImport = true
     }
     forceThumbs((n) => n + 1)
     setFiles((prev) => [...prev, ...records])
@@ -347,14 +381,35 @@ export default function WallpaperGallery() {
         galleryAdd(p, f.type.startsWith('video/') ? 'video' : 'auto', extra).catch(() => {})
       }
     })
-    await loadWallpaperFile(records[0].file, records[0].path ?? null)
+    const firstId = await loadWallpaperFile(records[0].file, records[0].path ?? null, { isNew: true })
+    if (firstId) applyWallpaper(firstId)
     e.target.value = ''
   }
 
-  const handleOpen = async (record) => {
+  // Single click previews (select), double click applies. Both paths share
+  // one in-flight load per tile so a fast double click cannot import the
+  // same file twice.
+  const pendingLoads = useRef(new Map())
+  const ensureLoaded = useCallback((record) => {
     const existing = wallpapers.find((w) => w.info.source === record.name)
-    if (existing) selectWallpaper(existing.id)
-    else await loadWallpaperFile(record.file, record.path ?? null)
+    if (existing) return Promise.resolve(existing.id)
+    const pending = pendingLoads.current.get(record.id)
+    if (pending) return pending
+    const p = loadWallpaperFile(record.file, record.path ?? null, { isNew: !!record.isNewImport }).finally(() => {
+      pendingLoads.current.delete(record.id)
+    })
+    pendingLoads.current.set(record.id, p)
+    return p
+  }, [wallpapers])
+
+  const handleSelect = async (record) => {
+    const id = await ensureLoaded(record)
+    if (id) selectWallpaper(id)
+  }
+
+  const handleApply = async (record) => {
+    const id = await ensureLoaded(record)
+    if (id) applyWallpaper(id)
   }
 
   const handleSort = (by) => {
@@ -376,7 +431,12 @@ export default function WallpaperGallery() {
   return (
     <div className="wallpaper-gallery">
       <div className="wallpaper-gallery-head">
-        <span className="wallpaper-gallery-title">Gallery</span>
+        <span className="wallpaper-gallery-title">
+          Gallery
+          <span className="wallpaper-gallery-count">
+            {files.length} {files.length === 1 ? 'wallpaper' : 'wallpapers'}
+          </span>
+        </span>
         <div className="wallpaper-gallery-actions">
           <div className="display-cube-wrap">
               <motion.div
@@ -416,7 +476,11 @@ export default function WallpaperGallery() {
                     className="display-cube-content"
                   >
                     {selectedWallpaper ? (
-                      <DisplaySection wallpaper={selectedWallpaper} expandable={false} />
+                      <DisplaySection
+                        wallpaper={selectedWallpaper}
+                        inline
+                        applied={selectedWallpaper.id === appliedId}
+                      />
                     ) : (
                       <p className="display-settings-hint">
                         Select a wallpaper in the gallery to edit its display settings.
@@ -470,137 +534,16 @@ export default function WallpaperGallery() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <div className="playlist-cube-wrap" style={{ marginLeft: 'auto' }}>
-          <motion.div
-            ref={playlistCubeRef}
-            className={`playlist-cube${playlistOpen ? ' open' : ''}`}
-            initial={false}
-            animate={{
-              width: playlistOpen ? 300 : 104,
-              height: playlistOpen ? 400 : 28,
-              borderRadius: playlistOpen ? 18 : 999,
-            }}
-            transition={{ type: 'spring', stiffness: 220, damping: 26, mass: 1 }}
-          >
-            <motion.div
-              className="playlist-cube-bg"
-              initial={false}
-              animate={{ opacity: playlistOpen ? 1 : 0 }}
-              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-            />
-            <div className="playlist-cube-head">
-              <div className="playlist-cube-tools">
-                <button
-                  type="button"
-                  className="playlist-cube-new"
-                  aria-label="New folder"
-                  onClick={createFolder}
-                >
-                  <Plus size={13} />
-                </button>
-                <button
-                  type="button"
-                  className="playlist-cube-new"
-                  aria-label="Playlist settings"
-                  onClick={() => setSettingsTarget('active')}
-                >
-                  <Settings2 size={13} />
-                </button>
-              </div>
-              <button
-                type="button"
-                className="playlist-cube-toggle"
-                aria-label="Toggle playlist"
-                onClick={() => setPlaylistOpen((v) => !v)}
-              >
-                <span className="playlist-cube-title">
-                  <ListMusic size={14} />
-                  <span>Playlist</span>
-                </span>
-              </button>
-            </div>
-            {playlistOpen ? (
-              <motion.div
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-                className="playlist-cube-content"
-              >
-                {folders.map((folder) =>
-                  editingId === folder.id ? (
-                    <input
-                      key={folder.id}
-                      autoFocus
-                      className="playlist-cube-folder-input"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      onBlur={() => commitRename(folder)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') commitRename(folder)
-                        if (e.key === 'Escape') cancelRename()
-                      }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      key={folder.id}
-                      className="playlist-cube-item"
-                      onClick={() => startRename(folder)}
-                    >
-                      <Folder size={13} />
-                      <span>{folder.name}</span>
-                    </button>
-                  ),
-                )}
-                {playlists.map((playlist) => {
-                  const Icon = PLAYLIST_ICONS[playlist.icon] ?? ListMusic
-                  const selected = selectedWallpaper?.playlist.currentPlaylist === playlist.name
-                  return editingId === playlist.id ? (
-                    <input
-                      key={playlist.id}
-                      autoFocus
-                      className="playlist-cube-folder-input"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      onBlur={() => commitRename(playlist)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') commitRename(playlist)
-                        if (e.key === 'Escape') cancelRename()
-                      }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      key={playlist.id}
-                      className={`playlist-cube-item${selected ? ' selected' : ''}`}
-                      disabled={!selectedWallpaper}
-                      onClick={() => {
-                        updateWallpaperProperty(selectedWallpaper.id, ['playlist', 'currentPlaylist'], playlist.name)
-                      }}
-                      onContextMenu={(e) => {
-                        e.preventDefault()
-                        setMenu({
-                          x: Math.min(e.clientX, window.innerWidth - 196),
-                          y: Math.min(e.clientY, window.innerHeight - 250),
-                          playlist,
-                        })
-                      }}
-                    >
-                      <Icon size={13} />
-                      <span>{playlist.name}</span>
-                      {selected ? <Check size={13} /> : null}
-                    </button>
-                  )
-                })}
-                {!selectedWallpaper ? (
-                  <p className="playlist-cube-hint">Select a wallpaper first.</p>
-                ) : null}
-              </motion.div>
-            ) : null}
-          </motion.div>
-        </div>
+        <button
+          type="button"
+          className="new-pill toolbar-pill"
+          style={{ marginLeft: 'auto' }}
+          aria-label="Open playlist panel"
+          onClick={() => setLayoutState({ panelOpen: true })}
+        >
+          <ListMusic size={14} />
+          <span>Playlist</span>
+        </button>
       </div>
 
       <div className="gallery-grid">
@@ -617,16 +560,29 @@ export default function WallpaperGallery() {
                 type="button"
                 key={record.id}
                 layout
+                draggable={supported}
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.92 }}
                 transition={{ type: 'spring', stiffness: 320, damping: 28 }}
                 className={`gallery-tile${selected ? ' selected' : ''}`}
-                title={supported ? `${name} — click to load` : `${name} — ${meta.label} wallpapers are coming soon`}
+                title={supported ? `${name} — double-click to apply` : `${name} — ${meta.label} wallpapers are coming soon`}
                 style={{ '--file-gradient': meta.gradient }}
+                onDragStart={(e) => {
+                  // The playlist dock is the drop target. Membership is keyed by
+                  // the file's path; without a bridge (browser dev) the name is
+                  // the only stable identity available.
+                  const member = record.path ?? record.name
+                  if (!member) return
+                  e.dataTransfer.setData(DND_MIME, JSON.stringify([member]))
+                  e.dataTransfer.effectAllowed = 'copy'
+                }}
                 onClick={() => {
-                  if (supported) handleOpen(record)
+                  if (supported) handleSelect(record)
                   else setPreviewId(record.id)
+                }}
+                onDoubleClick={() => {
+                  if (supported) handleApply(record)
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault()
@@ -668,6 +624,7 @@ export default function WallpaperGallery() {
                   <span className="gallery-tile-rename-wrap">
                     <input
                       autoFocus
+                      draggable={false}
                       className="gallery-tile-rename"
                       value={editName}
                       onChange={(e) => setEditName(e.target.value)}
@@ -678,6 +635,7 @@ export default function WallpaperGallery() {
                       }}
                       onClick={(e) => e.stopPropagation()}
                       onPointerDown={(e) => e.stopPropagation()}
+                      onDragStart={(e) => e.preventDefault()}
                     />
                   </span>
                 ) : (
@@ -710,142 +668,78 @@ export default function WallpaperGallery() {
             e.stopPropagation()
           }}
         >
-          {menu.playlist ? (
-            <>
-              <button
-                type="button"
-                className="playlist-context-item"
-                onClick={() => {
-                  setSettingsTarget(menu.playlist.id)
-                  setMenu(null)
-                }}
-              >
-                <Settings2 size={13} />
-                <span>Settings</span>
-              </button>
-              <button
-                type="button"
-                className="playlist-context-item"
-                onClick={() => {
-                  startRename(menu.playlist)
-                  setMenu(null)
-                }}
-              >
-                <Pencil size={13} />
-                <span>Rename</span>
-              </button>
-              <div className="playlist-context-label">Icon</div>
-              <div className="playlist-context-icons">
-                {PLAYLIST_ICON_CHOICES.map((key) => {
-                  const Icon = PLAYLIST_ICONS[key]
-                  return (
-                    <button
-                      type="button"
-                      key={key}
-                      className={`playlist-context-icon${menu.playlist.icon === key ? ' active' : ''}`}
-                      aria-label={key}
-                      onClick={() => {
-                        setPlaylistIcon(menu.playlist.id, key)
-                        setMenu(null)
-                      }}
-                    >
-                      <Icon size={14} />
-                    </button>
-                  )
-                })}
-              </div>
-              <div className="playlist-context-sep" />
-              <button
-                type="button"
-                className="playlist-context-item danger"
-                onClick={() => {
-                  deletePlaylist(menu.playlist.id)
-                  setMenu(null)
-                }}
-              >
-                <Trash2 size={13} />
-                <span>Delete</span>
-              </button>
-            </>
-          ) : (
-            <>
+          <div
+            className="playlist-context-addwrap"
+            onMouseEnter={() => setMenu((m) => (m ? { ...m, addOpen: true } : m))}
+            onMouseLeave={() => setMenu((m) => (m ? { ...m, addOpen: false } : m))}
+          >
+            <button
+              type="button"
+              className={`playlist-context-item${menu.addOpen ? ' open' : ''}`}
+              onClick={() => setMenu((m) => (m ? { ...m, addOpen: !m.addOpen } : m))}
+            >
+              <ListPlus size={13} />
+              <span>Add to playlist</span>
+            </button>
+            {menu.addOpen ? (
               <div
-                className="playlist-context-addwrap"
-                onMouseEnter={() => setMenu((m) => (m ? { ...m, addOpen: true } : m))}
-                onMouseLeave={() => setMenu((m) => (m ? { ...m, addOpen: false } : m))}
+                className="playlist-context-submenu"
+                style={{ right: menu.x > window.innerWidth - 380 ? '100%' : 'auto' }}
               >
-                <button
-                  type="button"
-                  className={`playlist-context-item${menu.addOpen ? ' open' : ''}`}
-                  onClick={() => setMenu((m) => (m ? { ...m, addOpen: !m.addOpen } : m))}
-                >
-                  <ListPlus size={13} />
-                  <span>Add to playlist</span>
-                </button>
-                {menu.addOpen ? (
-                  <div
-                    className="playlist-context-submenu"
-                    style={{ right: menu.x > window.innerWidth - 380 ? '100%' : 'auto' }}
-                  >
-                    {playlists.map((pl) => {
-                      const Icon = PLAYLIST_ICONS[pl.icon] ?? ListMusic
-                      const w = wallpapers.find((x) => x.info.source === menu.record.name)
-                      return (
-                        <button
-                          type="button"
-                          key={pl.id}
-                          className="playlist-context-item"
-                          onClick={() => addToPlaylist(menu.record, pl.name)}
-                        >
-                          <Icon size={13} />
-                          <span>{pl.name}</span>
-                          {w?.playlist.currentPlaylist === pl.name ? <Check size={13} /> : null}
-                        </button>
-                      )
-                    })}
-                    {playlists.length === 0 ? (
-                      <span className="playlist-context-label">No playlists</span>
-                    ) : null}
-                  </div>
+                {playlists
+                  .filter((pl) => pl.name !== 'None')
+                  .map((pl) => {
+                    const Icon = PLAYLIST_ICONS[pl.icon] ?? ListMusic
+                    const member = menu.record.path ?? menu.record.name
+                    const isMember = isPlaylistMember(pl.id, member)
+                    return (
+                      <button
+                        type="button"
+                        key={pl.id}
+                        className="playlist-context-item"
+                        onClick={() => addToPlaylist(menu.record, pl)}
+                      >
+                        <Icon size={13} />
+                        <span>{pl.name}</span>
+                        {isMember ? <Check size={13} /> : null}
+                      </button>
+                    )
+                  })}
+                {playlists.filter((pl) => pl.name !== 'None').length === 0 ? (
+                  <span className="playlist-context-label">No playlists</span>
                 ) : null}
               </div>
-              <div className="playlist-context-sep" />
-              <button
-                type="button"
-                className="playlist-context-item"
-                onClick={() => startFileRename(menu.record)}
-              >
-                <Pencil size={13} />
-                <span>Rename</span>
-              </button>
-              <button
-                type="button"
-                className="playlist-context-item danger"
-                onClick={() => removeFile(menu.record)}
-              >
-                <Trash2 size={13} />
-                <span>Remove</span>
-              </button>
-              <div className="playlist-context-sep" />
-              <button
-                type="button"
-                className="playlist-context-item"
-                onClick={() => openInExplorer(menu.record)}
-              >
-                <FolderOpen size={13} />
-                <span>Open in Explorer</span>
-              </button>
-            </>
-          )}
+            ) : null}
+          </div>
+          <div className="playlist-context-sep" />
+          <button
+            type="button"
+            className="playlist-context-item"
+            onClick={() => startFileRename(menu.record)}
+          >
+            <Pencil size={13} />
+            <span>Rename</span>
+          </button>
+          <button
+            type="button"
+            className="playlist-context-item danger"
+            onClick={() => removeFile(menu.record)}
+          >
+            <Trash2 size={13} />
+            <span>Remove</span>
+          </button>
+          <div className="playlist-context-sep" />
+          <button
+            type="button"
+            className="playlist-context-item"
+            onClick={() => openInExplorer(menu.record)}
+          >
+            <FolderOpen size={13} />
+            <span>Open in Explorer</span>
+          </button>
         </div>
       ) : null}
 
-      {settingsTarget ? (
-        <PlaylistEngineDialog
-          initialPlaylistId={settingsTarget === 'active' ? null : settingsTarget}
-          onClose={() => setSettingsTarget(null)}
-        />
-      ) : null}
     </div>
   )
 }

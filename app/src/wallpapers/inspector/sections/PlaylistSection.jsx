@@ -1,59 +1,72 @@
-import { ListMusic } from 'lucide-react'
+import { ListPlus, Music } from 'lucide-react'
 import PropertySection from '@/components/properties/PropertySection'
-import PropertyDropdown from '@/components/properties/PropertyDropdown'
-import PropertySlider from '@/components/properties/PropertySlider'
-import PropertyToggle from '@/components/properties/PropertyToggle'
-import { PLAYLIST_ORDERS, TRANSITIONS } from '../../registry'
-import { updateWallpaperProperty, useWallpaperStore } from '../../store'
+import PropertyButton from '@/components/properties/PropertyButton'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
+  addPlaylistMembers,
+  isPlaylistMember,
+  updateWallpaperProperty,
+  useWallpaperStore,
+} from '../../store'
 
+// Playlist membership belongs here (it is a per-wallpaper decision) while the
+// destructive actions stay in the gallery tile menu, which owns tiles and the
+// persisted library entry. Delete/duplicate in the old inspector only mutated
+// the store, so the tile and library entry survived — silent no-ops.
 export default function PlaylistSection({ wallpaper }) {
   const { playlists } = useWallpaperStore()
-  const { playlist } = wallpaper
-  const set = (key) => (value) => updateWallpaperProperty(wallpaper.id, ['playlist', key], value)
+  const filePath = typeof wallpaper?.filePath === 'string' ? wallpaper.filePath : ''
+  const targets = playlists.filter((playlist) => !playlist.virtual && playlist.name !== 'None')
+
+  const addTo = (playlist) => {
+    if (!filePath) return
+    addPlaylistMembers(playlist.id, [filePath])
+    // Same rule as the gallery's "add to playlist": joining a playlist also
+    // makes it the file's governing playlist for the engine.
+    updateWallpaperProperty(wallpaper.id, ['playlist', 'currentPlaylist'], playlist.name)
+  }
 
   return (
-    <PropertySection title="Playlist" icon={<ListMusic size={15} />}>
-      <PropertyDropdown
-        label="Current Playlist"
-        value={playlist.currentPlaylist}
-        options={playlists.map((p) => p.name)}
-        onChange={set('currentPlaylist')}
-      />
-      <PropertyDropdown
-        label="Wallpaper Order"
-        value={playlist.order}
-        options={PLAYLIST_ORDERS}
-        onChange={set('order')}
-      />
-      <PropertyToggle label="Shuffle" checked={playlist.shuffle} onChange={set('shuffle')} />
-      <PropertyToggle label="Repeat" checked={playlist.repeat} onChange={set('repeat')} />
-      <PropertyDropdown
-        label="Transition"
-        value={playlist.transition}
-        options={TRANSITIONS}
-        onChange={set('transition')}
-      />
-      <PropertySlider
-        label="Transition Duration"
-        value={playlist.transitionDuration}
-        onChange={set('transitionDuration')}
-        min={0}
-        max={10}
-        step={0.5}
-        suffix="s"
-      />
-      <PropertyToggle label="Auto Change" checked={playlist.autoChange} onChange={set('autoChange')} />
-      <PropertySlider
-        label="Change Every"
-        value={playlist.changeEvery}
-        onChange={set('changeEvery')}
-        min={1}
-        max={120}
-        suffix="m"
-      />
-      <PropertyToggle label="Idle Trigger" checked={playlist.idleTrigger} onChange={set('idleTrigger')} />
-      <PropertyToggle label="Battery Trigger" checked={playlist.batteryTrigger} onChange={set('batteryTrigger')} />
-      <PropertyToggle label="Weather Trigger" checked={playlist.weatherTrigger} onChange={set('weatherTrigger')} />
+    <PropertySection title="Playlist" icon={<Music size={15} />} defaultOpen={false}>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <PropertyButton disabled={!filePath || targets.length === 0}>
+            <ListPlus size={14} /> Add to playlist
+          </PropertyButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-52">
+          <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+            Playlists
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {targets.map((playlist) => {
+            const member = isPlaylistMember(playlist.id, filePath)
+            return (
+              <DropdownMenuItem
+                key={playlist.id}
+                disabled={!filePath || member}
+                onSelect={() => addTo(playlist)}
+              >
+                <span className="truncate">{playlist.name}</span>
+                {member ? (
+                  <span className="ml-auto text-[10px] text-muted-foreground">Added</span>
+                ) : null}
+              </DropdownMenuItem>
+            )
+          })}
+          {targets.length === 0 ? <DropdownMenuItem disabled>No playlists yet</DropdownMenuItem> : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {!filePath ? (
+        <p className="insp-hint">This wallpaper has no file on disk, so it cannot join a playlist.</p>
+      ) : null}
     </PropertySection>
   )
 }

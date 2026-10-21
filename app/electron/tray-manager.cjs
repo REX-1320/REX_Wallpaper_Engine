@@ -42,15 +42,22 @@ class TrayManager {
     this.tray.on('click', () => this.showWindow())
   }
 
-  showWindow() {
+  showWindow(navigateTo = null) {
     if (this.onShowWindow) {
-      this.onShowWindow()
-    } else {
-      const win = this.getWindow()
-      if (!win) return
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
+      this.onShowWindow(navigateTo)
+      return
+    }
+    const win = this.getWindow()
+    if (!win) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    if (navigateTo) {
+      const send = () => {
+        if (!win.isDestroyed()) win.webContents.send('navigate', navigateTo)
+      }
+      if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send)
+      else send()
     }
   }
 
@@ -91,12 +98,7 @@ class TrayManager {
       { type: 'separator' },
       {
         label: 'Settings',
-        click: () => {
-          const win = this.getWindow()
-          if (!win) return
-          this.showWindow()
-          win.webContents.send('navigate', 'Settings')
-        },
+        click: () => this.showWindow('Settings'),
       },
       { type: 'separator' },
       {

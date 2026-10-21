@@ -64,8 +64,11 @@ class WallpaperRuntime extends EventEmitter {
       // crash report read manager.pid afterwards and always got null
       // (audit 5.10 #13).
       const pid = proc.pid ?? null
+      // Deliberate idle stops (image applied) must not be reported/replayed
+      // as crashes — the supervisor reads this flag (see supervisor.cjs).
+      const intentional = proc.__rexIntentionalStop === true
       if (this.proc === proc) this._teardown(proc, `runtime exited (${code})`)
-      this.emit('exit', code, { pid })
+      this.emit('exit', code, { pid, intentional })
     })
 
     return proc
@@ -215,11 +218,17 @@ class WallpaperRuntime extends EventEmitter {
     return this.initPromise
   }
 
-  stop() {
+  stop(opts = {}) {
     const proc = this.proc
     this.proc = null
     this.inited = false
     if (!proc) return
+
+    // Tag the process for the 'exit' handler. A deliberate stop is an idle
+    // reclaim (static image applied), not a crash: the supervisor must not
+    // write a crash report or replay the wallpaper — a replay would spawn a
+    // new runtime and undo the reclaim immediately.
+    proc.__rexIntentionalStop = opts.intentional === true
 
     // Graceful shutdown: write SHUTDOWN directly (NOT via this.send(),
     // which would re-spawn a fresh process) and close stdin. The runtime

@@ -1,4 +1,4 @@
-﻿const { app, BrowserWindow, shell, ipcMain } = require('electron')
+﻿const { app, BrowserWindow, shell, ipcMain, screen } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { WallpaperRuntime } = require('./wallpaperRuntime.cjs')
@@ -8,6 +8,7 @@ const { AppStateManager } = require('./app-state-manager.cjs')
 const { WallpaperLibrary } = require('./wallpaper-library.cjs')
 const startup = require('./startup.cjs')
 const { isPathInside } = require('./path-guard.cjs')
+const { resolveWindowBounds } = require('./window-bounds.cjs')
 const { generatePoster } = require('./poster-worker.cjs')
 const { probeMediaFile } = require('./mediaInfo.cjs')
 
@@ -56,11 +57,25 @@ const closingWindows = new WeakSet()
 // Dev-aware login-item registration: packaged apps register the exe
 // directly, but dev Electron needs the app folder as argv[1] or Windows
 // boots a default Electron window instead of REX.
+// "Start minimised" (the default) adds --background: the login item then
+// starts the tray and the wallpaper without opening the window.
 function applyLoginItem(enabled) {
+  const startMinimized = appState?.get('startup.startMinimized') !== false
   const settings = app.isPackaged
-    ? startup.loginItemSettings(enabled)
-    : startup.loginItemSettings(enabled, app.getAppPath())
+    ? startup.loginItemSettings(enabled, undefined, { startMinimized })
+    : startup.loginItemSettings(enabled, app.getAppPath(), { startMinimized })
   app.setLoginItemSettings(settings)
+}
+
+// The engine's INIT knobs the app owns. maxFps is the presentation cap
+// (0 = uncapped) and hardwareAcceleration is the HW-decode switch; both are
+// read when the runtime process starts.
+function engineInitOptions() {
+  const maxFps = Number(appState?.get('engine.maxFps') ?? 0)
+  return {
+    maxFps: Number.isFinite(maxFps) ? Math.min(240, Math.max(0, maxFps)) : 0,
+    hardwareAcceleration: appState?.get('engine.hardwareAcceleration') !== false,
+  }
 }
 
 app.on('second-instance', () => {
@@ -156,7 +171,8 @@ async function reapplyLastWallpaper() {
     if (kind === 'image') {
       await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
     } else {
-      await runtime.init(params.fps ?? 60, true)
+      const init = engineInitOptions()
+      await runtime.init(init.maxFps, init.hardwareAcceleration)
       await runtime.send('LOAD', {
         path: params.path,
         type: 'video',
@@ -267,7 +283,8 @@ async function applyStoredWallpaper(entry) {
       // of building a 4K D3D12 engine for it.
       await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
     } else {
-      await runtime.init(params.fps ?? 0, true)
+      const init = engineInitOptions()
+      await runtime.init(init.maxFps, init.hardwareAcceleration)
       await runtime.send('LOAD', {
         path: params.path,
         type: 'video',
@@ -318,9 +335,20 @@ async function applyStoredWallpaper(entry) {
 }
 
 function createWindow() {
-  const win = new BrowserWindow({
+  // Remember where the user put the window -- but only restore those bounds
+  // if they are still on a display (a monitor may have been unplugged).
+  const savedBounds = appState?.get('window') ?? null
+  const restored = resolveWindowBounds(savedBounds, screen.getAllDisplays(), {
     width: 1280,
     height: 800,
+    minWidth: 960,
+    minHeight: 640,
+  })
+
+  const win = new BrowserWindow({
+    width: restored?.width ?? 1280,
+    height: restored?.height ?? 800,
+    ...(restored ? { x: restored.x, y: restored.y } : {}),
     minWidth: 960,
     minHeight: 640,
     title: 'REX',
@@ -362,6 +390,27 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
 
+  // Remember the window's size and position. Debounced: a drag fires a
+  // stream of move/resize events, and each one would otherwise be a disk
+  // write. The maximized state is deliberately NOT stored -- restoring a
+  // maximized window would open the app full-screen unasked.
+  let boundsTimer = null
+  const rememberBounds = () => {
+    if (appState?.get('ui.rememberWindowBounds') === false) return
+    if (win.isDestroyed() || win.isMinimized() || win.isMaximized() || win.isFullScreen()) return
+    if (boundsTimer) clearTimeout(boundsTimer)
+    boundsTimer = setTimeout(() => {
+      boundsTimer = null
+      try {
+        const b = win.getNormalBounds()
+        appState?.set('window', { x: b.x, y: b.y, width: b.width, height: b.height })
+      } catch {}
+    }, 400)
+    if (boundsTimer.unref) boundsTimer.unref()
+  }
+  win.on('resize', rememberBounds)
+  win.on('move', rememberBounds)
+
   win.on('maximize', () => {
     winDbg('event=maximize nativeIsMaximized=', win.isMaximized(), 'bounds=', JSON.stringify(win.getBounds()))
     win.webContents.send('window:maximized', true)
@@ -375,10 +424,18 @@ function createWindow() {
   // runtime is a separate process that keeps the wallpaper playing. Destroying
   // (rather than hiding) is what actually releases the renderer and its GPU
   // allocations; a hidden window otherwise keeps both for the app's lifetime.
+  //
+  // "Quit REX on close" is the user's choice (tray.closeToTray === false);
+  // the default keeps the app alive in the tray.
   win.on('close', (event) => {
     if (isQuitting) return
     event.preventDefault()
     closingWindows.add(win)
+    if (appState?.get('tray.closeToTray') === false) {
+      logLine('window: close -> quit (tray.closeToTray = false)')
+      quitApp('window-close')
+      return
+    }
     win.hide()
     logLine('window: destroying (close)')
     // destroy() skips beforeunload/unload, so essential main-process state is
@@ -603,7 +660,8 @@ app.whenReady().then(() => {
     }
 
     try {
-      await runtime.init(fps ?? 0, true)
+      const init = engineInitOptions()
+      await runtime.init(init.maxFps, init.hardwareAcceleration)
       await runtime.send('LOAD', {
         path: filePath,
         type: 'video',
@@ -744,6 +802,29 @@ app.whenReady().then(() => {
   ipcMain.handle('wallpaper:pause', () => pauseWallpaper())
   ipcMain.handle('wallpaper:resume', () => resumeWallpaper())
 
+  // The engine's own telemetry, for the Settings page. Never spawn a runtime
+  // to answer a question: the panel must not start the engine (and its VRAM)
+  // just because the user opened the page.
+  ipcMain.handle('wallpaper:status', async () => {
+    if (!runtime.proc) return { available: false, reason: 'runtime-stopped' }
+    try {
+      const data = await runtime.send('GET_STATUS', {}, 5000)
+      if (!data) return { available: false, reason: 'no-answer' }
+      // What the engine can apply right now (the live adapter's property
+      // list). Read from the same in-memory answer - it must not spawn a
+      // runtime, and the runtime is already there.
+      let capabilities = null
+      try {
+        const caps = await runtime.send('GET_CAPABILITIES', {}, 5000)
+        capabilities = caps?.properties ?? null
+      } catch {}
+      return { available: true, data, capabilities }
+    } catch (err) {
+      logLine('wallpaper:status ERROR', err.message)
+      return { available: false, reason: 'error' }
+    }
+  })
+
   // Renderer liveness heartbeat for the supervisor watchdog (audit 5.10 #9):
   // preload sends one every 2 s; only a visible-but-stale renderer is treated
   // as hung (Supervisor._rendererTick).
@@ -841,6 +922,82 @@ app.whenReady().then(() => {
     }
   })
 
+  // ─── App-level settings (the Settings page) ───────────────────────────────
+
+  // The launch-at-login item. The OS is the source of truth here (the tray
+  // checkbox reads the same state), so the page and the tray can never
+  // disagree.
+  ipcMain.handle('app:login-item', (event, payload = {}) => {
+    try {
+      const enabled = typeof payload?.enabled === 'boolean' ? payload.enabled : null
+      if (enabled != null) {
+        applyLoginItem(enabled)
+        logLine('settings: login item', enabled ? 'enabled' : 'disabled')
+      }
+      let openAtLogin = false
+      try { openAtLogin = app.getLoginItemSettings().openAtLogin } catch {}
+      return { enabled: openAtLogin, startMinimized: appState?.get('startup.startMinimized') !== false }
+    } catch (err) {
+      logLine('app:login-item ERROR', err.message)
+      return { enabled: false, startMinimized: true }
+    }
+  })
+
+  // Where REX keeps things, so the page can show the real paths and open
+  // them. The poster cache and the log folder are the two a user actually
+  // needs when something looks wrong.
+  ipcMain.handle('app:paths', () => {
+    const tempDir = app.getPath('temp')
+    return {
+      library: path.join(app.getPath('userData'), 'wallpaper-library.json'),
+      posters: path.join(app.getPath('userData'), 'thumbnails'),
+      logs: path.join(tempDir, 'REX'),
+      crashes: path.join(tempDir, 'REX', 'crashes'),
+      appLog: path.join(tempDir, 'rex-app.log'),
+    }
+  })
+
+  // Open one of REX's own folders in Explorer. Guarded: only paths the app
+  // itself reported may be opened.
+  ipcMain.handle('app:open-path', async (event, { target } = {}) => {
+    const dirs = {
+      library: path.dirname(path.join(app.getPath('userData'), 'wallpaper-library.json')),
+      posters: path.join(app.getPath('userData'), 'thumbnails'),
+      logs: path.join(app.getPath('temp'), 'REX'),
+      crashes: path.join(app.getPath('temp'), 'REX', 'crashes'),
+    }
+    const dir = dirs[target]
+    if (!dir) return { ok: false, reason: 'unknown-target' }
+    try {
+      await shell.openPath(dir)
+      return { ok: true }
+    } catch (err) {
+      logLine('app:open-path ERROR', err.message)
+      return { ok: false, reason: err.message }
+    }
+  })
+
+  // Clear the cached poster images. The library itself is untouched - only
+  // the derived thumbnails go, and they are re-created on the next visit.
+  ipcMain.handle('app:clear-posters', () => {
+    const dir = path.join(app.getPath('userData'), 'thumbnails')
+    try {
+      if (!fs.existsSync(dir)) return { ok: true, removed: 0 }
+      let removed = 0
+      for (const name of fs.readdirSync(dir)) {
+        const file = path.join(dir, name)
+        if (!fs.statSync(file).isFile()) continue
+        fs.rmSync(file, { force: true })
+        removed += 1
+      }
+      logLine('settings: cleared poster cache', removed + ' file(s)')
+      return { ok: true, removed }
+    } catch (err) {
+      logLine('app:clear-posters ERROR', err.message)
+      return { ok: false, reason: err.message }
+    }
+  })
+
   // ─── Custom title bar (traffic lights) ────────────────────────────────────
   ipcMain.on('window:minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
@@ -881,6 +1038,18 @@ app.whenReady().then(() => {
   // The window is created on demand (normal launch or tray open), not here:
   // --background starts tray + native services only.
 
+  // Persisted UI state + gallery library (P0.3). The library self-registers
+  // its gallery.* IPC on construct; app-state needs the two handlers below.
+  //
+  // Created BEFORE the tray and the boot re-apply: both read settings from it
+  // (the login item's start-minimised flag, the engine's frame cap, whether
+  // the last wallpaper is restored at boot).
+  appState = new AppStateManager()
+  _galleryLib = new WallpaperLibrary()
+  // The real build version, for the Settings page's About section.
+  try { appState.set('version', app.getVersion()) } catch {}
+  logLine('persistence: app-state + gallery library ready')
+
   trayManager = new TrayManager({
     getWindow: () => mainWindow,
     onShowWindow: (navigateTo) => showMainWindow(navigateTo),
@@ -907,20 +1076,20 @@ app.whenReady().then(() => {
   logLine('tray: created')
 
   // ─── Boot re-apply ────────────────────────────────────────────────────────
-  const bootEntry = startup.loadLastApplied(app.getPath('userData'))
+  // "Restore the last wallpaper at launch" is a user setting; when it is off
+  // the desktop is left exactly as it was.
+  const bootEntry = appState.get('startup.restoreWallpaper') === false
+    ? null
+    : startup.loadLastApplied(app.getPath('userData'))
   if (bootEntry) {
     applyStoredWallpaper(bootEntry).then((ok) => {
       if (!ok) logLine('startup: re-apply failed, desktop left as-is')
     })
+  } else if (appState.get('startup.restoreWallpaper') === false) {
+    logLine('startup: restore-at-launch is off, desktop left as-is')
   } else {
     logLine('startup: no persisted wallpaper, nothing to re-apply')
   }
-
-  // Persisted UI state + gallery library (P0.3). The library self-registers
-  // its gallery.* IPC on construct; app-state needs the two handlers below.
-  appState = new AppStateManager()
-  _galleryLib = new WallpaperLibrary()
-  logLine('persistence: app-state + gallery library ready')
 
   // ─── Launch at login ──────────────────────────────────────────────────────
   // Default-enable on FIRST RUN only and remember that we did; later launches

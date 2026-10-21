@@ -1,0 +1,315 @@
+/* The bottom dock (VS Code's terminal panel). The same material as the nav
+   column it sits under: warm obsidian, a champagne glow at the top-left, a
+   lit top edge.
+   No backdrop-filter: a live blur over a full-width strip is a per-frame
+   GPU pass competing with the wallpaper's own D3D12 present (the same
+   lesson as Glass_effect.css). The material is painted with gradients
+   instead — rasterised once, and it costs nothing per frame. */
+.dock{
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow: hidden;
+  /* Rounded like the gallery panels (18px) — the dock floats above the
+     window's bottom edge, so all four corners are rounded. */
+  border-radius: 22px;
+  border: 1px solid var(--stroke-default);
+  /* Steel Obsidian - #5E5E5E (rgb 94, 94, 94). The dock's own ground, so
+     the playlist panel reads as steel while the rest of the shell stays
+     warm obsidian. Same 92 % translucency as --surface-shell, so the
+     wallpaper still glows through the panel. */
+  --dock-surface: var(--surface-dock);
+  background: var(--dock-surface);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.42),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(249, 245, 238, 0.08);
+  color: var(--text-primary);
+  /* One inset for the whole panel: the header's items and the strip's cubes
+     share it, so everything lines up on the same edges. */
+  --dock-pad: 10px;
+}
+
+.dock-resize {
+  flex: 0 0 6px;
+  margin-bottom: -2px;
+}
+
+/* The hairline follows the dock's rounded corners. */
+.dock-resize::after {
+  left: 18px;
+  right: 18px;
+}
+
+.dock-header {
+  flex: 0 0 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--dock-pad);
+  min-width: 0;
+  /* The header owns the whole strip while minimized — nothing may push it
+     out of the panel. */
+  overflow: hidden;
+}
+
+.dock-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 4px 12px 4px 5px;
+  border: 1px solid var(--stroke-default);
+  border-radius: 999px;
+  background: var(--fill-rest);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.dock-picker:hover {
+  background: var(--fill-hover);
+  border-color: var(--stroke-strong);
+}
+
+/* The playlist's icon in a champagne chip — the dock's one piece of jewellery. */
+.dock-picker-icon{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 8px;
+  background: var(--fill-strong);
+  border: 1px solid var(--stroke-default);
+  color: var(--text-secondary);
+}
+
+.dock-picker-name{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.dock-rename {
+  max-width: 260px;
+  padding: 4px 10px;
+  border: 1px solid var(--gold-border);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.dock-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dock-action:hover:not(:disabled) {
+  background: var(--fill-strong);
+  color: var(--text-primary);
+}
+
+.dock-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The config entry: a grey word, like the rest of the dock's quiet chrome. */
+.dock-config {
+  padding: 4px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dock-config:hover:not(:disabled) {
+  background: var(--fill-hover);
+  color: var(--text-secondary);
+}
+
+.dock-config:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* "applied": this playlist is the one governing the desktop right now, so
+   the engine is rotating through it. Gold, like the playing cube in the
+   strip - both mean "this is what is running". */
+.dock-config-applied,
+.dock-config-applied:hover:not(:disabled) {
+  background: transparent;
+  color: var(--gold-border-strong);
+  cursor: default;
+  opacity: 1;
+}
+
+.dock-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dock-item-active {
+  font-weight: 700;
+}
+
+.dock-item-count {
+  margin-left: auto;
+  padding-left: 12px;
+  font-size: 10px;
+  color: var(--text-disabled);
+}
+
+/* The strip: the playlist's files, in a horizontal run. */
+
+/* The strip: the playlist's files as a grid of small cubes — thumbnails
+   only, like the gallery's tiles. The name lives in the tooltip. The cubes
+   flow into rows as the playlist grows, and the strip scrolls vertically. */
+.dock-strip {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 130px);
+  justify-content: start;
+  align-content: start;
+  gap: 10px;
+  /* The same inset as the header, so the cubes line up with the playlist
+     picker instead of hanging 8px to its left. */
+  padding: 8px var(--dock-pad) 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  scrollbar-color: transparent transparent;
+}
+
+.dock-strip.drag-over {
+  outline: 1px dashed var(--gold-border-strong);
+  outline-offset: -8px;
+  background: var(--gold-subtle);
+}
+
+.dock-strip-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-disabled);
+}
+
+/* The strip: the playlist's files as a run of small cubes — thumbnails only,
+   like the gallery's tiles. The name lives in the tooltip. */
+.dock-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 130px;
+  height: 130px;
+  padding: 0;
+  border: 1px solid var(--stroke-default);
+  border-radius: 14px;
+  background: var(--fill-rest);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+}
+
+.dock-chip:hover{
+  background: var(--fill-hover);
+  border-color: var(--stroke-strong);
+  transform: translateY(-1px);
+}
+
+.dock-chip.dragging {
+  opacity: 0.4;
+}
+
+.dock-chip.drop-target {
+  border-color: var(--gold-border-strong);
+  box-shadow: 0 0 0 2px var(--gold-border);
+}
+
+/* The file that is on the desktop right now. A solid gold ring, so it is
+   still readable while a drag is in progress (the drop target is a
+   transient state on the cube under the pointer). */
+.dock-chip.playing {
+  border-color: var(--gold-border-strong);
+  border-width: 2px;
+  box-shadow: 0 0 0 2px var(--gold-border);
+}
+
+/* The per-cube remove action. It is a span, not a button: a real <button>
+   inside the cube's <button> is invalid HTML and Chromium closes the outer
+   button, which would break the cube's click/double-click handling. */
+.dock-chip-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--fill-inverse-strong);
+  color: var(--text-primary);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.dock-chip:hover .dock-chip-remove,
+.dock-chip:focus-within .dock-chip-remove {
+  opacity: 1;
+}
+
+.dock-chip-remove:hover {
+  background: var(--danger-strong);
+}
+
+.dock-chip-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 13px;
+  overflow: hidden;
+  background: var(--fill-hover);
+  color: var(--text-tertiary);
+}
+
+.dock-chip-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}

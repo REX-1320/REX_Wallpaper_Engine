@@ -12,30 +12,30 @@ export default function PropertySection({ title, icon, defaultOpen = true, expan
 
   if (!expandable) {
     return (
-      <section className="overflow-hidden rounded-lg border border-border/60 bg-card/30">
-        <div className="flex w-full items-center gap-2 px-3 py-2 text-[11px] font-semibold tracking-wider text-foreground/85 uppercase">
-          <span className="text-muted-foreground">{icon}</span>
+      <section className="prop-section">
+        <div className="prop-section-head">
+          <span className="prop-section-icon">{icon}</span>
           <span className="truncate">{title}</span>
         </div>
-        <div className="flex flex-col gap-2 px-2 pt-1.5 pb-2">{visible}</div>
+        <div className="prop-section-body">{visible}</div>
       </section>
     )
   }
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} asChild>
-      <section className="overflow-hidden rounded-lg border border-border/60 bg-card/30">
+      <section className="prop-section">
         <CollapsibleTrigger asChild>
           <motion.button
             type="button"
             whileTap={{ scale: 0.985 }}
             aria-expanded={open}
-            className="flex w-full items-center gap-2 px-3 py-2 text-[11px] font-semibold tracking-wider text-foreground/85 uppercase transition-colors hover:bg-accent/50"
+            className="prop-section-head"
           >
-            <span className="text-muted-foreground">{icon}</span>
+            <span className="prop-section-icon">{icon}</span>
             <span className="truncate">{title}</span>
             <motion.span
-              className="ml-auto text-muted-foreground"
+              className="prop-section-chevron"
               animate={{ rotate: open ? 0 : -90 }}
               transition={{ duration: 0.2 }}
             >
@@ -54,11 +54,11 @@ export default function PropertySection({ title, icon, defaultOpen = true, expan
                 transition={{ type: 'spring', stiffness: 380, damping: 34 }}
                 className="overflow-hidden"
               >
-                <div className="flex flex-col gap-2 px-2 pt-1.5 pb-2">{visible}</div>
+                <div className="prop-section-body">{visible}</div>
               </motion.div>
             ) : (
               <div key="content" className="overflow-hidden">
-                <div className="flex flex-col gap-2 px-2 pt-1.5 pb-2">{visible}</div>
+                <div className="prop-section-body">{visible}</div>
               </div>
             )
           ) : null}

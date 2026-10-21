@@ -3,7 +3,7 @@
 // outside the desktop app the bridge is absent and each helper resolves null
 // so the gallery degrades to in-memory-only tiles.
 
-import { createThumbnail, saveThumbnail } from './thumbnail'
+import { createThumbnail, createThumbnailFallback, saveThumbnail } from './thumbnail'
 
 export async function galleryAdd(filePath, type = 'auto', extra = undefined) {
   try {
@@ -55,10 +55,26 @@ export async function buildFileRecord(f, pathHint = null, thumbUrl = null,
     ? null
     : ((await createThumbnail(f, 480, thumbUrl)) ?? null)
   const id = crypto.randomUUID()
+  const isVideo = (f.type || '').startsWith('video/')
+  const filePath = typeof pathHint === 'string' && pathHint ? pathHint : (f.path ?? null)
   let thumbPath = null
-  if (thumbDataUrl) {
+  let posterDataUrl = thumbDataUrl
+  // Chromium in this window cannot decode HEVC (hardware acceleration is off
+  // for the UI), so the <video> path above returns null for every HEVC file.
+  // Ask the main process for a poster from the GPU worker before giving up.
+  // NOT during a deferred restore: buildFileRecord(skipThumbnail) must stay
+  // cheap — the restore loop decodes that file lazily (and persists the
+  // result), and it is the only path that can see HEVC fail first.
+  if (!posterDataUrl && !opts.skipThumbnail && isVideo && filePath) {
+    const fallback = await createThumbnailFallback(filePath, 480)
+    if (fallback) {
+      posterDataUrl = fallback.dataUrl
+      thumbPath = fallback.path
+    }
+  }
+  if (posterDataUrl && !thumbPath) {
     try {
-      thumbPath = await saveThumbnail(id, thumbDataUrl)
+      thumbPath = await saveThumbnail(id, posterDataUrl)
     } catch {
       thumbPath = null
     }
@@ -69,12 +85,12 @@ export async function buildFileRecord(f, pathHint = null, thumbUrl = null,
     size: f.size,
     date: f.lastModified,
     file: f,
-    path: typeof pathHint === 'string' && pathHint ? pathHint : (f.path ?? null),
-    thumbDataUrl,
+    path: filePath,
+    thumbDataUrl: posterDataUrl,
     thumbPath,
     // Kept so a deferred poster can be decoded later from the file:// URL.
     thumbUrl: thumbUrl ?? null,
-    isVideo: (f.type || '').startsWith('video/'),
+    isVideo,
   }
 }
 

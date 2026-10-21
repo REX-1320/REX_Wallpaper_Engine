@@ -1,6 +1,13 @@
-/* Glass_effect — flat translucent background layer (backdrop-filter removed
- * 2026-10-11: full-window blur was the #1 GPU consumer competing with the
- * wallpaper's D3D12 Present on the same GPU, causing visible stutter). */
+/* Glass_effect — the window's ground.
+ *
+ * The window is NOT transparent (main.cjs:285-310): it uses
+ * `backgroundMaterial: 'mica'`, so DWM draws the blurred desktop wallpaper
+ * behind the app. The app's ground is **Pure Obsidian #050505** — an opaque
+ * ground, so the panels above it read against one constant value no matter
+ * what the user's wallpaper is doing.
+ *
+ * No filter, no blur: a live blur is a per-frame GPU pass competing with the
+ * wallpaper's own D3D12 present (the 2026-10-11 lesson). */
 
 .glass-effect {
   position: absolute;
@@ -8,11 +15,9 @@
   overflow: hidden;
   z-index: 0;
   border-radius: var(--glass-radius, 0);
-  background: rgba(20, 20, 28, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
 }
 
 .glass-effect.dark {
-  background: rgba(12, 12, 18, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgb(var(--obsidian-950));
 }

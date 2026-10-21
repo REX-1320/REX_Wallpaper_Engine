@@ -1,7 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { detectFileType } from '../registry'
-import { createPlaylist, deletePlaylist as deleteStorePlaylist, getSnapshot, renamePlaylist as renameStorePlaylist, restorePlaylists, selectWallpaper, updateWallpaperProperty, duplicatePlaylist as duplicateStorePlaylist } from '../store'
-import { getMedia } from '../mediaBridge'
+import { applyWallpaper, createPlaylist, deletePlaylist as deleteStorePlaylist, getSnapshot, renamePlaylist as renameStorePlaylist, restorePlaylists, updateWallpaperProperty, duplicatePlaylist as duplicateStorePlaylist } from '../store'
 
 export const CHANGE_MODES = [
   'Manual',
@@ -355,6 +354,60 @@ function poolWallpapers() {
   return snapshot.wallpapers ?? []
 }
 
+// Membership is keyed by the file's absolute path (case-insensitive on
+// Windows) — the store's own ids are reassigned on every restart.
+function memberKey(value) {
+  if (!value) return null
+  return String(value).replace(/\//g, '\\').toLowerCase()
+}
+
+// ─── Scene-end signal (the native ENDED event) ─────────────────────────────
+//
+// The native runtime emits an ENDED event when the scene it plays reaches
+// the end of its content - the engine knows that exactly (the presented
+// frame's PTS reached the duration). The app used to look for the end in a
+// media bridge that NOTHING ever registered, so `ended` was always false
+// and the "when the current ends" change modes could never fire.
+//
+// The signal is scoped to the wallpaper that is ON THE DESKTOP (the store's
+// appliedId): an ENDED that arrives after the wallpaper already changed
+// belongs to a scene that is gone, and acting on it would change the
+// wallpaper for the wrong reason (or run the change loop away).
+let sceneEndedSignal = null
+let runtimeSubscribed = false
+
+function ensureRuntimeSubscription() {
+  if (runtimeSubscribed) return
+  const subscribe = window.rexDesktop?.onWallpaperEvent
+  if (typeof subscribe !== 'function') return
+  runtimeSubscribed = true
+  subscribe((msg) => {
+    if (!msg || msg.event !== 'ENDED') return
+    const data = msg.data ?? {}
+    sceneEndedSignal = {
+      path: String(data.path ?? ''),
+      appliedId: getSnapshot().appliedId,
+      at: Date.now(),
+    }
+  })
+}
+
+// Consumes the pending ENDED signal, but only when it belongs to the
+// wallpaper that is on the desktop right now. A stale signal (the scene
+// changed in the meantime) is dropped, never acted on.
+function consumeSceneEnded() {
+  const signal = sceneEndedSignal
+  if (!signal) return false
+  sceneEndedSignal = null
+  const snapshot = getSnapshot()
+  if (!snapshot.appliedId || signal.appliedId !== snapshot.appliedId) return false
+  const applied = snapshot.wallpapers.find((w) => w.id === snapshot.appliedId)
+  if (!applied) return false
+  const appliedPath = memberKey(applied.filePath ?? applied.info?.filePath ?? applied.info?.source)
+  if (!appliedPath || appliedPath !== memberKey(signal.path)) return false
+  return true
+}
+
 function activePlaylistId() {
   const snapshot = getSnapshot()
   const selected = snapshot.wallpapers.find((w) => w.id === snapshot.selectedId)
@@ -362,9 +415,17 @@ function activePlaylistId() {
   return (snapshot.playlists ?? []).find((p) => p.name === selected.playlist.currentPlaylist)?.id ?? null
 }
 
-function filterPool(settings, pool) {
+function filterPool(settings, pool, members) {
   const { filters, rules } = settings
-  return pool.filter((w) => {
+  // A playlist's members ARE its pool — the dock's strip and the engine must
+  // agree on what the playlist contains. A playlist with no members keeps the
+  // old behaviour (every wallpaper that passes the filters), so an empty
+  // playlist never breaks rotation.
+  const memberKeys = Array.isArray(members) ? new Set(members.map(memberKey).filter(Boolean)) : null
+  const source = memberKeys && memberKeys.size > 0
+    ? pool.filter((w) => memberKeys.has(memberKey(w.filePath ?? w.info?.filePath ?? w.info?.source)))
+    : pool
+  return source.filter((w) => {
     const type = detectFileType(w.info.source ?? '') ?? 'IMAGE'
     if (filters.include[type] === false) return false
     if (filters.favorite && !w.general?.favorite) return false
@@ -405,6 +466,25 @@ function pickNext(settings, pool, currentId) {
   if (settings.order === 'Repeat One' || settings.options.loopCurrent) {
     return pool.find((w) => w.id === currentId) ?? pool[0]
   }
+  // "One run" (options.loopPlaylist off): every file plays once and then the
+  // playlist stops - there is no next file, so nothing changes any more and
+  // the wallpaper stays on the last one. The played set lives in the
+  // settings (like the shuffle order), so it is per playlist and survives
+  // the tick. options.loopPlaylist used to be read NOWHERE: the toggle was
+  // dead, and a playlist could only ever loop.
+  if (!settings.options.loopPlaylist) {
+    const played = settings._playedOnce ?? (settings._playedOnce = [])
+    if (currentId && !played.includes(currentId)) played.push(currentId)
+    const remaining = pool.filter((w) => !played.includes(w.id))
+    if (remaining.length === 0) return null
+    // The remaining files keep the playlist's order, so "Sequential" still
+    // plays them in order; the configured order logic picks among them.
+    return pickNextInner(settings, remaining, currentId)
+  }
+  return pickNextInner(settings, pool, currentId)
+}
+
+function pickNextInner(settings, pool, currentId) {
   const currentIndex = pool.findIndex((w) => w.id === currentId)
   switch (settings.order) {
     case 'Random':
@@ -518,7 +598,7 @@ function fireChange(settings, reason) {
   const selected = snapshot.wallpapers.find((w) => w.id === snapshot.selectedId)
   const activeName = selected?.playlist?.currentPlaylist ?? null
   const active = (snapshot.playlists ?? []).find((p) => p.name === activeName)
-  const pool = filterPool(settings, poolWallpapers())
+  const pool = filterPool(settings, poolWallpapers(), active?.members)
   if (activeName && activeName !== 'None' && active) {
     const changeNow = () => {
       const next = pickNext(settings, pool, snapshot.selectedId)
@@ -526,7 +606,7 @@ function fireChange(settings, reason) {
       const transition = transitionName(settings, next)
       recordPlay(next, transition)
       settings.lastChangeAt = Date.now()
-      selectWallpaper(next.id)
+      applyWallpaper(next.id)
     }
     if (settings.options.validateBeforePlayback) {
       const issues = validatePlaylist(pool)
@@ -590,14 +670,14 @@ function evaluateMode(settings) {
     return null
   }
   if (mode === 'After Current Ends' || mode === 'Video Ends' || mode === 'Audio Ends') {
-    const snapshot = getSnapshot()
-    const el = getMedia(snapshot.selectedId)
-    const ended = el ? el.ended : false
-    if (ended && !ms.endedHandled) {
+    // The native runtime reports the end of the current scene (the ENDED
+    // event). The signal is consumed once and only when it belongs to the
+    // wallpaper on the desktop, so a stale end can never fire a change.
+    if (consumeSceneEnded()) {
       ms.endedHandled = true
       return mode
     }
-    if (!ended) ms.endedHandled = false
+    ms.endedHandled = false
     return null
   }
   if (mode === 'Daily Schedule') return timeMatch(ms.dailyTime, now) && firedOnce(ms, now)
@@ -814,6 +894,8 @@ export const playlistEngine = {
     load()
     if (started) return
     started = true
+    // The scene-end signal comes from the runtime as an event (no polling).
+    ensureRuntimeSubscription()
     state.idleSince = Date.now()
     timer = setInterval(tick, 500)
     systemTimer = setInterval(() => {
@@ -839,6 +921,8 @@ export const playlistEngine = {
   stop() {
     if (!started) return
     started = false
+    // A pending end belongs to a scene that may be gone by now.
+    sceneEndedSignal = null
     clearInterval(timer)
     clearInterval(systemTimer)
     document.removeEventListener('pointerdown', onActivity)

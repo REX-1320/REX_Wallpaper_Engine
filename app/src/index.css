@@ -3,7 +3,11 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  /* A premium UI face: Inter if the user has it, Segoe UI Variable on
+     Windows 11, then the system stack. The OpenType features give Inter its
+     cleaner geometric letterforms. */
+  font-family: 'Inter Variable', 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-feature-settings: 'cv01', 'ss03';
   line-height: 1.5;
   color: #213547;
   background: transparent;
@@ -77,37 +81,184 @@ body {
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  /* The shadcn tokens are steps of the same obsidian ramp the app's own CSS
+     uses, so the built-in components (menus, dialogs, switches, inputs) and
+     the hand-written chrome are literally the same family. */
+  --background: rgb(var(--obsidian-900));
+  --foreground: rgb(var(--obsidian-25));
+  --card: rgb(var(--obsidian-800));
+  --card-foreground: rgb(var(--obsidian-25));
+  --popover: rgb(var(--obsidian-700) / 0.96);
+  --popover-foreground: rgb(var(--obsidian-25));
+  /* The one place the champagne lives in the component layer: a primary
+     action (a CTA). Everything else is obsidian. */
+  --primary: rgb(var(--champagne-300));
+  --primary-foreground: rgb(var(--obsidian-800));
+  --secondary: rgb(var(--obsidian-500));
+  --secondary-foreground: rgb(var(--obsidian-25));
+  --muted: rgb(var(--obsidian-600));
+  --muted-foreground: rgb(var(--obsidian-200));
+  --accent: rgb(var(--obsidian-600));
+  --accent-foreground: rgb(var(--obsidian-25));
+  --destructive: rgb(var(--danger-300));
+  --border: rgb(var(--champagne-350) / 0.24);
+  --input: rgb(var(--obsidian-25) / 0.15);
+  --ring: rgb(var(--champagne-350));
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: hsl(240 5.9% 10%);
-  --sidebar-foreground: hsl(240 4.8% 95.9%);
-  --sidebar-primary: hsl(224.3 76.3% 48%);
-  --sidebar-primary-foreground: hsl(0 0% 100%);
-  --sidebar-accent: hsl(240 3.7% 15.9%);
-  --sidebar-accent-foreground: hsl(240 4.8% 95.9%);
-  --sidebar-border: hsl(240 3.7% 15.9%);
-  --sidebar-ring: hsl(217.2 91.2% 59.8%);
+  --sidebar: rgb(var(--obsidian-900));
+  --sidebar-foreground: rgb(var(--obsidian-25));
+  --sidebar-primary: rgb(var(--champagne-300));
+  --sidebar-primary-foreground: rgb(var(--obsidian-800));
+  --sidebar-accent: rgb(var(--obsidian-600));
+  --sidebar-accent-foreground: rgb(var(--obsidian-25));
+  --sidebar-border: rgb(var(--champagne-350) / 0.24);
+  --sidebar-ring: rgb(var(--champagne-350));
+
+  /* ── REX app palette — "Obsidian & Champagne" ────────────────────────────
+     Two scales, and nothing else. Every surface, text step, border, fill and
+     accent in the app is a STEP of one of these ramps — never an ad-hoc
+     alpha, never a colour that belongs to neither. That is what makes the
+     app read as one material instead of a collection of tinted greys.
+
+     The ramps come from the Windows 11 / Fluent token system
+     (fluent2.microsoft.design/color, learn.microsoft.com/.../layering,
+     .../acrylic, .../accessible-text-requirements, and the Fluent dark-mode
+     control values in the Visual Studio 2026 theme-token reference).
+
+     Rules the palette encodes:
+       · Two layers, as Windows does: a BASE layer (nav, dock — chrome) and a
+         CONTENT layer (gallery, inspector — the work). In dark mode a surface
+         of greater importance is LIGHTER, so content sits above base.
+       · Every surface carries a 1px contour (Windows draws a 1px stroke on
+         every elevation level); the fill carries the depth, not the outline.
+       · Acrylic/translucent fills belong to TRANSIENT surfaces (menus,
+         flyouts, the dialog). The big panels are occluding.
+       · Text is never below 4.5:1 (WCAG 2.2 G18); the disabled step is
+         exempt as inactive UI and always ships with an icon, never as the
+         only signal.
+       · ONE chromatic hue — champagne — used for interactivity and state
+         only. The neutrals carry everything else.
+       · Status colours always ship with an icon, so red/green are never the
+         only differentiator (≈8 % of men are red-green colour deficient).  */
+
+  /* The OBSIDIAN ramp — the neutral scale. Stored as channels so a step can
+     be used at any alpha (rgb(var(--obsidian-25)) / rgb(var(--obsidian-25) / 0.07)); the hex is in the comment. */
+  --obsidian-25: 245 245 245;   /* #f5f5f5 ? the lightest, primary text */
+  --obsidian-50: 219 219 219;   /* #dbdbdb */
+  --obsidian-100: 179 179 179;  /* #b3b3b3 */
+  --obsidian-200: 133 133 133;  /* #858585 */
+  --obsidian-300: 91 91 91;     /* #5b5b5b */
+  --obsidian-350: 94 94 94;     /* #5e5e5e - Steel Obsidian: the playlist dock's own ground */
+  --obsidian-400: 61 61 61;     /* #3d3d3d */
+  --obsidian-500: 43 43 43;     /* #2b2b2b */
+  --obsidian-450: 58 58 58;     /* #3a3a3a - Ash Obsidian: the nav rail */
+  --obsidian-600: 30 30 30;     /* #1e1e1e ? Charcoal Obsidian: the gallery and the inspector */
+  --obsidian-700: 20 20 20;     /* #141414 */
+  --obsidian-800: 12 12 12;     /* #0c0c0c */
+  --obsidian-900: 8 8 8;        /* #080808 */
+  --obsidian-950: 5 5 5;        /* #050505 ? Pure Obsidian: the shell's ground */
+
+  /* The CHAMPAGNE ramp — the accent scale, one hue in seven shades. */
+  --champagne-50: 249 239 219;   /* #f9efdb */
+  --champagne-100: 243 227 195;  /* #f3e3c3 */
+  --champagne-200: 230 207 162;  /* #e6cfa2 */
+  --champagne-300: 217 183 121;  /* #d9b779 — the core */
+  --champagne-350: 200 161 101;  /* #c8a165 - Classic Champagne: every outline + the app title */
+  --champagne-400: 185 151 92;   /* #b9975c */
+  --champagne-500: 143 115 67;   /* #8f7343 */
+  --champagne-600: 107 86 52;    /* #6b5634 */
+
+  /* ── The background ─────────────────────────────────────────────────────
+     Unchanged by request: the window's system Mica (DWM) is the real
+     backdrop, and the chrome layer is a near-black wash over it. */
+  --surface-shell: rgb(var(--obsidian-950) / 0.92);   /* Pure Obsidian  #050505 - the shell's ground */
+  --surface-sidebar: rgb(var(--obsidian-450) / 0.96); /* Ash Obsidian   #3a3a3a - the nav rail */
+  --surface-content: rgb(var(--obsidian-600) / 0.96);/* Charcoal Obsidian #1e1e1e - gallery + inspector */
+  --surface-dock: rgb(var(--obsidian-350) / 0.92);  /* Steel Obsidian  #5e5e5e - the playlist dock */
+  --surface-transparent: rgba(0, 0, 0, 0);
+
+  /* ── Everything else: steps of the ramps ──────────────────────────────── */
+
+  /* Surfaces — the content layer and the raised layer (menus, flyouts, the
+     dialog) are steps of the obsidian ramp, occluding. */
+  --surface-raised: rgb(var(--obsidian-500) / 0.97);  /* the flyouts that float above the chrome */
+  --surface-dialog: rgb(var(--obsidian-600) / 0.97);  /* the modal dialog */
+  --surface-sunken: rgb(var(--obsidian-900) / 0.4);
+  --surface-smoke: rgb(var(--obsidian-900) / 0.62);
+
+  /* Text — obsidian-25 at four alphas: 18.7:1 · 13.4:1 · 7.4:1 · 3.4:1
+     (the last is inactive UI, exempt from 1.4.3 and always paired with an
+     icon). */
+  --text-primary: rgb(var(--obsidian-25));
+  --text-secondary: rgb(var(--obsidian-25) / 0.76);
+  --text-tertiary: rgb(var(--obsidian-25) / 0.62);
+  --text-disabled: rgb(var(--obsidian-25) / 0.34);
+  --text-inverse: rgb(var(--obsidian-800));
+  --text-inverse-secondary: rgb(var(--obsidian-800) / 0.82);
+  --text-inverse-tertiary: rgb(var(--obsidian-800) / 0.6);
+  --text-inverse-disabled: rgb(var(--obsidian-800) / 0.45);
+
+  /* Contours — obsidian-25 at whisper alphas. The champagne is reserved for
+     the accent; the hairlines that give the panels their structure stay
+     achromatic, which is what keeps the app from reading as tinted. */
+  --stroke-subtle: rgb(var(--champagne-350) / 0.14);
+  --stroke-default: rgb(var(--champagne-350) / 0.24);
+  --stroke-strong: rgb(var(--champagne-350) / 0.4);
+  --stroke-inverse: rgb(var(--obsidian-800) / 0.3);
+
+  /* Control fills — obsidian-25 overlays, never a solid fill. */
+  --fill-rest: rgb(var(--obsidian-25) / 0.04);
+  --fill-hover: rgb(var(--obsidian-25) / 0.07);
+  --fill-pressed: rgb(var(--obsidian-25) / 0.02);
+  --fill-strong: rgb(var(--obsidian-25) / 0.1);
+  --fill-selected: rgb(var(--obsidian-25) / 0.15);
+  /* Dark fills for light chips (the title bar's pills sit on the wallpaper). */
+  --fill-inverse: rgb(var(--obsidian-800) / 0.06);
+  --fill-inverse-strong: rgb(var(--obsidian-800) / 0.85);
+  --fill-inverse-solid: rgb(var(--obsidian-25));
+
+  /* The accent — steps of the champagne ramp, and the ONLY chromatic colour
+     in the app. It appears in exactly three places: the brand mark, the
+     primary action, and an active/selected state. Everything else is
+     obsidian, so the two never mix. */
+  --gold-bright: rgb(var(--champagne-100));   /* 15.6:1 on the base — the brand mark's highlight */
+  --gold: rgb(var(--champagne-200));          /* 13.0:1 — accent text and icons */
+  --gold-core: rgb(var(--champagne-300));     /*  9.4:1 as a fill — the primary action, the active state */
+  --gold-deep: rgb(var(--champagne-400));     /*  6.0:1 — accent text on the lightest (raised) surface */
+  --gold-shadow: rgb(var(--champagne-500));   /*  4.4:1 — decorative only, never text */
+  --gold-muted: rgb(var(--champagne-300) / 0.14);
+  --gold-subtle: rgb(var(--champagne-300) / 0.08);
+  --gold-border: rgb(var(--champagne-300) / 0.55);
+  --gold-border-strong: rgb(var(--champagne-300) / 0.9);
+  --gold-text: rgb(var(--obsidian-800));
+  --gold-classic: rgb(var(--champagne-350));   /* Classic Champagne - the app title */
+
+  /* Status — three small ramps, so a status colour has shades too. They are
+     never the only signal: each ships with an icon. */
+  --danger-100: 249 197 183;
+  --danger-300: 242 133 111;   /* 7.9:1 on the base surface */
+  --danger-500: 198 79 58;
+  --danger: rgb(var(--danger-300));
+  --danger-muted: rgb(var(--danger-300) / 0.16);
+  --danger-strong: rgb(var(--danger-500) / 0.9);
+  --warning-300: 232 178 60;   /* 10.2:1 */
+  --warning: rgb(var(--warning-300));
+  --success-300: 143 191 143;   /* 9.4:1 */
+  --success: rgb(var(--success-300));
+
+  /* The window's own traffic lights keep the OS colours — they mirror the
+     platform's controls, so they are deliberately not part of the palette. */
+  --win-close: #ff5f57;
+  --win-minimize: #febc2e;
+  --win-maximize: #28c840;
+
+  /* The mica backdrop's glow and frost, in the same material. */
+  --mica-tint: rgb(var(--obsidian-800) / 0.85);
+  --mica-blob: rgb(var(--champagne-300) / 0.16);
 }
 
 @theme inline {
@@ -143,4 +294,53 @@ body {
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* Scrollbars are hidden app-wide; the scrolling itself is untouched. */
+@layer base {
+  * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    background: transparent;
+  }
+}
+
+/* Number inputs carry their own spinners, but every numeric field in the app
+   already has increase / decrease buttons beside it. Two sets of steppers is
+   one too many — hide the native ones, keep the field editable. */
+@layer base {
+  input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+/* Radix draws its own scrollbar chrome on top of the viewport. It is a styled
+   overlay with utility classes, so it needs the unlayered (and explicit) rule
+   to actually disappear — the viewport keeps scrolling natively. */
+[data-slot="scroll-area-scrollbar"] {
+  display: none !important;
+}
+
+/* Radix portals its popups (select, dropdown, popover, tooltip) to <body>
+   with a z-50 utility — far below the app's own overlays (99999 / 100000).
+   A dropdown inside the playlist dialog therefore opened *behind* the dialog.
+   Lift the portal layer above every overlay in the app. */
+[data-radix-popper-content-wrapper],
+[data-slot="select-content"],
+[data-slot="dropdown-menu-content"],
+[data-slot="popover-content"],
+[data-slot="tooltip-content"] {
+  z-index: 100100 !important;
 }

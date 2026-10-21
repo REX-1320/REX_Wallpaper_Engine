@@ -12,7 +12,6 @@ import {
   Monitor,
   Power,
   Settings2,
-  Shield,
   SlidersHorizontal,
   Timer as TimerIcon,
   Wand2,
@@ -20,6 +19,13 @@ import {
   Zap,
 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import PropertyRow from '@/components/properties/PropertyRow'
 import PropertyDropdown from '@/components/properties/PropertyDropdown'
 import PropertySlider from '@/components/properties/PropertySlider'
@@ -27,12 +33,13 @@ import PropertyNumber from '@/components/properties/PropertyNumber'
 import PropertyToggle from '@/components/properties/PropertyToggle'
 import PropertyButton from '@/components/properties/PropertyButton'
 import PropertyText from '@/components/properties/PropertyText'
-import { useWallpaperStore } from '../store'
+import { useWallpaperStore, updateWallpaperProperty } from '../store'
 import { PLAYLIST_ICONS } from '../registry'
 import {
   FILTER_INCLUDES,
   MULTIMONITOR_OPTIONS,
   PLAYBACK_ORDERS,
+  TRANSITION_CATEGORIES,
   TRANSITION_CURVES,
   usePlaylistEngine,
 } from './engine'
@@ -54,16 +61,57 @@ const ADVANCED_MODES = [
   'Weather',
   'Random Interval',
 ]
-const SIMPLE_TRANSITIONS = ['None', 'Fade', 'Slide', 'Zoom', 'Blur', 'Random']
+// The engine's full transition catalogue, grouped the way the engine groups
+// it. 'None' sits on top (no transition), 'Random' at the bottom.
+const TRANSITION_GROUP_ORDER = ['Basic', 'Movement', 'Blur', 'Distortion', 'Particles', 'Shader', '3D', 'Custom']
+const TRANSITION_OPTIONS = (() => {
+  const seen = new Set(['None', 'Random'])
+  const options = [{ value: 'None', label: 'None' }]
+  for (const group of TRANSITION_GROUP_ORDER) {
+    for (const name of TRANSITION_CATEGORIES[group] ?? []) {
+      if (seen.has(name)) continue
+      seen.add(name)
+      options.push({ value: name, label: name, group })
+    }
+  }
+  options.push({ value: 'Random', label: 'Random' })
+  return options
+})()
+
+// Radix renders a Select without the popper wrapper attribute, so the guard
+// has to look for the popup slots themselves.
+const OPEN_POPUP_SELECTOR =
+  '[data-slot="select-content"], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-radix-popper-content-wrapper]'
 const WEATHERS = ['Clear', 'Rainy', 'Snowy', 'Cloudy', 'Stormy', 'Sunny', 'Foggy', 'Windy']
 const WEEK_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+// Every effect has its own preview animation (see .pl-a-* in SidebarLayout.css).
 const PREVIEW_ANIM = {
+  None: 'pl-a-none',
   Fade: 'pl-a-fade',
+  Crossfade: 'pl-a-crossfade',
   Slide: 'pl-a-slide',
   Zoom: 'pl-a-zoom',
   Blur: 'pl-a-blur',
+  Spiral: 'pl-a-spiral',
+  Wipe: 'pl-a-wipe',
+  Circle: 'pl-a-circle',
+  Curtain: 'pl-a-curtain',
+  Flip: 'pl-a-flip',
+  Rise: 'pl-a-rise',
+  Fall: 'pl-a-fall',
+  Vortex: 'pl-a-vortex',
+  Tunnel: 'pl-a-tunnel',
+  Smear: 'pl-a-smear',
+  Pixelate: 'pl-a-pixel',
+  Distort: 'pl-a-distort',
+  Ripple: 'pl-a-ripple',
+  Morph: 'pl-a-morph',
+  Particle: 'pl-a-particle',
+  Starfield: 'pl-a-starfield',
+  Glitch: 'pl-a-glitch',
+  Custom: 'pl-a-custom',
   Random: 'pl-a-spiral',
-  None: 'pl-a-none',
 }
 
 function fmtClock(ms) {
@@ -97,30 +145,48 @@ function Section({ title, icon, children }) {
 }
 
 export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null }) {
-  const { wallpapers, playlists, selectedId } = useWallpaperStore()
+  const { wallpapers, playlists, selectedId, appliedId } = useWallpaperStore()
   const { engine, settingsByPlaylist, presets, history, now, system, weather } = usePlaylistEngine()
-  const [playlistId, setPlaylistId] = useState(
-    () =>
-      initialPlaylistId ??
-      (playlists.find((p) => p.name === wallpapers.find((w) => w.id === selectedId)?.playlist?.currentPlaylist) ?? playlists[0])?.id ??
-      null,
-  )
+  // The playlist that governs the desktop RIGHT NOW. The engine rotates
+  // through the active playlist (engine.js: activePlaylistId() resolves it
+  // by NAME from the wallpaper on the desktop), so a config for any other
+  // playlist is never evaluated - which is why changing "Change Wallpaper"
+  // in this dialog used to look like it did nothing.
+  //
+  // The dialog therefore edits the ACTIVE playlist, and its playlist picker
+  // switches the active playlist: what you configure is what runs.
+  const activeWallpaper = wallpapers.find((w) => w.id === (appliedId ?? selectedId)) ?? null
+  const activePlaylist =
+    playlists.find((p) => p.name === activeWallpaper?.playlist?.currentPlaylist) ?? null
+  const playlistId = activePlaylist?.id ?? initialPlaylistId ?? playlists[0]?.id ?? null
+  // Switching the active playlist writes the same property the strip's
+  // "Set as active playlist" writes - the runtime reads the playlist by name.
+  const activatePlaylist = (targetId) => {
+    const target = playlists.find((p) => p.id === targetId)
+    const owner = wallpapers.find((w) => w.id === (appliedId ?? selectedId))
+    if (!target || !owner) return
+    updateWallpaperProperty(owner.id, ['playlist', 'currentPlaylist'], target.name)
+  }
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [previewKey, setPreviewKey] = useState(0)
   const [presetName, setPresetName] = useState('')
   const [newName, setNewName] = useState('')
   const [renameName, setRenameName] = useState('')
-  const [mergeWith, setMergeWith] = useState('')
   const importPlaylistRef = useRef(null)
   const importPresetRef = useRef(null)
   const restoreRef = useRef(null)
 
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      // A Radix popup (select / dropdown) owns Escape while it is open —
+      // closing the dialog as well would throw the choice in progress away.
+      // Capture phase, so the popup is still in the DOM when we look.
+      if (document.querySelector(OPEN_POPUP_SELECTOR)) return
+      onClose()
     }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => document.removeEventListener('keydown', onKeyDown, true)
   }, [onClose])
 
   const playlist = playlists.find((p) => p.id === playlistId) ?? null
@@ -138,7 +204,7 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
   const simpleTransition = settings.transitionRandom ? 'Random' : settings.transition
   const durationSeconds = Math.round((settings.transitionDuration / 1000) * 10) / 10
 
-  const pool = wallpapers.filter((w) => w.playlist.currentPlaylist === playlist?.name)
+  const pool = wallpapers.filter((w) => w.playlist?.currentPlaylist === playlist?.name)
   const mostPlayed = (() => {
     const entries = Object.entries(history.mostPlayed).sort((a, b) => b[1] - a[1])
     return entries.length > 0 ? (wallpapers.find((w) => w.id === entries[0][0])?.info?.name ?? '—') : '—'
@@ -169,12 +235,21 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
             <span>Playlist Settings</span>
           </span>
           <div className="pl-dialog-select">
-            <PropertyDropdown
-              label=""
+            <Select
               value={playlistId ?? ''}
-              options={playlists.map((p) => ({ value: p.id, label: p.name }))}
-              onChange={(id) => setPlaylistId(id)}
-            />
+              onValueChange={activatePlaylist}
+            >
+              <SelectTrigger size="sm" className="h-7 w-full text-xs" aria-label="Playlist">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {playlists.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <button type="button" className="pl-dialog-close" aria-label="Close playlist settings" onClick={onClose}>
             <X size={14} />
@@ -212,7 +287,9 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
             <PropertyDropdown
               label="Transition"
               value={simpleTransition}
-              options={SIMPLE_TRANSITIONS.includes(simpleTransition) ? SIMPLE_TRANSITIONS : [...SIMPLE_TRANSITIONS, simpleTransition]}
+              options={TRANSITION_OPTIONS.some((o) => o.value === simpleTransition)
+                ? TRANSITION_OPTIONS
+                : [...TRANSITION_OPTIONS, { value: simpleTransition, label: simpleTransition }]}
               onChange={(v) => {
                 if (v === 'Random') set(['transitionRandom'], true)
                 else {
@@ -234,6 +311,10 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
               <div key={previewKey} className={`pl-preview ${PREVIEW_ANIM[simpleTransition] ?? 'pl-a-fade'}`} style={{ animationDuration: `${Math.max(400, settings.transitionDuration)}ms` }}>
                 <span>{simpleTransition}</span>
               </div>
+              <p className="pl-hint">
+                The preview animates the effect. The engine still cuts straight to the next wallpaper —
+                blending between scenes is engine work.
+              </p>
             </PropertyGroup>
           </Section>
 
@@ -327,7 +408,7 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
                     ['autoRemoveMissing', 'Automatically remove missing files'],
                     ['validateBeforePlayback', 'Validate playlist before playback'],
                   ].map(([key, label]) => (
-                    <PropertyToggle key={key} label={label} checked={settings.options[key]} onChange={(v) => set(['options', key], v)} />
+                    <PropertyToggle key={key} label={label} checked={Boolean(settings.options[key])} onChange={(v) => set(['options', key], v)} />
                   ))}
                 </Section>
 
@@ -338,20 +419,20 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
                     ['pauseOnGame', 'Pause when game launches'],
                     ['continueAudioWhilePaused', 'Continue audio while paused'],
                   ].map(([key, label]) => (
-                    <PropertyToggle key={key} label={label} checked={settings.behavior[key]} onChange={(v) => set(['behavior', key], v)} />
+                    <PropertyToggle key={key} label={label} checked={Boolean(settings.behavior[key])} onChange={(v) => set(['behavior', key], v)} />
                   ))}
                 </Section>
 
                 <Section title="Multi Monitor" icon={<Monitor size={12} />}>
                   {Object.entries(MULTIMONITOR_OPTIONS).map(([key, label]) => (
-                    <PropertyToggle key={key} label={label} checked={settings.multiMonitor[key]} onChange={(v) => set(['multiMonitor', key], v)} />
+                    <PropertyToggle key={key} label={label} checked={Boolean(settings.multiMonitor[key])} onChange={(v) => set(['multiMonitor', key], v)} />
                   ))}
                 </Section>
 
                 <Section title="Filters & Rules" icon={<Filter size={12} />}>
                   <div className="pl-sec-title" style={{ marginTop: 4 }}>Include Types</div>
                   {Object.entries(FILTER_INCLUDES).map(([key, label]) => (
-                    <PropertyToggle key={key} label={label} checked={settings.filters.include[key]} onChange={(v) => set(['filters', 'include', key], v)} />
+                    <PropertyToggle key={key} label={label} checked={Boolean(settings.filters.include[key])} onChange={(v) => set(['filters', 'include', key], v)} />
                   ))}
                   <PropertySlider label="Min Rating" value={settings.filters.minRating} onChange={(v) => set(['filters', 'minRating'], v)} min={0} max={5} step={0.5} suffix="★" />
                   <PropertyText label="Tags" value={settings.filters.tags} onChange={(v) => set(['filters', 'tags'], v)} />
@@ -362,7 +443,52 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
                     ['only4k', 'Only 4K Wallpapers'],
                     ['onlyFavorites', 'Only Favorite Wallpapers'],
                   ].map(([key, label]) => (
-                    <PropertyToggle key={key} label={label} checked={settings.rules[key]} onChange={(v) => set(['rules', key], v)} />
+                    <PropertyToggle key={key} label={label} checked={Boolean(settings.rules[key])} onChange={(v) => set(['rules', key], v)} />
+                  ))}
+                </Section>
+
+                <Section title="Manage Playlists" icon={<Folders size={12} />}>
+                  <PropertyText label="New Playlist Name" value={newName} onChange={setNewName} />
+                  <PropertyButton onClick={() => {
+                    if (!newName) return
+                    const newId = engine.manage.createPlaylist(newName, 'music', playlistId)
+                    setPlaylistId(newId)
+                    setNewName('')
+                  }}>Create Playlist</PropertyButton>
+                  {playlist ? (
+                    <>
+                      <div className="pl-sec-title" style={{ marginTop: 4 }}>
+                        {(() => { const Icon = PLAYLIST_ICONS[playlist.icon] ?? ListMusic; return <Icon size={12} /> })()}
+                        <span>{playlist.name}</span>
+                      </div>
+                      <PropertyText label="Rename To" value={renameName} onChange={setRenameName} />
+                      <PropertyButton variant="secondary" onClick={() => { if (renameName) { engine.manage.renamePlaylist(playlistId, renameName); setRenameName('') } }}>Rename</PropertyButton>
+                      <PropertyButton variant="secondary" onClick={() => engine.manage.duplicatePlaylist(playlistId)}>Duplicate</PropertyButton>
+                      <PropertyButton variant="secondary" onClick={() => engine.manage.exportPlaylist(playlistId)}>Export</PropertyButton>
+                      <PropertyButton variant="danger" onClick={() => engine.manage.deletePlaylist(playlistId)}>Delete</PropertyButton>
+                      <PropertyButton variant="secondary" onClick={() => importPlaylistRef.current?.click()}>Import Playlist</PropertyButton>
+                      <PropertyButton variant="secondary" onClick={() => engine.manage.backup()}>Backup All</PropertyButton>
+                      <PropertyButton variant="secondary" onClick={() => restoreRef.current?.click()}>Restore Backup</PropertyButton>
+                      <input ref={importPlaylistRef} type="file" hidden accept=".json" onChange={(e) => readFile(e, (text) => engine.manage.importPlaylist(text))} />
+                      <input ref={restoreRef} type="file" hidden accept=".json" onChange={(e) => readFile(e, (text) => engine.manage.restore(text))} />
+                    </>
+                  ) : null}
+                </Section>
+                <Section title="Presets" icon={<Bookmark size={12} />}>
+                  <PropertyText label="Preset Name" value={presetName} onChange={setPresetName} />
+                  <PropertyButton onClick={() => { if (presetName) { engine.presets.save(presetName); setPresetName('') } }}>Save Preset</PropertyButton>
+                  <PropertyButton variant="secondary" onClick={() => importPresetRef.current?.click()}>Import Preset</PropertyButton>
+                  <input ref={importPresetRef} type="file" hidden accept=".json" onChange={(e) => readFile(e, (text) => engine.presets.import(text))} />
+                  {presets.map((preset) => (
+                    <div key={preset.id} className="pl-list" style={{ gap: 6 }}>
+                      <div className="pl-sec-title" style={{ marginTop: 4 }}>{preset.name}</div>
+                      <div className="flex flex-col gap-1.5">
+                        <PropertyButton onClick={() => engine.presets.apply(preset.id)}>Apply</PropertyButton>
+                        <PropertyButton variant="secondary" onClick={() => engine.presets.duplicate(preset.id)}>Duplicate</PropertyButton>
+                        <PropertyButton variant="secondary" onClick={() => engine.presets.export(preset.id)}>Export</PropertyButton>
+                        <PropertyButton variant="danger" onClick={() => engine.presets.delete(preset.id)}>Delete</PropertyButton>
+                      </div>
+                    </div>
                   ))}
                 </Section>
 
@@ -401,51 +527,6 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
                   <PropertyNumber label="Set Temperature" value={system.temperature ?? 25} onChange={(v) => engine.setTemperature(v)} min={-40} max={120} suffix="°C" />
                 </Section>
 
-                <Section title="Presets" icon={<Bookmark size={12} />}>
-                  <PropertyText label="Preset Name" value={presetName} onChange={setPresetName} />
-                  <PropertyButton onClick={() => { if (presetName) { engine.presets.save(presetName); setPresetName('') } }}>Save Preset</PropertyButton>
-                  <PropertyButton variant="secondary" onClick={() => importPresetRef.current?.click()}>Import Preset</PropertyButton>
-                  <input ref={importPresetRef} type="file" hidden accept=".json" onChange={(e) => readFile(e, (text) => engine.presets.import(text))} />
-                  {presets.map((preset) => (
-                    <div key={preset.id} className="pl-list" style={{ gap: 6 }}>
-                      <div className="pl-sec-title" style={{ marginTop: 4 }}>{preset.name}</div>
-                      <div className="flex flex-col gap-1.5">
-                        <PropertyButton onClick={() => engine.presets.apply(preset.id)}>Apply</PropertyButton>
-                        <PropertyButton variant="secondary" onClick={() => engine.presets.duplicate(preset.id)}>Duplicate</PropertyButton>
-                        <PropertyButton variant="secondary" onClick={() => engine.presets.export(preset.id)}>Export</PropertyButton>
-                        <PropertyButton variant="danger" onClick={() => engine.presets.delete(preset.id)}>Delete</PropertyButton>
-                      </div>
-                    </div>
-                  ))}
-                </Section>
-
-                <Section title="Manage Playlists" icon={<Folders size={12} />}>
-                  <PropertyText label="New Playlist Name" value={newName} onChange={setNewName} />
-                  <PropertyButton onClick={() => {
-                    if (!newName) return
-                    const newId = engine.manage.createPlaylist(newName, 'music', playlistId)
-                    setPlaylistId(newId)
-                    setNewName('')
-                  }}>Create Playlist</PropertyButton>
-                  {playlist ? (
-                    <>
-                      <div className="pl-sec-title" style={{ marginTop: 4 }}>
-                        {(() => { const Icon = PLAYLIST_ICONS[playlist.icon] ?? ListMusic; return <Icon size={12} /> })()}
-                        <span>{playlist.name}</span>
-                      </div>
-                      <PropertyText label="Rename To" value={renameName} onChange={setRenameName} />
-                      <PropertyButton variant="secondary" onClick={() => { if (renameName) { engine.manage.renamePlaylist(playlistId, renameName); setRenameName('') } }}>Rename</PropertyButton>
-                      <PropertyButton variant="secondary" onClick={() => engine.manage.duplicatePlaylist(playlistId)}>Duplicate</PropertyButton>
-                      <PropertyButton variant="secondary" onClick={() => engine.manage.exportPlaylist(playlistId)}>Export</PropertyButton>
-                      <PropertyButton variant="danger" onClick={() => engine.manage.deletePlaylist(playlistId)}>Delete</PropertyButton>
-                      <PropertyButton variant="secondary" onClick={() => importPlaylistRef.current?.click()}>Import Playlist</PropertyButton>
-                      <PropertyButton variant="secondary" onClick={() => engine.manage.backup()}>Backup All</PropertyButton>
-                      <PropertyButton variant="secondary" onClick={() => restoreRef.current?.click()}>Restore Backup</PropertyButton>
-                      <input ref={importPlaylistRef} type="file" hidden accept=".json" onChange={(e) => readFile(e, (text) => engine.manage.importPlaylist(text))} />
-                      <input ref={restoreRef} type="file" hidden accept=".json" onChange={(e) => readFile(e, (text) => engine.manage.restore(text))} />
-                    </>
-                  ) : null}
-                </Section>
               </div>
             ) : null}
           </div>

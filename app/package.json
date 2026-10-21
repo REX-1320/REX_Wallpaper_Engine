@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
+    "check:palette": "node tools/check-palette.cjs",
     "preview": "vite preview",
     "electron": "vite build && electron .",
     "dist:win": "vite build && node scripts/package-win.cjs"

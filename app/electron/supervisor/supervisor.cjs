@@ -206,6 +206,17 @@ class Supervisor {
   // ─── Runtime exit → recovery ──────────────────────────────────────────────
   async _handleRuntimeExit(code, info = null) {
     if (this.quitting) return
+    // Deliberate idle stop (a static image was applied): the engine is not
+    // needed while the OS draws the desktop, and the runtime respawns on
+    // demand for the next video. Not a crash — no report, no replay (a
+    // replay would respawn the runtime and undo the reclaim).
+    if (info?.intentional) {
+      this.deps.logLine('runtime:exit (intentional idle stop — no recovery)')
+      this.healthy = true
+      this.recovering = false
+      this.deps.setRuntimeAvailable?.(true)
+      return
+    }
     // The client captures pid before teardown and passes it along (audit
     // 5.10 #13); a spawn failure arrives as code null + spawnError (5.10 #12)
     // and still runs the normal bounded recovery.
