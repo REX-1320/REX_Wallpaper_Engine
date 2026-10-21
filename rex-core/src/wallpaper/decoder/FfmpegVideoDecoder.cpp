@@ -579,7 +579,7 @@ enum AVPixelFormat FfmpegVideoDecoder::GetHwFormat(
             if (av_hwframe_ctx_init(frames) >= 0) {
                 ctx->hw_frames_ctx = frames;   // FFmpeg takes ownership
                 REX_LOG_INFO(kModule,
-                             "hardware frames pre-sized: %dx%d (sw format %s)",
+                             "hardware frames pre-sized: {}x{} (sw format {})",
                              ctx->width, ctx->height,
                              av_get_pix_fmt_name(ctx->pix_fmt));
                 return AV_PIX_FMT_D3D11;

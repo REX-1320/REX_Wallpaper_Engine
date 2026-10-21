@@ -731,7 +731,8 @@ static void TelemetryThread(std::mutex& engineGuard,
                        " | servo=%d corr=%.3fms err=%.3fms int=%.3fms"
                        " | lattice=%.3fms@%u%s"
                        " | decP50=%.2fms decP95=%.2fms decP99=%.2fms content=%.2fx | dcorr=%.3fms"
-                       " | unusable=%d\n",
+                       " | unusable=%d"
+                       " | avDrift=%.1fms avCorr=%llu\n",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      t.privateBytesMB,
                      t.decoderRendererSameAdapter ? 1 : 0,
@@ -776,7 +777,12 @@ static void TelemetryThread(std::mutex& engineGuard,
                         t.decodeServoCorrMs,
                         // P2-1: unusable-path latch for the supervisor's
                         // poison-file park.
-                        t.decodePathUnusable ? 1 : 0);
+                        t.decodePathUnusable ? 1 : 0,
+                        // A/V sync watchdog: the drift (a CHANGE in the
+                        // audio-vs-video offset) and how often it had to
+                        // correct. Silent by nature, so it must be readable.
+                        t.avSyncDriftMs,
+                        static_cast<unsigned long long>(t.avSyncCorrections));
         std::fclose(f);
     }
 }
@@ -1338,6 +1344,8 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             tel.emplace("framesDropped", json::Json(static_cast<double>(t.framesDropped)));
             tel.emplace("decoderFps", json::Json(t.decoderFps));
             tel.emplace("renderFps", json::Json(t.renderFps));
+            tel.emplace("avSyncDriftMs", json::Json(t.avSyncDriftMs));
+            tel.emplace("avSyncCorrections", json::Json(static_cast<double>(t.avSyncCorrections)));
             tel.emplace("videoWidth", json::Json(t.videoWidth));
             tel.emplace("videoHeight", json::Json(t.videoHeight));
             tel.emplace("ringSlotCount", json::Json(static_cast<double>(t.ringSlotCount)));

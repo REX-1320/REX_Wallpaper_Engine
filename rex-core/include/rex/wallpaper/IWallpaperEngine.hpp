@@ -130,6 +130,12 @@ struct EngineTelemetry {
     uint64_t framesDropped   = 0;
     double   decoderFps      = 0.0;
     double   renderFps       = 0.0;
+    // ─── A/V sync watchdog ──────────────────────────────────────────────
+    // The drift is the CHANGE in the audio-vs-video offset (both playheads
+    // lead by a fixed amount, so the offset itself is not an error). A sync
+    // error is silent by nature, so it has to be observable without ears.
+    double   avSyncDriftMs    = 0.0;
+    uint64_t avSyncCorrections = 0;  // times the watchdog had to re-seek
     // ─── Per-stage diagnostics (Phase 1) ──────────────────────────────
     double   sourceFps      = 0.0;  // stream frame rate
     double   convertFps     = 0.0;  // ConvertAndSignal+publish rate

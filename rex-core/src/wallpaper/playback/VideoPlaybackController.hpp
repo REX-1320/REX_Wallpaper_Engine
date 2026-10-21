@@ -53,6 +53,12 @@ struct VideoPlaybackTelemetry {
     uint64_t cpuToGpuCopies  = 0;
     double   decoderFps      = 0.0;
     double   renderFps       = 0.0;
+    // ─── A/V sync watchdog ──────────────────────────────────────────────
+    // The drift is the CHANGE in the audio-vs-video offset (both playheads
+    // lead by a fixed amount, so the offset itself is not an error). A sync
+    // error is silent by nature, so it has to be observable without ears.
+    double   avSyncDriftMs    = 0.0;
+    uint64_t avSyncCorrections = 0;  // times the watchdog had to re-seek
     // ─── Per-stage diagnostics (Phase 1) ──────────────────────────────
     double   sourceFps      = 0.0;  // stream frame rate (decoder-reported)
     double   convertFps     = 0.0;  // ConvertAndSignal+publish rate, same window
@@ -178,6 +184,18 @@ public:
     double GetPosition() const { return m_position.load(std::memory_order_acquire); }
     double GetDuration()  const { return m_duration; }
     double GetFrameRate() const { return m_frameRate; }
+
+    /// A/V sync telemetry. The drift is the CHANGE in the audio-vs-video
+    /// offset since the last baseline (see the watchdog below) - the offset
+    /// itself is not an error, because both playheads lead by a fixed
+    /// amount. A drift that stays under kAvSyncCorrectionMs (250) is not
+    /// corrected; the counter says how often the watchdog had to act.
+    double GetAvSyncDriftMs() const {
+        return m_avSyncDriftMs.load(std::memory_order_relaxed);
+    }
+    uint64_t GetAvSyncCorrections() const {
+        return m_avSyncCorrections.load(std::memory_order_relaxed);
+    }
     int    GetWidth()     const { return m_width; }
     int    GetHeight()    const { return m_height; }
 

@@ -463,15 +463,23 @@ void VideoPlaybackController::CheckAvSync() {
     const double change = drift - m_avSyncBaseline;
     m_avSyncDriftMs.store(change * 1000.0, std::memory_order_relaxed);
     if (!AvSyncNeedsCorrection(change * 1000.0, kAvSyncCorrectionMs)) {
+        // Telemetry: a sync error is silent by nature, so the drift has to be
+        // visible. This runs every kAvSyncCheckFrames (~4 s), so it is a
+        // debug-level line; the correction below is the warning.
+        REX_LOG_DEBUG(kModule,
+                      "A/V drift {:+.1f} ms ({} corrections so far)",
+                      change * 1000.0,
+                      m_avSyncCorrections.load(std::memory_order_relaxed));
         return;
     }
     // The clocks have really parted: put the audio back on the video's
     // position. The seek is request-based (the audio thread performs it), so
     // this is safe from the render thread.
     REX_LOG_WARN(kModule,
-                 "A/V drift %.0f ms: re-seeking the audio to %.3f s "
-                 "(video %.3f s, audio %.3f s)",
-                 change * 1000.0, videoPos, videoPos, audioPos);
+                 "A/V drift {:.0f} ms: re-seeking the audio to {:.3f} s "
+                 "(video {:.3f} s, audio {:.3f} s) - correction #{}",
+                 change * 1000.0, videoPos, videoPos, audioPos,
+                 m_avSyncCorrections.load(std::memory_order_relaxed) + 1);
     audio->Seek(videoPos);
     m_avSyncBaseline = drift;
     m_avSyncCorrections.fetch_add(1, std::memory_order_relaxed);
@@ -546,6 +554,8 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
     const double secs = std::chrono::duration<double>(Clock::now() - m_fpsStartTime).count();
     t.decoderFps = secs > 0.0 ? static_cast<double>(m_decoderFrameCount) / secs : 0.0;
     t.renderFps = secs > 0.0 ? static_cast<double>(m_consumerFrameCount) / secs : 0.0;
+    t.avSyncDriftMs = m_avSyncDriftMs.load(std::memory_order_relaxed);
+    t.avSyncCorrections = m_avSyncCorrections.load(std::memory_order_relaxed);
     t.sourceFps = m_frameRate;
     t.convertFps = secs > 0.0 ? static_cast<double>(m_convertFrameCount) / secs : 0.0;
     t.schedulerDrops = m_framesDropped.load(std::memory_order_relaxed);

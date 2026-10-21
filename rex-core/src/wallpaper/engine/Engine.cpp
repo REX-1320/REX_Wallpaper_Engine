@@ -1375,6 +1375,8 @@ void Engine::GetTelemetryLocked(EngineTelemetry& out) const {
         out.framesDropped  = vt.framesDropped;
         out.decoderFps     = vt.decoderFps;
         out.renderFps      = vt.renderFps;
+        out.avSyncDriftMs  = vt.avSyncDriftMs;
+        out.avSyncCorrections = vt.avSyncCorrections;
         out.sourceFps      = vt.sourceFps;
         out.convertFps     = vt.convertFps;
         out.schedulerDrops = vt.schedulerDrops;
@@ -1643,6 +1645,10 @@ void Engine::DumpStats() const {
         REX_LOG_INFO("Engine", "  Frames dropped:  {}", tel.framesDropped);
         REX_LOG_INFO("Engine", "  Decoder FPS:     {:.1f}", tel.decoderFps);
         REX_LOG_INFO("Engine", "  Render FPS:      {:.1f}", tel.renderFps);
+        // A/V sync: silent by nature, so it has to be readable. The drift is
+        // the CHANGE in the audio-vs-video offset, not the offset itself.
+        REX_LOG_INFO("Engine", "  A/V drift:       {:+.1} ms ({} corrections)",
+                     tel.avSyncDriftMs, tel.avSyncCorrections);
     }
 }
 
