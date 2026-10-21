@@ -4,13 +4,13 @@ import { applyWallpaperToDesktop, updateDesktopSettings } from './desktop'
 import { useWallpaperRuntimeStatus } from './runtimeEvents'
 
 export function reapplyDesktopWallpaper() {
-  const { wallpapers, selectedId } = getSnapshot()
-  const active = wallpapers.find((w) => w.id === selectedId) ?? wallpapers[0] ?? null
+  const { wallpapers, selectedId, appliedId } = getSnapshot()
+  const active = wallpapers.find((w) => w.id === (appliedId ?? selectedId)) ?? wallpapers[0] ?? null
   if (active) applyWallpaperToDesktop(active)
 }
 
 export default function DesktopApply() {
-  const { wallpapers, selectedId } = useWallpaperStore()
+  const { wallpapers, appliedId, externallyApplied } = useWallpaperStore()
   const [loadedKey, setLoadedKey] = useState(null)
   const runtimeStatus = useWallpaperRuntimeStatus()
 
@@ -26,7 +26,9 @@ export default function DesktopApply() {
     }
   }, [runtimeStatus])
 
-  const active = wallpapers.find((w) => w.id === selectedId) ?? wallpapers[0] ?? null
+  // Only an explicitly applied wallpaper drives the desktop; selecting a
+  // tile for preview (single click) must not change the wallpaper.
+  const active = wallpapers.find((w) => w.id === appliedId) ?? null
 
   // Scene identity — a new file/type means a fresh LOAD+PLAY on the runtime.
   const loadKey = active ? [active.id, active.type, active.filePath].join('|') : null
@@ -40,12 +42,18 @@ export default function DesktopApply() {
         active.playback.volume,
         active.playback.speed,
         active.playback.audioMode,
+        active.appearance?.brightness,
+        active.appearance?.contrast,
+        active.appearance?.saturation,
       ].join('|')
     : null
 
   useEffect(() => {
     if (!active) return
-    if (loadKey !== null) applyWallpaperToDesktop(active)
+    // At boot main has already replayed last-wallpaper.json; adopt that scene
+    // instead of issuing a second LOAD (which would restart the video just
+    // because the user selected its tile).
+    if (loadKey !== null && !externallyApplied) applyWallpaperToDesktop(active)
     // Track the applied scene so property updates only flow once the
     // runtime has a scene loaded (otherwise SET_* would race the LOAD).
     setLoadedKey(loadKey)

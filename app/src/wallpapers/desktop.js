@@ -28,9 +28,13 @@ export const ENGINE_MODE_BY_MODE = {
 // What the C++ engine can apply live, per type. Mirrors the runtime's
 // GET_CAPABILITIES response (used as a fallback when the runtime is
 // unavailable, e.g. browser-only dev).
+//
+// The video adapter also advertises brightness / contrast / saturation (it
+// applies them per frame through the renderer's b0 constants). The static
+// (image) adapter has NO colour pipeline, so those are video-only.
 export const DESKTOP_CAPABILITIES = {
   IMAGE: ['fillMode'],
-  VIDEO: ['fillMode', 'speed', 'loop', 'volume', 'mute', 'audioMode'],
+  VIDEO: ['fillMode', 'speed', 'loop', 'volume', 'mute', 'audioMode', 'brightness', 'contrast', 'saturation'],
   WEB: [],
   SCENE: [],
   SHADER: [],
@@ -65,6 +69,11 @@ export function applyWallpaperToDesktop(w) {
       muted: w.playback.mute,
       volume: w.playback.volume / 100,
       speed: w.playback.speed,
+      // The engine's colour scale is 0..2 with 1.0 = unchanged; the app
+      // keeps percent 0..200 where 100 = unchanged.
+      brightness: (w.appearance?.brightness ?? 100) / 100,
+      contrast: (w.appearance?.contrast ?? 100) / 100,
+      saturation: (w.appearance?.saturation ?? 100) / 100,
     })?.then((res) => {
       if (res && !res.ok) notifyError('Could not apply video wallpaper', res.error)
     })
@@ -98,6 +107,11 @@ export async function updateDesktopSettings(w) {
     if (caps.includes('audioMode') && w.playback.audioMode) {
       opts.audioMode = w.playback.audioMode
     }
+    // Colour adjustments: the engine clamps 0..2 with 1.0 = unchanged, the
+    // app stores percent 0..200 with 100 = unchanged.
+    if (caps.includes('brightness')) opts.brightness = (w.appearance?.brightness ?? 100) / 100
+    if (caps.includes('contrast')) opts.contrast = (w.appearance?.contrast ?? 100) / 100
+    if (caps.includes('saturation')) opts.saturation = (w.appearance?.saturation ?? 100) / 100
   } else {
     return
   }

@@ -58,6 +58,9 @@ const FIELD_BY_UPDATE_CMD = {
   SET_VOLUME: 'volume',
   SET_MUTE: 'muted',
   SET_AUDIO_MODE: 'audioMode',
+  SET_BRIGHTNESS: 'brightness',
+  SET_CONTRAST: 'contrast',
+  SET_SATURATION: 'saturation',
 }
 
 function mergeLiveUpdate(entry, applied, values) {

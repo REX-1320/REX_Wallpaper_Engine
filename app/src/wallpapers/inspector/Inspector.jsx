@@ -1,23 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import { MousePointerClick, Search, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Empty, EmptyContent, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { InspectorSearchContext } from '@/components/properties/search'
 import { selectWallpaper, useWallpaperStore } from '../store'
-import AppearanceSection from './sections/AppearanceSection'
-import RendererSection from './sections/RendererSection'
-import ActionsSection from './sections/ActionsSection'
+import { DESKTOP_CAPABILITIES } from '../desktop'
+import { formatBytes, useMediaInfo } from '../mediaInfo'
+import { getThumb } from '../thumbCache'
+import PrimaryActions from './PrimaryActions'
+import PlaybackSection from './sections/PlaybackSection'
+import PictureSection from './sections/PictureSection'
+import DisplaySection from './sections/DisplaySection'
+import FileSection from './sections/FileSection'
+import PlaylistSection from './sections/PlaylistSection'
+import './wallpaper.css'
 
 export default function WallpaperInspector() {
-  const { wallpapers, selectedId } = useWallpaperStore()
+  const { wallpapers, selectedId, appliedId } = useWallpaperStore()
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const searchInputRef = useRef(null)
   const wallpaper = wallpapers.find((w) => w.id === selectedId) ?? null
+  const applied = Boolean(wallpaper && appliedId === wallpaper.id)
+  const capabilities = wallpaper ? DESKTOP_CAPABILITIES[wallpaper.type] ?? [] : []
+  // Real file facts: the registry's defaults (resolution, size) are made up,
+  // so the panel shows what the file actually is.
+  const media = useMediaInfo(wallpaper?.filePath)
+  const fileSize = formatBytes(media.size)
+  const poster = wallpaper
+    ? getThumb(wallpaper.filePath ?? wallpaper.info?.filePath ?? wallpaper.info?.source)?.dataUrl ?? null
+    : null
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus()
@@ -32,16 +46,21 @@ export default function WallpaperInspector() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ type: 'spring', stiffness: 260, damping: 26 }}
         >
-          <div className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2.5">
+          {wallpaper ? (
+            <div className="insp-poster">
+              {poster ? <img src={poster} alt="" /> : <MousePointerClick size={20} />}
+            </div>
+          ) : null}
+
+          <div className="insp-head">
             {wallpaper ? (
               <>
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate text-sm font-semibold text-foreground">
-                    {wallpaper.info.name}
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="insp-title">{wallpaper.info.name}</span>
+                  <span className="insp-meta">
+                    <span>{wallpaper.type}</span>
+                    {fileSize ? <span>· {fileSize}</span> : null}
                   </span>
-                  <Badge variant="secondary" className="shrink-0 text-[9px] tracking-wider uppercase">
-                    {wallpaper.type}
-                  </Badge>
                 </div>
                 <Button
                   variant="ghost"
@@ -53,7 +72,7 @@ export default function WallpaperInspector() {
                 </Button>
               </>
             ) : (
-              <span className="text-sm font-semibold text-foreground">Wallpaper Inspector</span>
+              <span className="insp-title">Wallpaper Inspector</span>
             )}
           </div>
 
@@ -90,7 +109,7 @@ export default function WallpaperInspector() {
             </motion.div>
           </div>
 
-          <ScrollArea className="min-h-0 flex-1">
+          <ScrollArea className="min-h-[180px] flex-1">
             <div className="flex flex-col gap-2.5 p-3">
               <AnimatePresence mode="wait">
                 {wallpaper ? (
@@ -102,23 +121,35 @@ export default function WallpaperInspector() {
                     transition={{ duration: 0.18 }}
                     className="flex flex-col gap-2.5"
                   >
-                    <AppearanceSection wallpaper={wallpaper} />
-                    <RendererSection wallpaper={wallpaper} />
-                    <ActionsSection wallpaper={wallpaper} />
+                    <PrimaryActions wallpaper={wallpaper} applied={applied} />
+                    <PlaybackSection
+                      wallpaper={wallpaper}
+                      applied={applied}
+                      capabilities={capabilities}
+                      media={media}
+                    />
+                    <PictureSection
+                      wallpaper={wallpaper}
+                      applied={applied}
+                      capabilities={capabilities}
+                    />
+                    <DisplaySection wallpaper={wallpaper} applied={applied} />
+                    <FileSection wallpaper={wallpaper} />
+                    <PlaylistSection wallpaper={wallpaper} />
                   </motion.div>
                 ) : (
                   <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                    <Empty className="min-h-52">
-                      <EmptyMedia variant="icon">
-                        <MousePointerClick className="size-5" />
-                      </EmptyMedia>
-                      <EmptyContent>
-                        <EmptyTitle>No wallpaper selected</EmptyTitle>
-                        <EmptyDescription>
-                          Select a wallpaper on the preview to edit its properties.
-                        </EmptyDescription>
-                      </EmptyContent>
-                    </Empty>
+                    <div className="insp-empty">
+                      <span className="insp-empty-icon">
+                        <MousePointerClick size={22} />
+                      </span>
+                      <div>
+                        <div className="insp-empty-title">No wallpaper selected</div>
+                        <div className="insp-empty-hint">
+                          Pick one in the gallery to edit how it plays.
+                        </div>
+                      </div>
+                    </div>
                   </motion.div>
                 )}
               </AnimatePresence>

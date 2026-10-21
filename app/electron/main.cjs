@@ -8,17 +8,50 @@ const { AppStateManager } = require('./app-state-manager.cjs')
 const { WallpaperLibrary } = require('./wallpaper-library.cjs')
 const startup = require('./startup.cjs')
 const { isPathInside } = require('./path-guard.cjs')
+const { generatePoster } = require('./poster-worker.cjs')
+const { probeMediaFile } = require('./mediaInfo.cjs')
+
+// ─── GPU thumbnail worker mode ────────────────────────────────────────────────
+// A separate, hardware-accelerated Electron process that decodes one poster and
+// exits (see thumb-worker.cjs). It must be handled BEFORE
+// disableHardwareAcceleration() below, and must never touch the single-instance
+// lock, tray, runtime or window lifecycle that follow.
+if (process.argv.includes('--rex-thumb-worker')) {
+  require('./thumb-worker.cjs')
+    .run(process.argv)
+    .then((code) => app.exit(code || 0))
+    .catch(() => app.exit(1))
+  return
+}
+
+// The Electron UI is a settings surface; the wallpaper itself is rendered by
+// the separate native runtime (D3D12). Software-compositing the UI keeps its
+// GPU footprint near zero dedicated VRAM while the app is parked in the tray.
+// Must run before the app is ready. The runtime process is unaffected.
+app.disableHardwareAcceleration()
 
 // ─── Single-instance protection ─────────────────────────────────────────────
 // REX is a background app: one instance, one tray icon, one runtime. A second
 // launch forwards a "restore window" command to the first instance and exits.
 const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) app.quit()
+if (!gotLock) {
+  // Another instance owns the single-instance lock - this one has nothing to do.
+  logLine('app: quit', 'another instance holds the lock')
+  app.quit()
+}
 
 let mainWindow = null
 let isQuitting = false
 let trayManager = null
 const startInBackground = process.argv.includes('--background')
+
+// Window lifecycle state. The BrowserWindow is destroyed on close and recreated
+// on demand; nothing may assume mainWindow exists.
+let navigateReady = false // renderer registered its onNavigate listener
+let pendingNavigate = null // destination queued until that listener is ready
+let revealTimer = null
+let revealWin = null
+const closingWindows = new WeakSet()
 
 // Dev-aware login-item registration: packaged apps register the exe
 // directly, but dev Electron needs the app folder as argv[1] or Windows
@@ -32,11 +65,8 @@ function applyLoginItem(enabled) {
 
 app.on('second-instance', () => {
   if (!gotLock) return
-  if (!mainWindow) return
-  if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.show()
-  mainWindow.focus()
   logLine('second-instance: restoring window')
+  showMainWindow()
 })
 
 const IMAGE_EXT = /\.(bmp|gif|jpe?g|png|webp|tiff?)$/i
@@ -119,10 +149,14 @@ async function reapplyLastWallpaper() {
   if (!lastApplied) return
   const { kind, params } = lastApplied
   try {
-    await runtime.init(params.fps ?? 60, true)
+    // Images are OS-drawn: INIT would build the 4K D3D12 engine for a
+    // wallpaper that never uses it (measured 84 MB private + ~103 MB VRAM).
+    // Only a video needs the engine — the native video LOAD rejects a null
+    // engine, while the image LOAD is explicitly engine-free.
     if (kind === 'image') {
       await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
     } else {
+      await runtime.init(params.fps ?? 60, true)
       await runtime.send('LOAD', {
         path: params.path,
         type: 'video',
@@ -141,7 +175,11 @@ async function reapplyLastWallpaper() {
       }
     }
     capabilities = null
-    await runtime.send('PLAY', {})
+    // Images have no engine scene: PLAY always failed with "No scene
+    // loaded" and would mark a successful recovery as failed.
+    if (kind !== 'image') {
+      await runtime.send('PLAY', {})
+    }
     logLine('runtime:recovery reapplied last wallpaper', kind, params.path)
     return true
   } catch (err) {
@@ -150,11 +188,35 @@ async function reapplyLastWallpaper() {
   }
 }
 
+// ─── Idle engine reclaim ────────────────────────────────────────────────────
+// A static image is drawn by the OS. The native engine (D3D12 device, video
+// pool) is dead weight while one is showing — and the AMD driver pins every
+// imported shared-texture pool until the process exits (measured: ~180 MiB
+// per 4K video session; releasing imports, trimming and destroying both
+// devices does not return it). The process is therefore the reclaim
+// boundary: an image apply deliberately stops the runtime. The next video
+// apply lazily spawns a fresh one (cold INIT ≈ 0.7 s, once per video).
+function reclaimIdleRuntime(reason) {
+  if (!runtime.proc) return
+  // Image-only runtime (never INITed): it is ~10 MB with no engine and no
+  // VRAM, and it keeps image LOADs / fill-mode updates warm. Keep it.
+  if (!runtime.inited) return
+  logLine('runtime:reclaim', reason)
+  // intentional → the supervisor must not treat this exit as a crash and
+  // replay the wallpaper (replaying would respawn the runtime).
+  runtime.stop({ intentional: true })
+  capabilities = null
+}
+
 // Live updates used to change only the running engine; a crash then
 // replayed the STALE apply-time settings from startup's last-wallpaper.json
 // (audit 5.10 #5). Merge successful live updates into lastApplied and
 // persist them — debounced so slider drags don't hammer the disk.
 let _persistTimer = null
+// Last SET_* summary logged, so a slider drag does not write a line per pixel.
+let lastUpdateSummary = ''
+let lastUpdateValues = ''
+let lastUpdateLogAt = 0
 function persistLastAppliedDebounced() {
   if (_persistTimer) clearTimeout(_persistTimer)
   _persistTimer = setTimeout(() => {
@@ -178,7 +240,7 @@ async function getCapabilities() {
 
 async function sendIfSupported(cmd, params, applied, skipped) {
   const caps = await getCapabilities()
-  const property = { SET_FILL_MODE: 'fillMode', SET_VOLUME: 'volume', SET_SPEED: 'speed', SET_LOOP: 'loop', SET_MUTE: 'mute', SET_AUDIO_MODE: 'audioMode' }[cmd]
+  const property = { SET_FILL_MODE: 'fillMode', SET_VOLUME: 'volume', SET_SPEED: 'speed', SET_LOOP: 'loop', SET_MUTE: 'mute', SET_AUDIO_MODE: 'audioMode', SET_BRIGHTNESS: 'brightness', SET_CONTRAST: 'contrast', SET_SATURATION: 'saturation' }[cmd]
   if (!property || !caps.properties.includes(property)) {
     skipped.push(cmd)
     return
@@ -199,7 +261,10 @@ async function applyStoredWallpaper(entry) {
   const { kind, params } = entry
   try {
     if (kind === 'image') {
-      await runtime.init()
+      // No INIT: this is the OS wallpaper path, not an engine scene (see the
+      // native LOAD branch). The image is applied either way; skipping INIT
+      // keeps an image-only runtime at ~10 MB private and 0 MB VRAM instead
+      // of building a 4K D3D12 engine for it.
       await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
     } else {
       await runtime.init(params.fps ?? 0, true)
@@ -219,9 +284,27 @@ async function applyStoredWallpaper(entry) {
           logLine('startup: re-apply SET_AUDIO_MODE failed', err.message)
         }
       }
+      // Colour adjustments are not part of LOAD either — the boot replay has
+      // to restore them or the wallpaper comes back at the engine's default.
+      const restored = []
+      for (const [cmd, value] of [['SET_BRIGHTNESS', params.brightness], ['SET_CONTRAST', params.contrast], ['SET_SATURATION', params.saturation]]) {
+        if (value == null) continue
+        try {
+          await runtime.send(cmd, { value })
+          restored.push(`${cmd}=${value}`)
+        } catch (err) {
+          logLine(`startup: re-apply ${cmd} failed`, err.message)
+        }
+      }
+      if (restored.length > 0) logLine('startup: re-applied', restored.join(' '))
     }
     capabilities = null // adapter changed — refresh on next query
-    await runtime.send('PLAY', {})
+    // Images are applied through the OS wallpaper API (see the LOAD branch),
+    // not an engine scene. PLAY would always fail with "No scene loaded" and
+    // incorrectly mark a successful boot restore as failed.
+    if (kind !== 'image') {
+      await runtime.send('PLAY', {})
+    }
     lastApplied = entry
     startup.saveLastApplied(app.getPath('userData'), lastApplied)
     if (supervisor) supervisor.resetRecovery()
@@ -262,6 +345,7 @@ function createWindow() {
     },
   })
   mainWindow = win
+  navigateReady = false
 
   // REX_WINDBG=1: log the OS move-loop boundaries so a drag that never starts
   // (or starts then aborts) can be told apart instead of guessed at.
@@ -287,17 +371,38 @@ function createWindow() {
     win.webContents.send('window:maximized', false)
   })
 
-  // Close → hide, never quit. REX lives in the tray; only Exit REX quits.
+  // Close → tear the renderer down. REX lives in the tray, and the native
+  // runtime is a separate process that keeps the wallpaper playing. Destroying
+  // (rather than hiding) is what actually releases the renderer and its GPU
+  // allocations; a hidden window otherwise keeps both for the app's lifetime.
   win.on('close', (event) => {
-    if (!isQuitting) {
-      event.preventDefault()
-      win.hide()
-      logLine('window: hidden (close)')
-    }
+    if (isQuitting) return
+    event.preventDefault()
+    closingWindows.add(win)
+    win.hide()
+    logLine('window: destroying (close)')
+    // destroy() skips beforeunload/unload, so essential main-process state is
+    // flushed here, synchronously, while the renderer still exists.
+    try { appState?.flush() } catch {}
+    setImmediate(() => {
+      if (!win.isDestroyed()) win.destroy()
+    })
   })
   win.on('closed', () => {
-    if (mainWindow === win) mainWindow = null
+    // A newer window may already have replaced this one (e.g. second-instance
+    // during teardown). Only clear state that still belongs to this window.
+    if (mainWindow !== win) return
+    mainWindow = null
+    navigateReady = false
+    pendingNavigate = null
+    if (revealWin === win) {
+      if (revealTimer) clearTimeout(revealTimer)
+      revealTimer = null
+      revealWin = null
+    }
+    logLine('window: destroyed')
   })
+  win.webContents.on('did-start-loading', () => { navigateReady = false })
 
   // ─── Renderer watchdog bridge (audit 5.10 #9) ─────────────────────────────
   // A crashed renderer used to leave a dead window forever: report it through
@@ -315,6 +420,70 @@ function createWindow() {
     return { action: 'deny' }
   })
 
+  return win
+}
+
+// ─── Window lifecycle: one window, created on demand ───────────────────────
+// Close destroys the window (see createWindow). Every reopen path — tray
+// click, tray Settings, second-instance, app activate — funnels through
+// showMainWindow so concurrent requests can never create two windows.
+function flushPendingNavigate(win) {
+  if (!pendingNavigate || !navigateReady) return
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+  if (closingWindows.has(win)) return
+  const page = pendingNavigate
+  pendingNavigate = null
+  win.webContents.send('navigate', page)
+  logLine('window: navigate', page)
+}
+
+function revealWindow(win) {
+  if (revealWin === win) {
+    if (revealTimer) clearTimeout(revealTimer)
+    revealTimer = null
+    revealWin = null
+  }
+  if (!win || win.isDestroyed() || closingWindows.has(win)) return
+  if (!win.isVisible()) win.show()
+  win.focus()
+}
+
+function scheduleReveal(win) {
+  // A newer window supersedes any reveal still pending for an older one.
+  if (revealWin === win && revealTimer) return
+  if (revealTimer) clearTimeout(revealTimer)
+  revealWin = win
+  win.once('ready-to-show', () => revealWindow(win))
+  // Never leave a created window permanently hidden if ready-to-show is missed.
+  revealTimer = setTimeout(() => revealWindow(win), 2000)
+}
+
+function showMainWindow(navigateTo = null) {
+  if (navigateTo) pendingNavigate = navigateTo
+
+  // second-instance can fire before ready in a very tight relaunch.
+  if (!app.isReady()) {
+    app.once('ready', () => showMainWindow())
+    return null
+  }
+
+  let win = mainWindow
+  if (!win || win.isDestroyed() || closingWindows.has(win)) {
+    win = createWindow()
+  }
+
+  if (win.isMinimized()) win.restore()
+  if (win.isVisible()) {
+    win.focus()
+    flushPendingNavigate(win)
+    return win
+  }
+
+  if (win.webContents.isLoading()) {
+    scheduleReveal(win)
+  } else {
+    revealWindow(win)
+  }
   return win
 }
 
@@ -351,11 +520,19 @@ async function resumeWallpaper() {
 
 // Single shutdown path: tray exit, second-instance conflict, OS shutdown all
 // converge here. Idempotent so repeated calls are harmless.
-function quitApp() {
+function quitApp(reason = 'requested') {
   if (isQuitting) return
   isQuitting = true
+  // Without this the app could disappear with no trace in the log, which made
+  // every exit look like a mystery crash.
+  logLine('app: quit', reason)
+  try { appState?.flush() } catch {}
   trayManager?.destroy()
   trayManager = null
+  if (revealTimer) clearTimeout(revealTimer)
+  revealTimer = null
+  revealWin = null
+  pendingNavigate = null
   if (mainWindow) mainWindow.destroy()
   app.quit()
 }
@@ -387,21 +564,19 @@ app.whenReady().then(() => {
     }
     const mode = MODE_BY_STYLE[style] ?? 'fill'
     try {
-      await runtime.init()
+      // No INIT: LOAD applies the image through the OS wallpaper API and is
+      // valid with no engine (the runtime spawns on demand). INIT would build
+      // a 4K D3D12 engine the image never uses — measured 84 MB private and
+      // ~103 MB VRAM for an image-only desktop.
       await runtime.send('LOAD', { path: filePath, type: 'image', mode })
       capabilities = null // adapter changed — refresh on next query
-      // No scene exists after an image LOAD (OS-drawn wallpaper), so PLAY
-      // is expected to fail with "No scene loaded" — the image is applied
-      // regardless. Never fail the apply (or skip persistence) for that.
-      try {
-        await runtime.send('PLAY', {})
-      } catch (playErr) {
-        logLine('wallpaper:set PLAY-after-image (expected)', playErr.message)
-      }
       lastApplied = { kind: 'image', params: { path: filePath, mode } }
       startup.saveLastApplied(app.getPath('userData'), lastApplied)
       if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
       setRuntimeAvailable(true)
+      // The image is on the desktop now: free the engine (and every pinned
+      // video pool) instead of leaving it warm for a video that may never come.
+      reclaimIdleRuntime('image applied')
       return { ok: true, style: mode }
     } catch (err) {
       logLine('wallpaper:set ERROR', err.message)
@@ -409,8 +584,8 @@ app.whenReady().then(() => {
     }
   })
 
-  ipcMain.handle('wallpaper:video', async (event, { path: filePath, mode, fps, loop, muted, volume, speed, audioMode } = {}) => {
-    logLine('wallpaper:video', JSON.stringify({ path: filePath, mode, fps, loop, muted, volume, speed, audioMode }))
+  ipcMain.handle('wallpaper:video', async (event, { path: filePath, mode, fps, loop, muted, volume, speed, audioMode, brightness, contrast, saturation } = {}) => {
+    logLine('wallpaper:video', JSON.stringify({ path: filePath, mode, fps, loop, muted, volume, speed, audioMode, brightness, contrast, saturation }))
 
     if (typeof filePath !== 'string' || !filePath) {
       lastApplied = null
@@ -422,6 +597,8 @@ app.whenReady().then(() => {
           // runtime not running — nothing to stop
         }
       }
+      // No wallpaper scene left: the engine has nothing to draw.
+      reclaimIdleRuntime('wallpaper cleared')
       return { ok: true, stopped: true }
     }
 
@@ -447,11 +624,23 @@ app.whenReady().then(() => {
           logLine('wallpaper:video SET_AUDIO_MODE failed', err.message)
         }
       }
+      // Colour adjustments are live properties too, NOT part of LOAD: a
+      // scene starts at 1.0/1.0/1.0, so without these a wallpaper switch
+      // would inherit the previous file's brightness. Non-fatal, same as
+      // the audio layout above.
+      for (const [cmd, value] of [['SET_BRIGHTNESS', brightness], ['SET_CONTRAST', contrast], ['SET_SATURATION', saturation]]) {
+        if (value == null) continue
+        try {
+          await runtime.send(cmd, { value })
+        } catch (err) {
+          logLine(`wallpaper:video ${cmd} failed`, err.message)
+        }
+      }
       capabilities = null // adapter changed — refresh on next query
       await runtime.send('PLAY', {})
       lastApplied = {
         kind: 'video',
-        params: { path: filePath, mode, loop, muted, volume, speed, fps, audioMode },
+        params: { path: filePath, mode, loop, muted, volume, speed, fps, audioMode, brightness, contrast, saturation },
       }
       startup.saveLastApplied(app.getPath('userData'), lastApplied)
       if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
@@ -465,25 +654,66 @@ app.whenReady().then(() => {
 
   // Live property updates — only the properties the active renderer
   // actually supports are sent; the rest are reported as skipped.
-  ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed, muted, audioMode } = {}) => {
+  ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed, muted, audioMode, brightness, contrast, saturation } = {}) => {
     const applied = []
     const skipped = []
     // SET_FILL_MODE is the only update without a null guard — sending it with
     // an undefined value reset the fill mode every time any other property
     // was updated.
-    if (mode != null) await sendIfSupported('SET_FILL_MODE', { value: mode }, applied, skipped)
+    //
+    // Images are applied through the OS wallpaper API, not an engine scene:
+    // the image-only runtime reports no renderer properties, so the engine
+    // SET_FILL_MODE below was silently skipped and the style never changed.
+    // Re-issue the image LOAD with the new mode instead — the native image
+    // branch is engine-free, unloads any stale scene, and is idempotent.
+    if (mode != null && lastApplied?.kind === 'image' && lastApplied.params?.path) {
+      try {
+        await runtime.send('LOAD', {
+          path: lastApplied.params.path,
+          type: 'image',
+          mode,
+        })
+        // Reuse the SET_FILL_MODE bookkeeping so mergeLiveUpdate persists the
+        // new mode in last-wallpaper.json (same field as a video).
+        applied.push('SET_FILL_MODE')
+      } catch (err) {
+        skipped.push('SET_FILL_MODE')
+        logLine('wallpaper:update image mode ERROR', err.message)
+      }
+      // Normally a no-op (the image apply already reclaimed the engine); it
+      // covers a mode change issued while a video engine is still warm.
+      reclaimIdleRuntime('image mode updated')
+    } else if (mode != null) {
+      await sendIfSupported('SET_FILL_MODE', { value: mode }, applied, skipped)
+    }
     if (loop != null) await sendIfSupported('SET_LOOP', { value: !!loop }, applied, skipped)
     if (speed != null) await sendIfSupported('SET_SPEED', { value: speed }, applied, skipped)
     if (volume != null) await sendIfSupported('SET_VOLUME', { value: volume }, applied, skipped)
     if (muted != null) await sendIfSupported('SET_MUTE', { value: !!muted }, applied, skipped)
     if (audioMode != null) await sendIfSupported('SET_AUDIO_MODE', { value: audioMode }, applied, skipped)
+    // Colour adjustments: live, per frame, 0..2 with 1.0 = unchanged.
+    if (brightness != null) await sendIfSupported('SET_BRIGHTNESS', { value: brightness }, applied, skipped)
+    if (contrast != null) await sendIfSupported('SET_CONTRAST', { value: contrast }, applied, skipped)
+    if (saturation != null) await sendIfSupported('SET_SATURATION', { value: saturation }, applied, skipped)
     // Persist only what actually applied: a skipped property must not
     // enter the crash-replay state (replaying it would resurrect a value
     // the renderer refuses, or one the user never saw accepted).
     if (applied.length > 0 && lastApplied) {
-      if (startup.mergeLiveUpdate(lastApplied, applied, { mode, loop, volume, speed, muted, audioMode })) {
+      if (startup.mergeLiveUpdate(lastApplied, applied, { mode, loop, volume, speed, muted, audioMode, brightness, contrast, saturation })) {
         persistLastAppliedDebounced()
       }
+    }
+    // Log what the engine actually took: immediately when the SET of commands
+    // changes, and at most once a second while the values keep changing (a
+    // slider drag fires one update per pixel, and the log is read by humans).
+    const summary = `applied=${applied.join(',') || '-'} skipped=${skipped.join(',') || '-'}`
+    const valueSummary = `${summary} ${JSON.stringify({ mode, loop, volume, speed, muted, audioMode, brightness, contrast, saturation })}`
+    const now = Date.now()
+    if (summary !== lastUpdateSummary || (valueSummary !== lastUpdateValues && now - lastUpdateLogAt > 1000)) {
+      lastUpdateSummary = summary
+      lastUpdateValues = valueSummary
+      lastUpdateLogAt = now
+      logLine('wallpaper:update', valueSummary)
     }
     return { ok: true, applied, skipped }
   })
@@ -492,10 +722,42 @@ app.whenReady().then(() => {
     return getCapabilities()
   })
 
+  // "Does this file have an audio track?" The container header answers it
+  // without decoding: the inspector hides the audio controls for silent
+  // files instead of offering mute/volume for a track that does not exist.
+  ipcMain.handle('wallpaper:media-info', async (event, { path: filePath } = {}) => {
+    if (typeof filePath !== 'string' || !filePath) return { container: null, hasAudio: null }
+    return probeMediaFile(filePath)
+  })
+
+  // The wallpaper the runtime is actually showing (main re-applies it at boot
+  // from last-wallpaper.json). The renderer adopts it instead of pretending
+  // nothing is applied until the user clicks Apply again.
+  ipcMain.handle('wallpaper:last-applied', () => ({
+    kind: lastApplied?.kind ?? null,
+    path: lastApplied?.params?.path ?? null,
+  }))
+
+  // Transport controls (Inspector + tray). Pause/resume used to be tray-only:
+  // the renderer had no IPC surface because nothing in the UI called it. The
+  // Inspector now does, so expose the two existing commands.
+  ipcMain.handle('wallpaper:pause', () => pauseWallpaper())
+  ipcMain.handle('wallpaper:resume', () => resumeWallpaper())
+
   // Renderer liveness heartbeat for the supervisor watchdog (audit 5.10 #9):
   // preload sends one every 2 s; only a visible-but-stale renderer is treated
   // as hung (Supervisor._rendererTick).
   ipcMain.on('renderer:ping', () => supervisor?.recordRendererPing())
+
+  // Tray "Settings" may target a window that was just created. The preload
+  // announces when the renderer's onNavigate listener is actually mounted;
+  // only then is it safe to deliver a queued destination.
+  ipcMain.on('renderer:navigate-ready', (event) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (event.sender !== mainWindow.webContents) return
+    navigateReady = true
+    flushPendingNavigate(mainWindow)
+  })
 
   // Tray-driven pause/resume and the launch-at-login toggle have no IPC
   // surface anymore: their only caller was the dead preload API removed in
@@ -537,6 +799,24 @@ app.whenReady().then(() => {
       }
     } catch {}
     return { ok: true }
+  })
+
+  // HEVC posters: the UI runs without hardware acceleration, which removes
+  // Chromium's HEVC decoder, so the renderer's <video> cannot produce a frame.
+  // Delegate to the short-lived GPU worker instead (it exits immediately after
+  // writing one WebP, so the parked UI keeps its 0 MB VRAM footprint).
+  ipcMain.handle('wallpaper:fallback-thumbnail', async (event, payload = {}) => {
+    const filePath = typeof payload.path === 'string' ? payload.path : ''
+    const maxSize = Number.isFinite(payload.maxSize) ? Math.min(960, Math.max(64, payload.maxSize)) : 480
+    if (!filePath || !path.isAbsolute(filePath)) return { ok: false, reason: 'invalid-path' }
+    try {
+      if (!fs.statSync(filePath).isFile()) return { ok: false, reason: 'not-a-file' }
+    } catch {
+      return { ok: false, reason: 'missing' }
+    }
+    const result = await generatePoster(filePath, maxSize)
+    if (!result.ok) logLine('wallpaper:fallback-thumbnail failed', path.basename(filePath), result.reason)
+    return result
   })
 
   // ─── Persisted UI state (P0.3) ────────────────────────────────────────────
@@ -598,11 +878,13 @@ app.whenReady().then(() => {
   //     SMALLER than half -- native instead inflates the rect by the invisible
   //     resize border (Terminal reports -9,0 1938x2169 for a 1920x2160 client);
   //   * its size pin ratcheted up ~1px on every drag (1280 -> 1281 -> 1282).
-  createWindow()
+  // The window is created on demand (normal launch or tray open), not here:
+  // --background starts tray + native services only.
 
   trayManager = new TrayManager({
     getWindow: () => mainWindow,
-    onQuit: () => quitApp(),
+    onShowWindow: (navigateTo) => showMainWindow(navigateTo),
+    onQuit: () => quitApp('tray'),
     onPauseWallpaper: () => pauseWallpaper(),
     onResumeWallpaper: () => resumeWallpaper(),
     isLoginItemEnabled: () => {
@@ -698,10 +980,10 @@ app.whenReady().then(() => {
   })
   supervisor.start()
 
-  // Normal launch shows the UI; --background (e.g. Windows startup) keeps the
-  // window hidden — tray + native services only.
-  if (!startInBackground && mainWindow) {
-    mainWindow.show()
+  // Normal launch opens the UI; --background (e.g. Windows startup) starts the
+  // tray + native services only and defers the window to the first tray open.
+  if (!startInBackground) {
+    showMainWindow()
     logLine('window: shown (normal launch)')
     // REX_WINDBG=1: DOM-level caption audit. Logs what actually sits at the
     // titlebar viewport points, so a dead drag region can be blamed on a
@@ -737,17 +1019,17 @@ app.whenReady().then(() => {
       }, 4000)
     }
   } else {
-    logLine('window: kept hidden (background launch)')
+    logLine('window: deferred (background launch)')
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    showMainWindow()
   })
 })
 
 // REX is a background application — the tray owns the lifetime. Closing the
-// window hides it (see the close handler above); we never quit on
-// window-all-closed. Only Exit REX (quitApp) terminates the app.
+// window destroys it (see the close handler) but leaves the app and the native
+// runtime running; only Exit REX (quitApp) terminates the process.
 app.on('window-all-closed', () => {})
 
 app.on('will-quit', () => {
