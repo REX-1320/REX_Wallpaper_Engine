@@ -102,6 +102,10 @@ public:
     /// R16G16B16A16_FLOAT + PQ (ST.2084) / BT.2020.
     bool IsHDR() const { return m_isHdr; }
     DXGI_FORMAT GetBackBufferFormat() const { return m_format; }
+    /// The DXGI output the window sits on ("\\.\DISPLAY1"), empty until the
+    /// HDR selection has run. Used to look up per-display settings (the OS's
+    /// SDR white level).
+    const std::wstring& GetOutputDeviceName() const { return m_outputDeviceName; }
 
     /// Display luminance capability (nits) as reported by DXGI_OUTPUT_DESC1.
     /// Valid only when IsHDRActive() (falls back to 0 otherwise).
@@ -136,6 +140,8 @@ private:
     // last of it. Falls back to 8-bit if the driver refuses the format
     // (see SwapChain::Initialize / UpdateHdrSelection).
     DXGI_FORMAT m_format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    /// The DXGI output the window sits on ("\\.\DISPLAY1").
+    std::wstring m_outputDeviceName;
     /// Sticky: the driver rejected a 10-bit SDR back buffer, so every
     /// later refresh uses 8-bit UNORM instead of retrying.
     bool m_sdrTenBitUnsupported = false;

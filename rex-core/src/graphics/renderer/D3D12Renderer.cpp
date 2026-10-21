@@ -2,6 +2,7 @@
 #include "D3D12Renderer.hpp"
 #include "graphics/renderer/HdrSyncPolicy.hpp"
 #include "graphics/renderer/OutputDither.hpp"
+#include "graphics/renderer/SdrWhiteLevel.hpp"
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include <shared/Logger.hpp>
 #include <d3dcompiler.h>
@@ -2126,6 +2127,22 @@ void D3D12Renderer::SyncHdrStateLocked() {
         REX_LOG_INFO("D3D12", "HDR output {} (swapchain {})",
                      m_isHdrOutput ? "enabled" : "disabled",
                      m_isHdrOutput ? "R16F/PQ" : "UNORM/sRGB");
+        if (m_isHdrOutput) {
+            // The OS knows how bright "SDR white" should be on an HDR
+            // display - it is the Windows "SDR content brightness" slider -
+            // and exposes it as a fixed-point multiplier of the 80-nit
+            // reference. Take it from there so SDR wallpapers on an HDR
+            // panel follow the user's brightness choice instead of the
+            // hard-coded 100 nits. On an SDR display the API has nothing to
+            // report and the fallback stays.
+            const float nits = graphics::QuerySdrWhiteLevelNits(
+                m_swapChain.GetOutputDeviceName());
+            if (nits > 0.0f && nits != m_sdrWhiteNits) {
+                REX_LOG_INFO("D3D12", "SDR white level from the OS: {} nits",
+                             nits);
+                m_sdrWhiteNits = nits;
+            }
+        }
     }
     if (action.createHdrPso) {
         if (!CreatePipelineState(DXGI_FORMAT_R16G16B16A16_FLOAT,

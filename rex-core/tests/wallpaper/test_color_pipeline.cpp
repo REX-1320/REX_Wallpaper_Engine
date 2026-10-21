@@ -38,6 +38,7 @@ extern "C" {
 #include "graphics/renderer/D3D12Renderer.hpp"
 #include "graphics/renderer/HdrToneMapping.hpp"
 #include "graphics/renderer/OutputDither.hpp"
+#include "graphics/renderer/SdrWhiteLevel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -476,4 +477,17 @@ TEST(ColorPipeline, OutputDitherMatchesTheTargetDepth) {
     // The HDR output is FP16 - not quantised, so no dither.
     EXPECT_EQ(rex::graphics::OutputDitherBits(DXGI_FORMAT_R16G16B16A16_FLOAT), 0);
     EXPECT_EQ(rex::graphics::OutputDitherBits(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB), 0);
+}
+
+// The OS reports the SDR white level as a fixed-point multiplier of the
+// 80-nit reference (DISPLAYCONFIG_SDR_WHITE_LEVEL): nits = (level/1000)*80.
+// The conversion is pure, so it is pinned here; the query itself needs an
+// HDR display and is exercised live.
+TEST(ColorPipeline, SdrWhiteLevelConversion) {
+    EXPECT_FLOAT_EQ(rex::graphics::SdrWhiteLevelToNits(1000), 80.0f);
+    EXPECT_FLOAT_EQ(rex::graphics::SdrWhiteLevelToNits(1250), 100.0f);
+    EXPECT_FLOAT_EQ(rex::graphics::SdrWhiteLevelToNits(2538), 203.04f);
+    // 0 means "the display does not report one" - the caller keeps its
+    // fallback, so the conversion must not turn it into a usable value.
+    EXPECT_FLOAT_EQ(rex::graphics::SdrWhiteLevelToNits(0), 0.0f);
 }

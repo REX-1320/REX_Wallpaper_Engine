@@ -345,6 +345,10 @@ void SwapChain::UpdateHdrSelection() {
         // HDR10-capable outputs advertise the PQ/BT.2020 color space. scRGB
         // (advanced color) is intentionally treated as SDR for now.
         hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+        // The output's device name (e.g. "\\.\DISPLAY1"): the OS's SDR white
+        // level is looked up per display, so the renderer needs to know which
+        // display it is driving.
+        m_outputDeviceName = desc1.DeviceName;
     }
     DXGI_FORMAT fmt = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
                           : (m_sdrTenBitUnsupported
