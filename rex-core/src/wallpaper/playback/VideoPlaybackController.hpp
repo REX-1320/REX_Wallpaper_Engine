@@ -23,6 +23,23 @@
 
 namespace rex::wallpaper {
 
+// ─── A/V sync decision (pure) ──────────────────────────────────────────────
+//
+// Should the audio be re-seeked onto the video's position?
+//
+// The argument is the CHANGE in the audio-vs-video offset over time, not the
+// offset itself: both positions lead their playhead by a fixed amount (the
+// audio ring's depth, the video scheduler's slots), so the offset carries a
+// constant bias that must not be mistaken for a sync error. Only a change
+// beyond the threshold means the two clocks have really parted.
+//
+// Pure, so the decision is unit-tested without an audio device.
+inline bool AvSyncNeedsCorrection(double driftChangeMs, double thresholdMs) {
+    return driftChangeMs >= thresholdMs || driftChangeMs <= -thresholdMs;
+}
+
+
+
 // ─── VideoPlaybackTelemetry ─────────────────────────────────────────────
 //
 // NOTE: intentionally distinct from PlaybackTelemetry (PlaybackController)
@@ -66,7 +83,8 @@ struct VideoPlaybackTelemetry {
     // (negative pulls earlier). ~-0.5 ms steady-state on this machine.
     double   decodeServoCorrMs = 0.0;
     uint32_t recoveryCount   = 0;
-    uint64_t sendEagainStalls = 0;  // packets abandoned at send-EAGAIN
+    uint64_t sendEagainStalls = 0;  // packets abandoned at send-EAGAIN
+
     uint32_t hwDecoderProfiles = 0;   // driver HW decoder profile count
     // Drops per second over the telemetry window. schedulerDrops is a
     // LIFETIME counter and reads alarming forever after a startup burst
@@ -280,6 +298,23 @@ private:
     std::atomic<uint64_t> m_reserveUnderruns{0};
     CadenceController::DecodeAheadPolicy m_decodeAheadPolicy{};
     std::atomic<double> m_position{0.0};
+    // ── A/V sync watchdog ───────────────────────────────────────────────
+    // The drift is measured as the CHANGE in the audio-vs-video offset
+    // (both positions lead their playhead by a fixed amount, so the offset
+    // itself is not the error). kAvSyncCorrectionMs is far above any
+    // scheduling artefact, so the watchdog can only fire on a real drift.
+    static constexpr int kAvSyncCheckFrames = 120;    // ~4 s at 30 fps
+    static constexpr double kAvSyncCorrectionMs = 250.0;
+    int m_avSyncTicks = 0;
+    double m_avSyncBaseline = 0.0;
+    bool m_avSyncBaselineValid = false;
+    std::atomic<double> m_avSyncDriftMs{0.0};
+    std::atomic<uint64_t> m_avSyncCorrections{0};
+
+    /// A/V sync watchdog: measure the drift between the audio's playhead and
+    /// the video's and correct it when the two clocks really part.
+    void CheckAvSync();
+
     // Decode pacing servo: cancels the steady per-sleep wake overshoot
     // (~+0.5 ms on this machine: ~3% slow at 60 fps, ~6% at 120 fps) that an
     // open-loop interval can never recover — the reserve pins negative and

@@ -593,6 +593,20 @@ class FfmpegVideoDecoder {
 private:
     bool SeekInternal(double seconds);
     VideoColorInfo ResolveColorInfo() const;
+    /// The hardware decode format callback (C2).
+    ///
+    /// FFmpeg calls this while opening a hardware decoder, with the list of
+    /// formats the decoder can produce. It is the engine's chance to
+    /// pre-size the hardware frames: an AVHWFramesContext with the known
+    /// width/height lets FFmpeg allocate the decoded surfaces ONCE, in the
+    /// right format and size, instead of re-allocating them whenever the
+    /// resolution changes mid-stream (which is what forced the pool
+    /// rebuilds). Returning a hardware format here also means FFmpeg has
+    /// already probed the driver for it - if the driver cannot deliver
+    /// D3D11 frames, the callback is never reached and FFmpeg falls back
+    /// to software decode on its own.
+    static enum AVPixelFormat GetHwFormat(
+        AVCodecContext* ctx, const enum AVPixelFormat* const formats);
     bool EnsurePool(UINT width, UINT height, DXGI_FORMAT format);
     /// Create/reuse the software-conversion context. ALWAYS applies the
     /// resolved source matrix/range via sws_setColorspaceDetails; the cache

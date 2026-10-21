@@ -347,6 +347,7 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                                D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
             if (av_hwdevice_ctx_init(hwDevRef) >= 0) {
                 m_decCtx->hw_device_ctx = av_buffer_ref(hwDevRef);
+                m_decCtx->get_format = &FfmpegVideoDecoder::GetHwFormat;
                 m_hwDevCtx = hwDevRef;
                 // Frame-threading a hwaccel decoder is unsafe (one shared
                 // hwctx), so pin hardware decode to a single thread. This is
@@ -556,6 +557,45 @@ bool FfmpegVideoDecoder::Flush() {
     return true;
 }
 
+enum AVPixelFormat FfmpegVideoDecoder::GetHwFormat(
+    AVCodecContext* ctx, const enum AVPixelFormat* const formats) {
+    // The D3D11VA decoder delivers its frames as AV_PIX_FMT_D3D11. The
+    // caller (FFmpeg) has already checked that the codec can produce them.
+    for (const enum AVPixelFormat* f = formats; *f != AV_PIX_FMT_NONE; ++f) {
+        if (*f != AV_PIX_FMT_D3D11) {
+            continue;
+        }
+        // Pre-size the hardware frames: FFmpeg then allocates the decoded
+        // surfaces once, at the known size, instead of re-allocating them
+        // whenever the resolution changes mid-stream.
+        AVBufferRef* frames = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
+        if (frames) {
+            AVHWFramesContext* fc =
+                reinterpret_cast<AVHWFramesContext*>(frames->data);
+            fc->format = AV_PIX_FMT_D3D11;
+            fc->sw_format = ctx->pix_fmt;   // the software format behind it
+            fc->width = ctx->width;
+            fc->height = ctx->height;
+            if (av_hwframe_ctx_init(frames) >= 0) {
+                ctx->hw_frames_ctx = frames;   // FFmpeg takes ownership
+                REX_LOG_INFO(kModule,
+                             "hardware frames pre-sized: %dx%d (sw format %s)",
+                             ctx->width, ctx->height,
+                             av_get_pix_fmt_name(ctx->pix_fmt));
+                return AV_PIX_FMT_D3D11;
+            }
+            // The driver refused the pre-sized context: let FFmpeg allocate
+            // the frames itself rather than failing the decode.
+            av_buffer_unref(&frames);
+            REX_LOG_WARN(kModule,
+                         "hardware frames context could not be pre-sized; "
+                         "letting the decoder allocate them");
+        }
+        return AV_PIX_FMT_D3D11;
+    }
+    return formats[0];
+}
+
 bool FfmpegVideoDecoder::SeekInternal(double seconds) {
     std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
     if (!m_fmtCtx || !m_stream) return false;
@@ -648,6 +688,7 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
     bool hwOk = false;
     if (m_hardware && m_hwDevCtx) {
         m_decCtx->hw_device_ctx = av_buffer_ref(m_hwDevCtx);
+        m_decCtx->get_format = &FfmpegVideoDecoder::GetHwFormat;
         if (avcodec_open2(m_decCtx, codec, nullptr) < 0) {
             REX_LOG_WARN(kModule, "stream switch: hardware open failed, retrying software");
             avcodec_free_context(&m_decCtx);

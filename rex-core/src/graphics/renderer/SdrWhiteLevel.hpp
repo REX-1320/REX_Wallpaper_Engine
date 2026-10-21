@@ -91,3 +91,57 @@ inline float QuerySdrWhiteLevelNits(const std::wstring& sourceDeviceName) {
 }
 
 }  // namespace rex::graphics
+
+/// Is the display showing `sourceDeviceName` in an HDR mode?
+///
+/// The DXGI output's colour space does NOT answer this: in an HDR desktop
+/// the DWM still presents SDR windows with a G22 colour space, so the
+/// swapchain looks like SDR even though the display is in HDR. The OS's
+/// advanced-colour state does answer it.
+///
+/// This matters because the DWM misreads a 10-bit UNORM swapchain in an HDR
+/// desktop - the wallpaper came out green/magenta (the R and B channels
+/// wrong) for every SDR file. The engine's HDR output path (PQ on an FP16
+/// back buffer) is the one the compositor expects there.
+inline bool QueryDisplayHdrEnabled(const std::wstring& sourceDeviceName) {
+    if (sourceDeviceName.empty()) {
+        return false;
+    }
+    UINT32 pathCount = 0;
+    UINT32 modeCount = 0;
+    DISPLAYCONFIG_TOPOLOGY_ID topologyId = {};
+    if (QueryDisplayConfig(0, &pathCount, nullptr, &modeCount, nullptr,
+                           &topologyId) != ERROR_SUCCESS ||
+        pathCount == 0) {
+        return false;
+    }
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    modeCount = 0;
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(),
+                           &modeCount, nullptr, &topologyId) != ERROR_SUCCESS) {
+        return false;
+    }
+    for (const DISPLAYCONFIG_PATH_INFO& path : paths) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
+        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = sizeof(source);
+        source.header.adapterId = path.sourceInfo.adapterId;
+        source.header.id = path.sourceInfo.id;
+        if (!DisplayConfigGetDeviceInfo(&source.header)) {
+            continue;
+        }
+        if (_wcsicmp(source.viewGdiDeviceName, sourceDeviceName.c_str()) != 0) {
+            continue;
+        }
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO state = {};
+        state.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+        state.header.size = sizeof(state);
+        state.header.adapterId = path.sourceInfo.adapterId;
+        state.header.id = path.sourceInfo.id;
+        if (!DisplayConfigGetDeviceInfo(&state.header)) {
+            return false;
+        }
+        return state.advancedColorEnabled != 0;
+    }
+    return false;
+}

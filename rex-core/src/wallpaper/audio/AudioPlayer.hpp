@@ -108,6 +108,13 @@ public:
     void SetMute(bool mute);
     /// Mute state (single-audio-owner policy proof + UI surfacing).
     bool IsMuted() const { return m_muted.load(std::memory_order_acquire); }
+    /// Where the audio PLAYHEAD is, in content seconds: the last decoded
+    /// position minus what is still buffered in the ring.
+    ///
+    /// GetPosition() is the DECODER's position, which leads the speaker by
+    /// the ring's depth - comparing it with the video position would report
+    /// that constant lead as if it were a sync error.
+    double GetPlayedPosition() const;
     /// True when nothing can be heard: muted, or the volume is zero. The
     /// decode is SUSPENDED in that state - see ThreadLoop.
     bool IsSilentOutput() const {

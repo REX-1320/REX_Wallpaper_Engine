@@ -420,6 +420,63 @@ void VideoPlaybackController::RefreshDecodeAheadPolicy(bool logOverrides) {
     }
 }
 
+// ─── A/V sync watchdog ────────────────────────────────────────────────────
+//
+// The audio is clocked by the WASAPI endpoint and the video by the engine's
+// wall clock, and NOTHING tied them together: both positions existed and
+// nothing compared them, so a slow drift between the two clocks (or a
+// device change that moved the endpoint's clock) was invisible.
+//
+// Both positions LEAD their playhead by a fixed amount - the audio ring's
+// depth and the video scheduler's slots - so the raw difference is not the
+// error; only its CHANGE over time is. The watchdog therefore measures the
+// drift and corrects it only when it grows beyond a threshold large enough
+// that it cannot be a scheduling artefact, and it never corrects while
+// nothing can be heard: the decode is suspended then, so the audio position
+// is frozen BY DESIGN and would look like a huge drift.
+void VideoPlaybackController::CheckAvSync() {
+    std::shared_ptr<AudioPlayer> audio;
+    {
+        std::lock_guard lock(m_decodeMutex);
+        audio = m_audio;
+    }
+    if (!audio) {
+        return;
+    }
+    if (audio->IsSilentOutput()) {
+        // Silent: the decode is suspended, so the audio position is frozen.
+        // Forget the baseline so the next audible check starts clean.
+        m_avSyncBaselineValid = false;
+        return;
+    }
+    const double videoPos = m_position.load(std::memory_order_relaxed);
+    const double audioPos = audio->GetPlayedPosition();
+    if (!std::isfinite(videoPos) || !std::isfinite(audioPos)) {
+        return;
+    }
+    const double drift = audioPos - videoPos;
+    if (!m_avSyncBaselineValid) {
+        m_avSyncBaseline = drift;
+        m_avSyncBaselineValid = true;
+        return;
+    }
+    const double change = drift - m_avSyncBaseline;
+    m_avSyncDriftMs.store(change * 1000.0, std::memory_order_relaxed);
+    if (!AvSyncNeedsCorrection(change * 1000.0, kAvSyncCorrectionMs)) {
+        return;
+    }
+    // The clocks have really parted: put the audio back on the video's
+    // position. The seek is request-based (the audio thread performs it), so
+    // this is safe from the render thread.
+    REX_LOG_WARN(kModule,
+                 "A/V drift %.0f ms: re-seeking the audio to %.3f s "
+                 "(video %.3f s, audio %.3f s)",
+                 change * 1000.0, videoPos, videoPos, audioPos);
+    audio->Seek(videoPos);
+    m_avSyncBaseline = drift;
+    m_avSyncCorrections.fetch_add(1, std::memory_order_relaxed);
+}
+
 const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
     // Loop-relative target (Phase 2): the decoder wraps PTS every
     // duration while the wall marches on — an unwrapped target starves
@@ -448,6 +505,11 @@ const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
             // P0-2: feed the content clock from what was actually presented.
             std::lock_guard clk(m_contentMutex);
             m_contentMeter.OnPresented(frame->pts, m_duration, NowSec());
+        }
+        // A/V sync watchdog (see CheckAvSync).
+        if (++m_avSyncTicks >= kAvSyncCheckFrames) {
+            m_avSyncTicks = 0;
+            CheckAvSync();
         }
     } else if (m_playing.load(std::memory_order_relaxed) &&
                m_scheduler.PendingCount() == 0) {

@@ -1,4 +1,5 @@
 #include "SwapChain.hpp"
+#include "graphics/renderer/SdrWhiteLevel.hpp"
 #include <shared/Logger.hpp>
 #include <exception>
 #include <chrono>
@@ -342,13 +343,26 @@ void SwapChain::UpdateHdrSelection() {
         Microsoft::WRL::ComPtr<IDXGIOutput6> out6;
         if (FAILED(output.As(&out6)) || FAILED(out6->GetDesc1(&desc1))) return;
 
-        // HDR10-capable outputs advertise the PQ/BT.2020 color space. scRGB
-        // (advanced color) is intentionally treated as SDR for now.
-        hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
         // The output's device name (e.g. "\\.\DISPLAY1"): the OS's SDR white
         // level is looked up per display, so the renderer needs to know which
         // display it is driving.
         m_outputDeviceName = desc1.DeviceName;
+
+        // HDR10-capable outputs advertise the PQ/BT.2020 color space. scRGB
+        // (advanced color) is intentionally treated as SDR for now.
+        hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+
+        // An HDR DESKTOP is not visible in that colour space: the DWM keeps
+        // presenting SDR windows with G22 even when the display is in HDR.
+        // Presenting a 10-bit UNORM buffer into an HDR desktop is what made
+        // the wallpaper render green/magenta (the R and B channels wrong for
+        // every SDR file) - the compositor expects the HDR output path there.
+        if (!hdr && QueryDisplayHdrEnabled(m_outputDeviceName)) {
+            hdr = true;
+            REX_LOG_INFO("SwapChain",
+                         "the display is in an HDR mode: using the HDR "
+                         "output path (PQ on an FP16 back buffer)");
+        }
     }
     DXGI_FORMAT fmt = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
                           : (m_sdrTenBitUnsupported

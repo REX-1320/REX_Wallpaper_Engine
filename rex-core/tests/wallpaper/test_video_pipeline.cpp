@@ -5,6 +5,7 @@
 #include <rex/wallpaper/IWallpaperEngine.hpp>
 
 #include <gtest/gtest.h>
+#include "wallpaper/playback/VideoPlaybackController.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -320,3 +321,20 @@ TEST(StageTelemetryTest, PrimaryMonitorReportsRefreshRate) {
 
 } // namespace
 } // namespace rex::wallpaper
+
+// The A/V sync watchdog corrects the audio when the two clocks really part.
+// The decision is pure: it takes the CHANGE in the audio-vs-video offset (the
+// offset itself carries a constant bias - the audio ring's depth and the
+// video scheduler's slots - and must not be mistaken for an error) and a
+// threshold far above any scheduling artefact.
+TEST(VideoPipeline, AvSyncCorrectionOnlyOnRealDrift) {
+    // Well inside the noise: the scheduler and the ring shift by a frame or
+    // two all the time.
+    EXPECT_FALSE(rex::wallpaper::AvSyncNeedsCorrection(0.0, 250.0));
+    EXPECT_FALSE(rex::wallpaper::AvSyncNeedsCorrection(-18.0, 250.0));
+    EXPECT_FALSE(rex::wallpaper::AvSyncNeedsCorrection(120.0, 250.0));
+    // A real drift, in either direction.
+    EXPECT_TRUE(rex::wallpaper::AvSyncNeedsCorrection(251.0, 250.0));
+    EXPECT_TRUE(rex::wallpaper::AvSyncNeedsCorrection(-251.0, 250.0));
+    EXPECT_TRUE(rex::wallpaper::AvSyncNeedsCorrection(900.0, 250.0));
+}

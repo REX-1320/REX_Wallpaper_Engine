@@ -365,6 +365,18 @@ void AudioPlayer::SetSpeed(float speed) {
     m_speed.store(std::clamp(speed, 0.25f, 4.0f), std::memory_order_relaxed);
 }
 
+double AudioPlayer::GetPlayedPosition() const {
+    const double decoded = m_position.load(std::memory_order_acquire);
+    const int rate = m_sampleRate.load(std::memory_order_relaxed);
+    if (rate <= 0) {
+        return decoded;
+    }
+    std::lock_guard lock(m_ringMutex);
+    const double buffered =
+        static_cast<double>(m_bufferedFrames) / static_cast<double>(rate);
+    return decoded - buffered;
+}
+
 void AudioPlayer::SetMute(bool mute) {
     m_muted.store(mute, std::memory_order_relaxed);
 }
