@@ -287,6 +287,13 @@ let systemTimer = null
 let started = false
 
 let persistTimer = null
+// Main replays the wallpaper while the renderer is still mounting, so the
+// first getLastApplied() can come back empty (the same race store.js handles).
+// The desktop's path is what names the governing playlist, so the engine has
+// to keep asking until it is known - otherwise no mode (timer, scene end...)
+// ever runs on a cold start.
+let lastAppliedRetryAt = 0
+let lastAppliedPending = false
 function schedulePersist() {
   // Debounced disk write: many bumps (ticks, drags) collapse into one
   // localStorage write every 2s instead of every 500ms tick.
@@ -945,6 +952,24 @@ function tick() {
   // something actually changed (previously bumped unconditionally 2x/sec,
   // churning localStorage and re-rendering consumers forever).
   state.now = Date.now()
+  // Cold-start race: keep asking main which file is on the desktop until it
+  // answers. Without it there is no playlist to evaluate and the timer (or
+  // any other mode) silently never fires.
+  if (!state.lastAppliedPath && !lastAppliedPending && state.now - lastAppliedRetryAt >= 2000) {
+    lastAppliedPending = true
+    lastAppliedRetryAt = state.now
+    Promise.resolve(window.rexDesktop?.getLastApplied?.())
+      .then((last) => {
+        if (last?.path && !state.lastAppliedPath) {
+          state.lastAppliedPath = last.path
+          bump()
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        lastAppliedPending = false
+      })
+  }
   let changed = false
   const id = activePlaylistId()
   if (id && id !== state.currentPlaylistId) {
@@ -1079,6 +1104,12 @@ export const playlistEngine = {
     flushPersist()
   },
   getSettings,
+  // The playlist the engine evaluates right now: the one named on the
+  // wallpaper, or (after a restart / after the engine rotated) the one that
+  // HOLDS the file on the desktop. The dialog must edit this one - a
+  // name-only lookup there resolves the 'None' sentinel and edits a config
+  // the engine never evaluates.
+  activePlaylist,
   set(playlistId, path, value) {
     updateSettings(playlistId, (settings) => setPath(settings, path, value))
   },

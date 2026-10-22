@@ -147,18 +147,28 @@ function Section({ title, icon, children }) {
 export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null }) {
   const { wallpapers, playlists, selectedId, appliedId } = useWallpaperStore()
   const { engine, settingsByPlaylist, presets, history, now, system, weather } = usePlaylistEngine()
-  // The playlist that governs the desktop RIGHT NOW. The engine rotates
-  // through the active playlist (engine.js: activePlaylistId() resolves it
-  // by NAME from the wallpaper on the desktop), so a config for any other
-  // playlist is never evaluated - which is why changing "Change Wallpaper"
-  // in this dialog used to look like it did nothing.
+  // The playlist that governs the desktop RIGHT NOW - resolved by the ENGINE,
+  // not by a name lookup here. The engine falls back to the playlist that
+  // HOLDS the file on the desktop (engine.js: playlistFor), because the name
+  // is runtime-only: after a restart (or after the engine itself rotated) the
+  // wallpaper's currentPlaylist is the 'None' sentinel, which is also a real
+  // playlist (pl-0). A name-only lookup here resolved that sentinel and edited
+  // the None playlist's settings - which the engine never evaluates - so a
+  // Timer set in this dialog never fired.
   //
   // The dialog therefore edits the ACTIVE playlist, and its playlist picker
   // switches the active playlist: what you configure is what runs.
   const activeWallpaper = wallpapers.find((w) => w.id === (appliedId ?? selectedId)) ?? null
-  const activePlaylist =
+  const engineActive = engine.activePlaylist()
+  const namedActive =
     playlists.find((p) => p.name === activeWallpaper?.playlist?.currentPlaylist) ?? null
-  const playlistId = activePlaylist?.id ?? initialPlaylistId ?? playlists[0]?.id ?? null
+  const activePlaylist =
+    (engineActive && engineActive.id ? engineActive : null) ??
+    (namedActive && namedActive.name !== 'None' ? namedActive : null)
+  // 'None' (pl-0) is the "no playlist" sentinel, not a configurable container:
+  // fall back to the first real playlist instead of editing the sentinel.
+  const firstRealPlaylist = playlists.find((p) => p.name !== 'None') ?? null
+  const playlistId = activePlaylist?.id ?? initialPlaylistId ?? firstRealPlaylist?.id ?? null
   // Switching the active playlist writes the same property the strip's
   // "Set as active playlist" writes - the runtime reads the playlist by name.
   const activatePlaylist = (targetId) => {
@@ -204,7 +214,10 @@ export default function PlaylistEngineDialog({ onClose, initialPlaylistId = null
   const simpleTransition = settings.transitionRandom ? 'Random' : settings.transition
   const durationSeconds = Math.round((settings.transitionDuration / 1000) * 10) / 10
 
-  const pool = wallpapers.filter((w) => w.playlist?.currentPlaylist === playlist?.name)
+  // A playlist's members ARE the engine's pool (engine.js: filterPool), so the
+  // size must come from the members - the runtime 'currentPlaylist' tags only
+  // mark the wallpaper the user applied last.
+  const pool = playlist?.members ?? []
   const mostPlayed = (() => {
     const entries = Object.entries(history.mostPlayed).sort((a, b) => b[1] - a[1])
     return entries.length > 0 ? (wallpapers.find((w) => w.id === entries[0][0])?.info?.name ?? '—') : '—'
