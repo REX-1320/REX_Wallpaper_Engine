@@ -15,6 +15,7 @@ import {
 import ResizeHandle from '../components/ResizeHandle'
 import PlaylistStrip from './PlaylistStrip'
 import PlaylistEngineDialog from './playlist/PlaylistEngineDialog'
+import { playlistEngine } from './playlist/engine'
 import { PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS } from './registry'
 import { createPlaylist, deletePlaylist, renamePlaylist, setPlaylistIcon, useWallpaperStore, applyWallpaper, ensureWallpaperForPath, updateWallpaperProperty } from './store'
 import { setLayoutState, useLayoutState } from '../state/layout'
@@ -37,7 +38,7 @@ export default function PlaylistDock({
   onMaximize,
   onClose,
 }) {
-  const { playlists, wallpapers, appliedId } = useWallpaperStore()
+  const { playlists } = useWallpaperStore()
   const { panelPlaylistId } = useLayoutState()
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
@@ -57,15 +58,14 @@ export default function PlaylistDock({
 
   // Is THIS playlist the one governing the desktop right now?
   //
-  // The engine rotates through the ACTIVE playlist - the one the wallpaper
-  // on the desktop names (engine.js: activePlaylistId() reads the name from
-  // the wallpaper). So "applied" is that state, and it is the state the
-  // button reports: a playlist that is not active is not running, whatever
-  // its config says. (This is also why the config dialog appeared to do
-  // nothing: it edits the DOCK's playlist, while the engine ticks the
-  // ACTIVE one.)
-  const appliedWallpaper = (wallpapers ?? []).find((w) => w.id === appliedId) ?? null
-  const isApplied = Boolean(current && appliedWallpaper?.playlist?.currentPlaylist === current.name)
+  // Ask the engine, not the wallpaper record. currentPlaylist is a runtime-only
+  // tag on ONE record (the file the dock applied); the moment the desktop file
+  // changes - the engine rotates, the user applies another member - that file
+  // carries the default 'None', so a name comparison said the playlist had been
+  // "exited" while the engine was still rotating through it (playlistFor's
+  // membership fallback). playlistEngine.activePlaylist() is that same
+  // resolution, so the badge and the rotation can never disagree.
+  const isApplied = Boolean(current && playlistEngine.activePlaylist()?.id === current.id)
 
   useEffect(() => {
     if (!renaming) return

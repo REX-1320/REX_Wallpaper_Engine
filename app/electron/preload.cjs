@@ -67,6 +67,11 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   minimize: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.send('window:toggle-maximize'),
   close: () => ipcRenderer.send('window:close'),
+  // Playlist rotation keep-alive: while a playlist is rotating, main hides the
+  // window instead of destroying it, so this renderer's scheduler keeps the
+  // wallpaper changing while REX sits in the tray. Fire-and-forget; the engine
+  // reports only when the value changes.
+  setPlaylistRotationActive: (active) => ipcRenderer.send('playlist:rotation-active', Boolean(active)),
   isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
   onMaximized: (callback) => {
     const listener = (_event, maximized) => callback(maximized)

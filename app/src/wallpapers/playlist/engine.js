@@ -318,6 +318,22 @@ function bump() {
   schedulePersist()
 }
 
+// Tell main whether a playlist rotation is running. While it is, closing the
+// window hides it instead of destroying the renderer (main.cjs): the scheduler
+// is this renderer, and REX is designed to sit in the tray while the wallpaper
+// plays. Sent only on change - the 500 ms tick must not spam IPC.
+let rotationReported = null
+function reportRotationActive(active) {
+  const next = Boolean(active)
+  if (next === rotationReported) return
+  rotationReported = next
+  try {
+    window.rexDesktop?.setPlaylistRotationActive?.(next)
+  } catch {
+    /* older preload without the API */
+  }
+}
+
 function persist() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ settingsByPlaylist, presets, history, defaultTemplate }))
@@ -982,6 +998,10 @@ function tick() {
   // rotate through them - at boot the store knows none of them.
   preparePlaylistPool((getSnapshot().playlists ?? []).find((p) => p.id === id) ?? null)
   const settings = state.currentPlaylistId ? getSettings(state.currentPlaylistId) : null
+  // Keep main's close handler in sync: with a live rotation the renderer has
+  // to survive the window being closed to the tray, or the desktop freezes on
+  // the file it is playing. Manual means nothing is scheduled.
+  reportRotationActive(Boolean(settings && settings.mode !== 'Manual'))
   if (settings) {
     const reason = evaluateMode(settings)
     if (reason) {
@@ -1101,6 +1121,7 @@ export const playlistEngine = {
     clearInterval(systemTimer)
     document.removeEventListener('pointerdown', onActivity)
     document.removeEventListener('keydown', onActivity)
+    reportRotationActive(false)
     flushPersist()
   },
   getSettings,

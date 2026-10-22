@@ -53,6 +53,11 @@ let pendingNavigate = null // destination queued until that listener is ready
 let revealTimer = null
 let revealWin = null
 const closingWindows = new WeakSet()
+// Whether the renderer is running a playlist rotation (Timer, scene end,
+// schedule...). The scheduler lives in the renderer (playlist/engine.js), so
+// closing the window must hide it instead of destroying it while a playlist is
+// rotating - otherwise the desktop freezes on one file in the tray.
+let playlistRotationActive = false
 
 // Dev-aware login-item registration: packaged apps register the exe
 // directly, but dev Electron needs the app folder as argv[1] or Windows
@@ -382,6 +387,14 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      // REX lives in the tray: closing the window hides it, and the wallpaper
+      // is watched with the window hidden. Chromium freezes timers in hidden
+      // windows, which silently stopped the playlist engine's 500 ms tick -
+      // Timer never elapsed and a scene-end event was never processed, so the
+      // desktop sat on one file. The scheduler has to run while hidden.
+      // (Also makes document.visibilityState stay 'visible'; nothing else in
+      // the app reads it.)
+      backgroundThrottling: false,
     },
   })
   mainWindow = win
@@ -437,18 +450,28 @@ function createWindow() {
   // (rather than hiding) is what actually releases the renderer and its GPU
   // allocations; a hidden window otherwise keeps both for the app's lifetime.
   //
+  // EXCEPTION: a running playlist. Its scheduler IS this renderer, so while a
+  // rotation is active the window is hidden and kept alive - destroying it
+  // stopped the rotation the moment the user closed the window to watch the
+  // wallpaper (the normal use). backgroundThrottling is off in webPreferences,
+  // so the hidden renderer's clock keeps running.
+  //
   // "Quit REX on close" is the user's choice (tray.closeToTray === false);
   // the default keeps the app alive in the tray.
   win.on('close', (event) => {
     if (isQuitting) return
     event.preventDefault()
-    closingWindows.add(win)
     if (appState?.get('tray.closeToTray') === false) {
       logLine('window: close -> quit (tray.closeToTray = false)')
       quitApp('window-close')
       return
     }
     win.hide()
+    if (playlistRotationActive) {
+      logLine('window: hiding (playlist rotation active)')
+      return
+    }
+    closingWindows.add(win)
     logLine('window: destroying (close)')
     // destroy() skips beforeunload/unload, so essential main-process state is
     // flushed here, synchronously, while the renderer still exists.
@@ -462,6 +485,7 @@ function createWindow() {
     // during teardown). Only clear state that still belongs to this window.
     if (mainWindow !== win) return
     mainWindow = null
+    playlistRotationActive = false
     navigateReady = false
     pendingNavigate = null
     if (revealWin === win) {
@@ -1026,6 +1050,16 @@ app.whenReady().then(() => {
   })
   ipcMain.on('window:close', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close()
+  })
+  // The playlist engine tells main whether a rotation is running, so the close
+  // handler knows to hide the window (keep the scheduler alive) or destroy it.
+  ipcMain.on('playlist:rotation-active', (event, active) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win !== mainWindow) return
+    const next = Boolean(active)
+    if (next === playlistRotationActive) return
+    playlistRotationActive = next
+    logLine('playlist: rotation', next ? 'active' : 'inactive')
   })
   ipcMain.handle('window:is-maximized', (event) => {
     const v = BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
