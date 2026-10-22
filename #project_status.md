@@ -60,6 +60,7 @@
 | Seek | ✅ | `PlaybackController::Seek` |
 | Telemetry | ✅ | `PlaybackTelemetry` — framesDecoded/Dropped, FPS, latency |
 | Playlist change modes (end of scene) | ✅ | `SceneEndLatch` / `EngineTelemetry::sceneEnded` + `ENDED {path, session}`; the app rotates the active playlist on the event (2026-10-22) |
+| Playlist change modes (timer / dialog) | ✅ | the dialog edits the playlist the engine evaluates (`engine.activePlaylist()`); boot resolves `lastAppliedPath` with a retry, so modes run from a cold start (2026-10-22) |
 
 ### Preview
 
