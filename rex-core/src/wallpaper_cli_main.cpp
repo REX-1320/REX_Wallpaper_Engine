@@ -680,38 +680,118 @@ static void FramePollThread(std::mutex& engineGuard,
     }
 }
 
+// ─── Current scene ─────────────────────────────────────────────────────────
+//
+// The ENDED event must say WHICH scene ended: the app matches the path
+// against the wallpaper it has on the desktop, so an end left over from a
+// previous scene can never trigger a change.
+//
+// The scene identity is written by the command loop (LOAD/UNLOAD) and read
+// by the telemetry sampler (another thread), so it lives behind its own
+// tiny mutex. The GENERATION is what makes the pairing safe: the sampler
+// reads the identity, samples the engine, then re-reads it; if the scene
+// changed in between, the latch in the sample could belong to either
+// scene, so the sample reports nothing. Without it, a scene load racing a
+// stale "ended" sample could emit ENDED naming the NEW file - and the app
+// would change the wallpaper again the moment it applied that file.
+struct SceneIdentity {
+    std::string path;
+    uint64_t generation = 0;
+};
+
+static std::mutex g_sceneMutex;
+static SceneIdentity g_currentScene;
+
+static void SetCurrentScene(std::string path) {
+    std::lock_guard lock(g_sceneMutex);
+    g_currentScene.path = std::move(path);
+    ++g_currentScene.generation;
+}
+
+static SceneIdentity GetCurrentScene() {
+    std::lock_guard lock(g_sceneMutex);
+    return g_currentScene;
+}
+
 // Telemetry sampler: appends a one-line snapshot to runtime-telemetry.log
 // every 5s while an engine is alive. Cross-hardware baseline evidence in a
 // single greppable line: process memory, adapter topology (decoder/renderer/
 // display LUIDs), GPU segment usage and pipeline FPS.
+//
+// The telemetry SAMPLE runs every 250 ms (the log line keeps its 5 s
+// cadence): the sample is what carries the scene-end latch, and the app's
+// "change wallpaper when the current ends" must react within a quarter
+// second, not within five.
 static void TelemetryThread(std::mutex& engineGuard,
                             std::shared_ptr<IWallpaperEngine>& engine,
                             std::atomic<bool>& stop) {
+    // Scene-end edge detector: the playback controller LATCHES "the
+    // scene's content reached its end" and clears the latch on every seek
+    // and scene load, so the rising edge is exactly ONE scene end.
+    bool sceneEndedReported = false;
+    uint64_t sceneGeneration = 0;
+    int slice = 0;
     while (!stop.load(std::memory_order_acquire)) {
-        // 5 s cadence in 250 ms slices: SHUTDOWN joins this thread while
-        // Electron kills the process at 3 s (wallpaperRuntime.cjs), so an
-        // unsliced sleep_for(5 s) could blow the client's deadline
-        // (audit 5.5 #1).
-        bool aborted = false;
-        for (int i = 0; i < 20; ++i) {
-            if (stop.load(std::memory_order_acquire)) {
-                aborted = true;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        }
-        if (aborted) break;
+        // 250 ms slices: SHUTDOWN joins this thread while Electron kills
+        // the process at 3 s (wallpaperRuntime.cjs), so an unsliced
+        // sleep_for(5 s) could blow the client's deadline (audit 5.5 #1).
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        if (stop.load(std::memory_order_acquire)) break;
 
         EngineTelemetry t;
+        std::string sessionId;
         bool sampled = false;
+        // Read the scene identity on BOTH sides of the sample: if a scene
+        // load lands mid-sample, the latch in `t` could belong to the old
+        // scene while the identity names the new one.
+        const SceneIdentity sceneBefore = GetCurrentScene();
         {
             std::lock_guard lock(engineGuard);
             // try-lock telemetry: a command holding the engine lock must not
             // stall the sampler (nor the SHUTDOWN join waiting on it). Skip
             // this sample and retry on the next cadence tick.
-            sampled = engine && engine->TryGetTelemetry(t);
+            if (engine) {
+                sampled = engine->TryGetTelemetry(t);
+                if (sampled) sessionId = engine->GetSessionId().ToString();
+            }
         }
         if (!sampled) continue;
+        const SceneIdentity scene = GetCurrentScene();
+        if (scene.generation != sceneBefore.generation) {
+            // The scene changed under the sample: its end is ambiguous.
+            // The new scene's latch re-arms on Open, so the next tick sees
+            // it on its own.
+            sceneEndedReported = false;
+            continue;
+        }
+        if (scene.generation != sceneGeneration) {
+            // A new scene: re-arm the edge detector whatever the previous
+            // scene's latch said, so a short new scene can still report.
+            sceneGeneration = scene.generation;
+            sceneEndedReported = false;
+        }
+
+        // ─── Scene end → ENDED event ─────────────────────────────────────
+        // The engine knows exactly when the current scene's video reached
+        // its end; the app needs the fact to change the wallpaper ("when
+        // the current ends"). The event carries the scene path so the app
+        // can tell WHICH scene ended.
+        if (t.sceneEnded && !sceneEndedReported && !scene.path.empty()) {
+            sceneEndedReported = true;
+            REX_LOG_INFO("Runtime", "Scene ended: {}", scene.path.c_str());
+            WriteEvent("ENDED", Obj({
+                { "path", json::Json(scene.path) },
+                { "session", json::Json(sessionId) },
+            }));
+        } else if (!t.sceneEnded) {
+            // Re-armed: the latch was cleared by a seek or a scene load.
+            sceneEndedReported = false;
+        }
+
+        // The one-line snapshot keeps its 5 s cadence (20 slices).
+        if (++slice < 20) continue;
+        slice = 0;
+
         FILE* f = nullptr;
         if (fopen_s(&f, BuildLogPath(L"runtime-telemetry.log").c_str(), "a") != 0 || !f) {
             continue;
@@ -1006,6 +1086,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                                                   { "type", json::Json("image") } }));
                 WriteEvent("LOADED", Obj({ { "path", json::Json(path) },
                                            { "type", json::Json("image") } }));
+                SetCurrentScene(path);
                 continue;
             }
 
@@ -1083,6 +1164,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
                                               { "type", json::Json(type) } }));
             WriteEvent("LOADED", Obj({ { "path", json::Json(path) },
                                        { "type", json::Json(type) } }));
+            SetCurrentScene(path);
             continue;
         }
 
@@ -1109,6 +1191,8 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             } else {
                 result = engine->UnloadScene();
                 eventName = "UNLOADED";
+                // No scene on the desktop: no scene can end any more.
+                SetCurrentScene("");
             }
             if (result.IsError()) {
                 WriteResponse(id, false, result.Error().message);

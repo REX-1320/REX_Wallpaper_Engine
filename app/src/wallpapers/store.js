@@ -137,6 +137,11 @@ export function updateWallpaperProperty(id, path, value) {
   let target = clone
   for (let i = 0; i < path.length - 1; i += 1) target = target[path[i]]
   target[path[path.length - 1]] = value
+  // The playlist a wallpaper starts with ('None') is also the value the user
+  // picks to turn rotation off. Mark the pick so the engine can tell the two
+  // apart - it is runtime-only, like the name itself (the engine falls back
+  // to the playlist that holds the file after a restart).
+  if (path.length === 2 && path[0] === 'playlist' && path[1] === 'currentPlaylist') target.explicit = true
   wallpapers.set(id, clone)
   if (isLiveProperty(path)) scheduleSettingsPersist(clone)
   bump()
@@ -459,7 +464,9 @@ export async function loadWallpaperFile(file, pathHint = null, opts = {}) {
   await fetchLastAppliedPath()
   wallpapers.set(wallpaper.id, wallpaper)
   syncAppliedId()
-  selectedId = wallpaper.id
+  // The playlist engine materialises a playlist's files in the background:
+  // they must not steal the selection from the user while it does.
+  if (!opts.keepSelection) selectedId = wallpaper.id
   bump()
   return wallpaper.id
 }
@@ -467,7 +474,7 @@ export async function loadWallpaperFile(file, pathHint = null, opts = {}) {
 // Finds (or creates) the store record for a file path. The gallery's tiles
 // and the playlist dock both need to focus a file that has not been loaded
 // into the store yet — records are created lazily, on first select/apply.
-export async function ensureWallpaperForPath(path) {
+export async function ensureWallpaperForPath(path, opts = {}) {
   if (!path) return null
   const key = playlistMemberKey(path)
   for (const wallpaper of wallpapers.values()) {
@@ -476,5 +483,5 @@ export async function ensureWallpaperForPath(path) {
   }
   const name = String(path).split(/[\\/]/).pop()
   if (!name) return null
-  return loadWallpaperFile(name, path)
+  return loadWallpaperFile(name, path, opts)
 }

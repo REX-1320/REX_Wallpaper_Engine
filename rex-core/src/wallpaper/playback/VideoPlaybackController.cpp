@@ -71,6 +71,7 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     m_fenceHandle = fenceHandle;
     m_duration  = m_decoder->GetDuration();
     m_frameRate = m_decoder->GetFrameRate();
+    m_contentStart = m_decoder->GetStartTime();
     m_frameIntervalMs = m_frameRate > 0.0 ? 1000.0 / m_frameRate : 33.333;
     {
         // P0-2: a reopen must not inherit the previous file's content clock.
@@ -79,6 +80,9 @@ shared::Result<void> VideoPlaybackController::Open(std::string_view path,
     }
     // A reopen must be playable: clear any EOS latch from the previous file.
     m_eosReached.store(false, std::memory_order_release);
+    // A reopen is a new scene: the previous scene's end must not be
+    // reported for it (the app would change the wallpaper immediately).
+    m_sceneEnd.Rearm();
     // Policy refresh centralised (audit 5.4 #13): scale the reserve marks
     // to what the 8-slot pool can actually hold at this source rate, then
     // apply the env overrides.
@@ -195,6 +199,9 @@ void VideoPlaybackController::Close() {
     if (decoder) {
         decoder->Close();
     }
+    // The scene is gone: its end must not be reported any more (the app
+    // would change the wallpaper for a scene that is no longer playing).
+    m_sceneEnd.Rearm();
     m_open.store(false, std::memory_order_release);
 }
 
@@ -264,6 +271,7 @@ void VideoPlaybackController::Stop() {
     // and re-checks it under the lock before publishing).
     m_position.store(0.0, std::memory_order_release);
     m_eosReached.store(false, std::memory_order_release);  // timeline reset ⇒ playable
+    m_sceneEnd.Rearm();  // timeline reset => not ended
     if (audio) {
         audio->Stop();
     }
@@ -338,6 +346,11 @@ shared::Result<void> VideoPlaybackController::Seek(double seconds) {
     }
     m_position.store(seconds, std::memory_order_release);
     m_eosReached.store(false, std::memory_order_release);  // any seek re-arms playback
+    // A seek re-arms the scene-end latch too: the app's playlist change
+    // re-seeks the controller (VideoManager's cache-hit path), and a seek
+    // that still read as "the video ended" would run the change loop away
+    // (change -> seek -> ENDED -> change -> seek -> ...).
+    m_sceneEnd.Rearm();
     ++m_decodeGeneration;  // drop any frame decoded from the pre-seek stream
     if (audio) {
         audio->Seek(seconds);
@@ -366,6 +379,7 @@ void VideoPlaybackController::SelectBestStream(int targetWidth, int targetHeight
     // controller cached from the decoder (pacing, telemetry dimensions).
     m_duration  = decoder->GetDuration();
     m_frameRate = decoder->GetFrameRate();
+    m_contentStart = decoder->GetStartTime();
     m_frameIntervalMs = m_frameRate > 0.0 ? 1000.0 / m_frameRate : 33.333;
     m_width  = decoder->GetWidth();
     m_height = decoder->GetHeight();
@@ -525,6 +539,15 @@ const VideoFrame* VideoPlaybackController::Tick(double targetPts) {
             std::lock_guard clk(m_contentMutex);
             m_contentMeter.OnPresented(frame->pts, m_duration, NowSec());
         }
+        // Scene end (presented side, secondary): the frame on screen
+        // reached the end of the content. The decode thread sets the same
+        // latch from the PUBLISHED PTS - that is the side that always
+        // sees the end, because the scheduler clears the tail frames when
+        // the decoder wraps. Kept as the belt to that braces: a frame that
+        // reaches the end on screen is the end of the content, whatever
+        // the decoder did.
+        (void)m_sceneEnd.OnFrame(frame->pts, m_contentStart, m_duration,
+                                 m_frameRate);
         // A/V sync watchdog (see CheckAvSync).
         if (++m_avSyncTicks >= kAvSyncCheckFrames) {
             m_avSyncTicks = 0;
@@ -605,6 +628,7 @@ VideoPlaybackTelemetry VideoPlaybackController::GetTelemetry() const {
         t.schedulerDropsPeak = m_dropRatePeak;
     }
     t.loopWraps = m_loopWraps.load(std::memory_order_relaxed);
+    t.sceneEnded = m_sceneEnd.Ended();
     t.queueDepth = m_scheduler.PendingCount();
     t.pacingMs = m_frameIntervalMs / m_speed.load(std::memory_order_relaxed);
     // P0-2: fold the presented-PTS content clock (10 s window). Reports the
@@ -728,6 +752,24 @@ void VideoPlaybackController::DecoderThread() {
                     m_convertFrameCount++;
                     m_framesDecoded.fetch_add(1, std::memory_order_relaxed);
                     m_position.store(frame.pts, std::memory_order_release);
+                    // Scene end (published side): the decoder reached the end
+                    // of the content. This is the side that SEES the end:
+                    // when the decoder wraps (loop) or hits EOF, it has
+                    // already published the tail frames, and the scheduler
+                    // then clears them - so the PRESENTED PTS never
+                    // reaches the duration and a presented-side check
+                    // never fires (measured: a 54 s clip looped without
+                    // ever reporting its end).
+                    //
+                    // A backward PTS jump (a seek, a loop wrap) can never
+                    // satisfy the comparison: the sum only grows with
+                    // forward progress.
+                    if (m_sceneEnd.OnFrame(frame.pts, m_contentStart,
+                                           m_duration, m_frameRate)) {
+                        REX_LOG_INFO(kModule,
+                                     "scene ended: pts={:.3f} duration={:.3f}",
+                                     frame.pts, m_duration);
+                    }
                     // Stage sample stamp (diagnostic): scheduler depth at the
                     // moment this frame was published.
                     if (decoder) {

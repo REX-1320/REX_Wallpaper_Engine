@@ -382,6 +382,91 @@ TEST(WrapTargetTest, ZeroDurationPassesThrough) {
                      50.0);
 }
 
+// ── Scene end: the playlist's "when the current ends" trigger ─────────────
+
+TEST(SceneEndTest, LastFrameReachesTheEnd) {
+    // The last published PTS of a stream sits ONE FRAME SHORT of the
+    // duration (the position cannot express "finished"), so the end is
+    // the frame whose PTS plus its own duration reaches the duration.
+    const double duration = 56.0;
+    const double fps = 30.0;
+    EXPECT_TRUE(VideoPlaybackController::ReachedEndOfContent(
+        duration - 1.0 / fps, duration, fps));
+}
+
+TEST(SceneEndTest, MidStreamFrameIsNotTheEnd) {
+    EXPECT_FALSE(VideoPlaybackController::ReachedEndOfContent(
+        10.0, 56.0, 30.0));
+    EXPECT_FALSE(VideoPlaybackController::ReachedEndOfContent(
+        0.0, 56.0, 30.0));
+}
+
+TEST(SceneEndTest, BackwardJumpIsNeverTheEnd) {
+    // A seek (the app's playlist change re-seeks the controller) must
+    // never look like "the video ended" - that would run the change loop
+    // away (change -> seek -> ENDED -> change -> seek -> ...).
+    EXPECT_FALSE(VideoPlaybackController::ReachedEndOfContent(
+        0.0, 56.0, 30.0));
+    EXPECT_FALSE(VideoPlaybackController::ReachedEndOfContent(
+        55.0, 56.0, 30.0));
+}
+
+TEST(SceneEndTest, UnknownDurationNeverEnds) {
+    // A stream without a duration (live/streamed) has no end.
+    EXPECT_FALSE(VideoPlaybackController::ReachedEndOfContent(
+        100.0, 0.0, 30.0));
+}
+
+TEST(SceneEndTest, NegativePtsIsNotTheEnd) {
+    EXPECT_FALSE(VideoPlaybackController::ReachedEndOfContent(
+        -1.0, 56.0, 30.0));
+}
+
+// The latch is the app-visible signal (one ENDED per scene end), so the
+// state machine itself is what these tests pin - not just the comparison.
+TEST(SceneEndLatchTest, SetsOnceAndStaysSetUntilRearmed) {
+    SceneEndLatch latch;
+    EXPECT_FALSE(latch.Ended());
+    // The frame ONE FRAME SHORT of the duration is the end.
+    EXPECT_TRUE(latch.OnFrame(56.0 - 1.0 / 30.0, 0.0, 56.0, 30.0));
+    EXPECT_TRUE(latch.Ended());
+    // Later frames of the same scene do not report a second end.
+    EXPECT_FALSE(latch.OnFrame(56.0, 0.0, 56.0, 30.0));
+    EXPECT_FALSE(latch.OnFrame(0.0, 0.0, 56.0, 30.0));  // loop wrap frame
+    EXPECT_TRUE(latch.Ended());
+}
+
+TEST(SceneEndLatchTest, MidStreamFrameDoesNotSetIt) {
+    SceneEndLatch latch;
+    EXPECT_FALSE(latch.OnFrame(0.0, 0.0, 56.0, 30.0));
+    EXPECT_FALSE(latch.OnFrame(55.0, 0.0, 56.0, 30.0));
+    EXPECT_FALSE(latch.Ended());
+}
+
+TEST(SceneEndLatchTest, SeekRearmsTheSignal) {
+    // The app's playlist change re-seeks the controller. A latch that
+    // survived the seek would report the same end again and run the
+    // change loop away (change -> seek -> ENDED -> change -> ...).
+    SceneEndLatch latch;
+    ASSERT_TRUE(latch.OnFrame(56.0 - 1.0 / 30.0, 0.0, 56.0, 30.0));
+    latch.Rearm();  // Seek(0.0)
+    EXPECT_FALSE(latch.Ended());
+    // Re-armed means the NEXT end is a new scene end.
+    EXPECT_TRUE(latch.OnFrame(56.0 - 1.0 / 30.0, 0.0, 56.0, 30.0));
+    EXPECT_TRUE(latch.Ended());
+}
+
+TEST(SceneEndLatchTest, ContentStartIsSubtracted) {
+    // Frame PTS are absolute stream timestamps: a stream whose start_time
+    // is non-zero must not look "ended" on its first frame, and its last
+    // frame must still reach the end.
+    SceneEndLatch latch;
+    EXPECT_FALSE(latch.OnFrame(1200.0, 1200.0, 56.0, 30.0));
+    EXPECT_FALSE(latch.Ended());
+    EXPECT_TRUE(latch.OnFrame(1200.0 + 56.0 - 1.0 / 30.0, 1200.0, 56.0, 30.0));
+    EXPECT_TRUE(latch.Ended());
+}
+
 TEST(FrameSchedulerPrimeTest, FreshSchedulerIsUnprimed) {
     // Nothing consumed yet: the burst gate must hold (decode paces 1x).
     FrameScheduler s;

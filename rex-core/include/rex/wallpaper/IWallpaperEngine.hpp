@@ -136,6 +136,13 @@ struct EngineTelemetry {
     // error is silent by nature, so it has to be observable without ears.
     double   avSyncDriftMs    = 0.0;
     uint64_t avSyncCorrections = 0;  // times the watchdog had to re-seek
+    // ─── Scene end ───────────────────────────────────────────────────────
+    // True when the PRESENTED frames reached the end of the scene's
+    // content (the video played to its end). Latched by the playback
+    // controller and cleared by every seek/scene load, so it reports ONE
+    // scene end per latch. The app's playlist engine needs this fact for
+    // its "when the current ends" change modes.
+    bool     sceneEnded = false;
     // ─── Per-stage diagnostics (Phase 1) ──────────────────────────────
     double   sourceFps      = 0.0;  // stream frame rate
     double   convertFps     = 0.0;  // ConvertAndSignal+publish rate

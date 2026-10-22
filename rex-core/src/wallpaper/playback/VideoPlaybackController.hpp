@@ -114,6 +114,70 @@ struct VideoPlaybackTelemetry {
     uint64_t ringSlotCount   = 0;
     uint64_t ringBytes       = 0;
     bool     hardwareAccelerated = false;
+    // ─── Scene end ───────────────────────────────────────────────────────
+    // True once the scene's content reached its end (the video played to
+    // its end). The latch is one-shot: set by the frame that reached the
+    // end, re-armed by Open/Seek/Stop, so it reports ONE scene end per
+    // latch. The app's playlist engine needs this fact to change the
+    // wallpaper "when the current ends" (the dead media bridge could
+    // never see it).
+    bool     sceneEnded = false;
+};
+
+// ─── Scene-end latch ─────────────────────────────────────────────────────
+//
+// The one-shot "the scene played to its end" signal the app's playlist uses
+// for its "when the current ends" change modes. The latch is SET by the
+// first frame that reached the end of the content and RE-ARMED by every
+// seek / scene load / stop.
+//
+// Re-arming on seek is load-bearing: the app's playlist change re-seeks the
+// controller (VideoManager's cache-hit path), and a latch that survived the
+// seek would report the SAME end again - the change loop would run away:
+//     change -> seek -> ENDED -> change -> seek -> ...
+//
+// A backward PTS jump (a seek, a loop wrap) can never SET it: the
+// comparison only grows with forward progress, so a seek can never look
+// like "the video ended".
+class SceneEndLatch {
+public:
+    bool Ended() const { return m_ended.load(std::memory_order_acquire); }
+
+    /// Re-arm: the next end is a NEW scene end.
+    void Rearm() { m_ended.store(false, std::memory_order_release); }
+
+    /// Feed one published or presented frame. `framePts` is the ABSOLUTE
+    /// stream PTS; the content spans [contentStart, contentStart+duration].
+    /// Returns true only for the frame that SETS the latch (the rising
+    /// edge), so the caller can log one line per scene end.
+    bool OnFrame(double framePts, double contentStart, double duration,
+                 double frameRate) {
+        if (m_ended.load(std::memory_order_relaxed)) return false;
+        if (!ReachedEndOfContent(framePts - contentStart, duration, frameRate)) {
+            return false;
+        }
+        m_ended.store(true, std::memory_order_release);
+        return true;
+    }
+
+    /// End-of-content decision (pure, unit-tested).
+    ///
+    /// The published PTS of a stream's LAST frame sits ONE FRAME SHORT of
+    /// the duration (the position cannot express "finished" - see
+    /// NeedsRewindOnPlay), so the content ended when the frame's PTS plus
+    /// the frame's own duration reaches the duration. The comparison
+    /// carries a one-frame tolerance because the container's duration may
+    /// sit a frame beyond the last published PTS and the frame rate is
+    /// measured, not declared.
+    static bool ReachedEndOfContent(double framePts, double duration,
+                                    double frameRate) {
+        if (duration <= 0.0 || framePts < 0.0) return false;
+        const double frameDuration = frameRate > 0.0 ? 1.0 / frameRate : 0.0;
+        return framePts + frameDuration >= duration - frameDuration;
+    }
+
+private:
+    std::atomic<bool> m_ended{false};
 };
 
 // ─── VideoPlaybackController ────────────────────────────────────────────
@@ -199,6 +263,13 @@ public:
     int    GetWidth()     const { return m_width; }
     int    GetHeight()    const { return m_height; }
 
+    /// True once the scene's content reached its end (the video played to
+    /// its end). One-shot: re-armed by Open/Seek/Stop, so a seek - the
+    /// app's playlist change re-seeks the controller - can never look like
+    /// an end (that would run the change loop away:
+    /// change -> seek -> ENDED -> change -> seek -> ...).
+    bool SceneEnded() const { return m_sceneEnd.Ended(); }
+
     // Forwarded from the decoder (shared-surface contract for D3D12).
     HANDLE GetSlotHandle(UINT slot) const;
     UINT64 GetSlotFence(UINT slot) const;
@@ -261,6 +332,14 @@ public:
         return eosReached || position >= duration - 0.001;
     }
 
+    /// End-of-content decision (pure, unit-tested). Defined by the latch so
+    /// the decision and the latch state machine are tested together.
+    static bool ReachedEndOfContent(double framePts, double duration,
+                                    double frameRate) {
+        return SceneEndLatch::ReachedEndOfContent(framePts, duration,
+                                                  frameRate);
+    }
+
 private:
     void DecoderThread();
     // Re-scale the decode-ahead policy from the CURRENT m_frameRate and
@@ -307,6 +386,11 @@ private:
     // express "finished" (last PTS is one frame short of the duration).
     std::atomic<bool> m_eosReached{false};
     std::atomic<bool> m_looping{true};
+    // Scene-end latch: one-shot "the scene played to its end" signal.
+    // Re-armed by Open/Seek/Stop - every seek re-arms it, so "the current
+    // ended" is exactly one scene end and never a replay of the previous
+    // scene's end (the change loop would run away otherwise).
+    SceneEndLatch m_sceneEnd;
     std::atomic<float> m_speed{1.0f};
     // Phase D: measured reserve depth (ms) and the decode-ahead policy in force.
     std::atomic<double> m_reserveMs{0.0};
@@ -351,6 +435,12 @@ private:
     double m_duration  = 0.0;
     double m_frameRate = 30.0;
     double m_frameIntervalMs = 33.333;
+    // Stream start timestamp (seconds): the frame PTS are ABSOLUTE stream
+    // timestamps, so the content spans [m_contentStart, m_contentStart +
+    // m_duration]. The scene-end decision is taken on the content-relative
+    // position, or a file with a non-zero start_time would look like it
+    // ended before it began.
+    double m_contentStart = 0.0;
     int    m_width  = 0;
     int    m_height = 0;
 

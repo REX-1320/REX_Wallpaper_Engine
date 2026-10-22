@@ -203,6 +203,9 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     m_duration = m_fmtCtx->duration != AV_NOPTS_VALUE
                      ? static_cast<double>(m_fmtCtx->duration) / AV_TIME_BASE
                      : 0.0;
+    m_startTime = m_fmtCtx->start_time != AV_NOPTS_VALUE
+                      ? static_cast<double>(m_fmtCtx->start_time) / AV_TIME_BASE
+                      : 0.0;
     if (m_stream->r_frame_rate.den > 0) {
         m_frameRate = static_cast<double>(m_stream->r_frame_rate.num) /
                       m_stream->r_frame_rate.den;
@@ -498,6 +501,7 @@ void FfmpegVideoDecoder::Close() {
     m_eof = false;
     m_unusableCode.store(0, std::memory_order_relaxed);  // P2-1: fresh Open = fresh verdict
     m_duration = 0.0;
+    m_startTime = 0.0;
     m_frameRate = 30.0;
     m_width = 0;
     m_height = 0;
@@ -720,6 +724,9 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
     m_duration = m_fmtCtx->duration != AV_NOPTS_VALUE
                      ? static_cast<double>(m_fmtCtx->duration) / AV_TIME_BASE
                      : 0.0;
+    m_startTime = m_fmtCtx->start_time != AV_NOPTS_VALUE
+                      ? static_cast<double>(m_fmtCtx->start_time) / AV_TIME_BASE
+                      : 0.0;
     if (m_stream->r_frame_rate.den > 0) {
         m_frameRate = static_cast<double>(m_stream->r_frame_rate.num) /
                       m_stream->r_frame_rate.den;

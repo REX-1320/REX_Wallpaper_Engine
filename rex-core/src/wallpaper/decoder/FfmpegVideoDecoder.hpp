@@ -564,6 +564,9 @@ class FfmpegVideoDecoder {
 
     double GetDuration()  const { return m_duration; }
     double GetFrameRate() const { return m_frameRate; }
+    /// Stream start timestamp (seconds, 0 for a normal file). The frame PTS
+    /// are absolute, so the content spans [start, start + duration].
+    double GetStartTime() const { return m_startTime; }
     int    GetWidth()     const { return m_width; }
     int    GetHeight()    const { return m_height; }
 
@@ -700,6 +703,11 @@ private:
 
     double m_duration  = 0.0;
     double m_frameRate = 30.0;
+    // Stream start timestamp (seconds). The frame PTS are absolute stream
+    // timestamps, so the content spans [startTime, startTime + duration] -
+    // a file with a non-zero start_time would otherwise look like it ended
+    // before it began.
+    double m_startTime = 0.0;
     int    m_width     = 0;
     int    m_height    = 0;
 

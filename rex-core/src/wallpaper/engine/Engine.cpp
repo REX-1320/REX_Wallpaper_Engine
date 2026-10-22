@@ -1377,6 +1377,7 @@ void Engine::GetTelemetryLocked(EngineTelemetry& out) const {
         out.renderFps      = vt.renderFps;
         out.avSyncDriftMs  = vt.avSyncDriftMs;
         out.avSyncCorrections = vt.avSyncCorrections;
+        out.sceneEnded     = vt.sceneEnded;
         out.sourceFps      = vt.sourceFps;
         out.convertFps     = vt.convertFps;
         out.schedulerDrops = vt.schedulerDrops;

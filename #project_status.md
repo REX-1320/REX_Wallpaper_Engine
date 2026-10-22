@@ -59,6 +59,7 @@
 | Audio-reactive | ✅ | `Engine::EnableAudioReactive`, `SetAudioSensitivity` |
 | Seek | ✅ | `PlaybackController::Seek` |
 | Telemetry | ✅ | `PlaybackTelemetry` — framesDecoded/Dropped, FPS, latency |
+| Playlist change modes (end of scene) | ✅ | `SceneEndLatch` / `EngineTelemetry::sceneEnded` + `ENDED {path, session}`; the app rotates the active playlist on the event (2026-10-22) |
 
 ### Preview
 
