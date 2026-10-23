@@ -146,6 +146,12 @@ public:
     /// Re-arm: the next end is a NEW scene end.
     void Rearm() { m_ended.store(false, std::memory_order_release); }
 
+    /// Latch the end from a fact other than a PTS sample: the decoder has
+    /// exhausted the video stream. Necessary when the container (usually an
+    /// audio tail) runs past the last video frame, which the PTS comparison
+    /// against the container duration can never reach.
+    void MarkEnded() { m_ended.store(true, std::memory_order_release); }
+
     /// Feed one published or presented frame. `framePts` is the ABSOLUTE
     /// stream PTS; the content spans [contentStart, contentStart+duration].
     /// Returns true only for the frame that SETS the latch (the rising

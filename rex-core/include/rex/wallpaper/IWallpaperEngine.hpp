@@ -194,6 +194,10 @@ struct EngineTelemetry {
     uint64_t sendEagainStalls = 0;
     // Driver hardware decoder profile count (0 = no hardware decode).
     uint32_t hwDecoderProfiles = 0;
+    // The path the CURRENT stream actually took. hwDecoderProfiles is only a
+    // capability count: a driver can advertise profiles and still decode this
+    // file in software (chroma gate, profile GUID, or a get_format demotion).
+    bool hardwareAccelerated = false;
     // ─── Display cadence, sampled from DXGI (not from our own submits) ───
     // dwellVblanks = refreshes the last presented frame occupied;
     // dwellP50/P95/P99 are over the ring. For a source rate that is not an

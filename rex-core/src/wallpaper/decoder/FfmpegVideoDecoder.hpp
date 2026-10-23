@@ -567,6 +567,14 @@ class FfmpegVideoDecoder {
     /// Stream start timestamp (seconds, 0 for a normal file). The frame PTS
     /// are absolute, so the content spans [start, start + duration].
     double GetStartTime() const { return m_startTime; }
+    /// True once the video elementary stream has been decoded to its end
+    /// (the delayed frames were flushed). A file's container duration can run
+    /// PAST the last video frame - a trailer's audio tail is commonly 1-2 s
+    /// longer - so the PTS-vs-container-duration check never sees the end of
+    /// the video. The controller latches ENDED from this fact instead.
+    bool ReachedEndOfStream() const {
+        return m_reachedEnd.load(std::memory_order_acquire);
+    }
     int    GetWidth()     const { return m_width; }
     int    GetHeight()    const { return m_height; }
 
@@ -672,6 +680,12 @@ private:
     // plain bools were a data race. Relaxed: flags only, no ordering.
     std::atomic<bool> m_hardware{false};
     std::atomic<bool> m_eof{false};
+    // Set when DecodeFrame() has exhausted the video stream (the second
+    // AVERROR_EOF, after avcodec_send_packet(nullptr) flushed the delayed
+    // frames). Sticky across the internal loop rewind so the controller can
+    // observe it after DecodeFrame() returns the first frame of the next
+    // pass; reset by a public Seek()/Stop()/Open().
+    std::atomic<bool> m_reachedEnd{false};
     // P1-9: set by RequestStop()/Close(), read by InterruptCallback on
     // FFmpeg's IO thread. Atomic: never take a lock inside the callback.
     std::atomic<bool> m_stopRequested{false};

@@ -1415,7 +1415,9 @@ void Engine::GetTelemetryLocked(EngineTelemetry& out) const {
         out.vpMsP99        = vt.vpMsP99;
         out.sendEagainStalls = vt.sendEagainStalls;
         out.hwDecoderProfiles = vt.hwDecoderProfiles;
-    }    if (m_renderer) {
+        out.hardwareAccelerated = vt.hardwareAccelerated;
+    }
+    if (m_renderer) {
         out.textureBytes    = m_renderer->GetTextureBytes();
         out.uploadBytes     = m_renderer->GetUploadBytes();
         out.textureRecreations = m_renderer->GetTextureRecreations();

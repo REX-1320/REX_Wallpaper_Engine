@@ -346,9 +346,18 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
             hwctx->device = m_device11.Get();
             m_device11->AddRef();
             hwctx->BindFlags = D3D11_BIND_SHADER_RESOURCE;  // FFmpeg adds BIND_DECODER
-            hwctx->MiscFlags = D3D11_RESOURCE_MISC_SHARED |
-                               D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-            if (av_hwdevice_ctx_init(hwDevRef) >= 0) {
+            // Do NOT set MiscFlags = SHARED | SHARED_NTHANDLE here. FFmpeg
+            // applies this field to every frame texture it allocates from the
+            // device context, and decoder output textures carry
+            // D3D11_BIND_DECODER - D3D11 refuses to share those (see the
+            // class comment: CreateSharedHandle fails even with the flags).
+            // Some drivers (Intel) also reject CreateTexture2D for the
+            // combination, which makes FFmpeg fall back to software inside
+            // get_format while the decoder still reports hardware. The frames
+            // are copied into our own shareable pool, so the source textures
+            // never need to be shared.
+            const int initRet = av_hwdevice_ctx_init(hwDevRef);
+            if (initRet >= 0) {
                 m_decCtx->hw_device_ctx = av_buffer_ref(hwDevRef);
                 m_decCtx->get_format = &FfmpegVideoDecoder::GetHwFormat;
                 m_hwDevCtx = hwDevRef;
@@ -358,8 +367,13 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                 // (d3d11va.cpp:668). Only the SOFTWARE path uses auto threads.
                 m_decCtx->thread_count = 1;
                 m_decCtx->thread_type = 0;
-                if (avcodec_open2(m_decCtx, codec, nullptr) < 0) {
-                    REX_LOG_WARN(kModule, "hardware decode open failed, retrying software");
+                const int hwOpenRet = avcodec_open2(m_decCtx, codec, nullptr);
+                if (hwOpenRet < 0) {
+                    char hwErr[AV_ERROR_MAX_STRING_SIZE] = {};
+                    av_strerror(hwOpenRet, hwErr, sizeof(hwErr));
+                    REX_LOG_WARN(kModule,
+                                 "hardware decode open failed ({}: {}), retrying software",
+                                 hwOpenRet, hwErr);
                     avcodec_free_context(&m_decCtx);
                     av_buffer_unref(&m_hwDevCtx);
                     m_hwDevCtx = nullptr;
@@ -383,6 +397,11 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
                     m_hardware = true;
                 }
             } else {
+                char initErr[AV_ERROR_MAX_STRING_SIZE] = {};
+                av_strerror(initRet, initErr, sizeof(initErr));
+                REX_LOG_WARN(kModule,
+                             "D3D11VA device init failed ({}: {}), falling back to software decode",
+                             initRet, initErr);
                 av_buffer_unref(&hwDevRef);
             }
         }
@@ -419,6 +438,7 @@ shared::Result<void> FfmpegVideoDecoder::Open(std::string_view path, bool useHar
     }
 
     m_eof = false;
+    m_reachedEnd.store(false, std::memory_order_release);
     m_pktPending = false;
     m_open.store(true, std::memory_order_release);
 
@@ -499,6 +519,7 @@ void FfmpegVideoDecoder::Close() {
     m_pktPending = false;
     m_hardware = false;
     m_eof = false;
+    m_reachedEnd.store(false, std::memory_order_release);
     m_unusableCode.store(0, std::memory_order_relaxed);  // P2-1: fresh Open = fresh verdict
     m_duration = 0.0;
     m_startTime = 0.0;
@@ -550,7 +571,13 @@ bool FfmpegVideoDecoder::Seek(double seconds) {
     // on a frame-threaded decoder (FFmpeg's async lock would be released
     // twice -> av_assert0 in libavcodec/pthread_frame.c -> abort).
     std::lock_guard<std::recursive_mutex> codecLock(m_codecMutex);
-    return SeekInternal(seconds);
+    const bool ok = SeekInternal(seconds);
+    // A user seek starts a new stretch of content; the end observed before
+    // the seek must not keep the controller's scene-end latch armed. The
+    // internal loop rewind deliberately does NOT do this - the controller
+    // reads the end between the rewind and the next end of content.
+    if (ok) m_reachedEnd.store(false, std::memory_order_release);
+    return ok;
 }
 
 bool FfmpegVideoDecoder::Flush() {
@@ -584,6 +611,16 @@ enum AVPixelFormat FfmpegVideoDecoder::GetHwFormat(
         // a far smaller cost than a 4K software decode.
         return AV_PIX_FMT_D3D11;
     }
+    // FFmpeg did not offer D3D11 for this stream: it will decode in software
+    // inside the codec (get_format is the pivot). Name the format it chose and
+    // the codec/profile so a hardware->software demotion is diagnosable; the
+    // old code returned silently and the runtime still logged "hardware
+    // decode" from the successful avcodec_open2 above.
+    const char* first = av_get_pix_fmt_name(formats[0]);
+    REX_LOG_WARN(kModule,
+                 "D3D11VA not offered for codec={} profile={} (first format {}), decoding in software",
+                 avcodec_get_name(ctx->codec_id), ctx->profile,
+                 first ? first : "none");
     return formats[0];
 }
 
@@ -753,6 +790,7 @@ void FfmpegVideoDecoder::SelectStreamByResolution(int targetWidth, int targetHei
     m_width  = newStream->codecpar->width;
     m_height = newStream->codecpar->height;
     m_eof = false;
+    m_reachedEnd.store(false, std::memory_order_release);
     m_pktPending = false;
     REX_LOG_INFO(kModule, "stream switched: {}x{} @{:.2f} fps ({} decode)", m_width,
                  m_height, m_frameRate, m_hardware ? "hardware" : "software");
@@ -975,6 +1013,13 @@ bool FfmpegVideoDecoder::DecodeFrame(VideoFrame& outFrame) {
             // decoder needs more packets; fall through to read one
         } else if (r == AVERROR_EOF) {
             if (m_eof) {
+                // The delayed-frame flush above is complete: the VIDEO stream
+                // has really ended. Latch it for the controller - the
+                // container can continue past this point (an audio tail), so
+                // a PTS-vs-container-duration comparison never fires for
+                // those files (measured on a 191.49 s trailer whose last
+                // video frame is at 189.87 s).
+                m_reachedEnd.store(true, std::memory_order_release);
                 // P1-10: one internal seek per call. A second consecutive
                 // EOF means the seek produced no frames (0-frame file):
                 // return instead of cycling forever.

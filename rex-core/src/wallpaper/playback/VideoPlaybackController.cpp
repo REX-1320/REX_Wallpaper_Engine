@@ -713,9 +713,18 @@ void VideoPlaybackController::DecoderThread() {
             auto decoder = m_decoder;
             const uint64_t gen = m_decodeGeneration;
             ok = decoder && decoder->DecodeFrame(frame);
+            // The video elementary stream ran out while decoding this frame
+            // (the decoder rewinded internally when looping). Latch the scene
+            // end from that fact: the container duration can sit 1-2 s past
+            // the last video frame (audio tail), so the PTS comparison alone
+            // never reports the end for such files.
+            const bool reachedStreamEnd = decoder && decoder->ReachedEndOfStream();
             // P1-8: read the flag from the snapshot, not the member —
             // Close() may reset it the moment the lock releases.
             looping = decoder && decoder->GetLoop();
+            if (reachedStreamEnd) {
+                m_sceneEnd.MarkEnded();
+            }
             if (ok) {
                 // Drop frames decoded from a pre-Seek/Stop stream: the
                 // generation moved while DecodeFrame was inside.
