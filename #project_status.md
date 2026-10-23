@@ -5,6 +5,12 @@
 > See also: [everything.md](everything.md) (done inventory) · [TODO.md](TODO.md) (remaining work).
 > Note: the "Shell UI" section below is **retired/historical** — the native C++ shell was archived in `dump/` (and the orphaned `wallpaper/renderer/` subsystem was archived there on 2026-10-19). The current UI is the Electron app in `app/`; statuses inside that section are snapshots from its July audit and are not maintained.
 
+## Recent changes since the July audit
+
+**2026-10-24 — playlist rotation outlives the UI (✅ live verified).** The Timer and scene-end scheduler moved from the renderer to the main process (`app/electron/playlist-scheduler.cjs`, 13/13 unit tests). Closing the window now always destroys the renderer, and a `--background` login start rotates with no renderer at all. Live: two native-ENDED rotations with the window destroyed (`igris` → `KALYANI`, `reason=After Current Ends`), and reopening the UI adopted the rotated file with no second LOAD.
+
+**2026-10-24 — decode path (✅ AMD verified, 🟡 Intel pending).** Hardware decode is now reported per stream (`hw=0|1`) instead of as a driver capability count, and the three silent software fallbacks log a reason. The `MiscFlags = SHARED | SHARED_NTHANDLE` decoder-device flag was removed (it applies to non-shareable decoder textures). AMD RX 6700 XT: H.264, AV1 and HEVC Main10 10-bit all `hw=1`, `content=1.00x`, `decP50=0.23–0.63 ms`. Intel UHD 770 re-test still needs one 4:2:0 10-bit control file. HEVC 4:2:2/4:4:4 remains software by design (no RExt GUIDs in the FFmpeg D3D11VA accel).
+
 ---
 
 ## Wallpaper Engine
