@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { detectFileType } from '../registry'
-import { applyWallpaper, createPlaylist, deletePlaylist as deleteStorePlaylist, ensureWallpaperForPath, getSnapshot, renamePlaylist as renameStorePlaylist, restorePlaylists, updateWallpaperProperty, duplicatePlaylist as duplicateStorePlaylist } from '../store'
+import { adoptAppliedPath, applyWallpaper, arePlaylistsHydrated, createPlaylist, deletePlaylist as deleteStorePlaylist, ensureWallpaperForPath, getSnapshot, renamePlaylist as renameStorePlaylist, restorePlaylists, updateWallpaperProperty, duplicatePlaylist as duplicateStorePlaylist } from '../store'
+import { ENGINE_MODE_BY_MODE } from '../desktop'
 
 export const CHANGE_MODES = [
   'Manual',
@@ -27,6 +28,14 @@ export const CHANGE_MODES = [
   'Random Interval',
   'Custom Rule',
 ]
+
+// Timer and scene-end are scheduled by MAIN (electron/playlist-scheduler.cjs):
+// they have to keep firing when this window is destroyed to the tray, and at a
+// --background login start where no renderer exists. The engine mirrors the
+// rotation plan instead of evaluating these modes here - running both would
+// rotate twice. Every other mode still runs in the renderer because it uses
+// signals only the UI has (idle, lock screen, simulated system state...).
+const MAIN_SCHEDULED_MODES = new Set(['Timer', 'After Current Ends', 'Video Ends', 'Audio Ends'])
 
 export const PLAYBACK_ORDERS = [
   'Sequential',
@@ -316,22 +325,9 @@ function bump() {
   hookSnapshot = null
   for (const listener of listeners) listener()
   schedulePersist()
-}
-
-// Tell main whether a playlist rotation is running. While it is, closing the
-// window hides it instead of destroying the renderer (main.cjs): the scheduler
-// is this renderer, and REX is designed to sit in the tray while the wallpaper
-// plays. Sent only on change - the 500 ms tick must not spam IPC.
-let rotationReported = null
-function reportRotationActive(active) {
-  const next = Boolean(active)
-  if (next === rotationReported) return
-  rotationReported = next
-  try {
-    window.rexDesktop?.setPlaylistRotationActive?.(next)
-  } catch {
-    /* older preload without the API */
-  }
+  // Any settings/membership/current-file change can change the rotation plan
+  // main is running. Debounced: dragging a slider fires a burst of bumps.
+  schedulePlanSync()
 }
 
 function persist() {
@@ -395,82 +391,14 @@ function wallpaperPath(w) {
   return w?.filePath ?? w?.info?.filePath ?? w?.info?.source ?? null
 }
 
-// ─── Scene-end signal (the native ENDED event) ─────────────────────────────
-//
-// The native runtime emits an ENDED event when the scene it plays reaches
-// the end of its content - the engine knows that exactly (the presented
-// frame's PTS reached the duration). The app used to look for the end in a
-// media bridge that NOTHING ever registered, so `ended` was always false
-// and the "when the current ends" change modes could never fire.
-//
-// The signal is scoped to the wallpaper that is ON THE DESKTOP (the store's
-// appliedId): an ENDED that arrives after the wallpaper already changed
-// belongs to a scene that is gone, and acting on it would change the
-// wallpaper for the wrong reason (or run the change loop away).
-let sceneEndedSignal = null
-let runtimeSubscribed = false
-
-function ensureRuntimeSubscription() {
-  if (runtimeSubscribed) return
-  const subscribe = window.rexDesktop?.onWallpaperEvent
-  if (typeof subscribe !== 'function') return
-  runtimeSubscribed = true
-  subscribe((msg) => {
-    if (!msg || msg.event !== 'ENDED') return
-    const data = msg.data ?? {}
-    sceneEndedSignal = {
-      path: String(data.path ?? ''),
-      appliedId: getSnapshot().appliedId,
-      at: Date.now(),
-    }
-  })
-}
-
 // The wallpaper that is ON THE DESKTOP right now.
 //
 // The store knows it as appliedId - but at boot the store has not loaded the
 // file yet (the gallery restores its tiles lazily, and main re-applied the
 // last wallpaper before the renderer existed), so the path the runtime
-// reports as "last applied" is the fallback. The path is the identity the
-// ENDED event carries, so it is what the signal is matched on.
+// reports as "last applied" is the fallback.
 function appliedWallpaper(snapshot) {
   return snapshot.wallpapers.find((w) => w.id === snapshot.appliedId) ?? null
-}
-
-function appliedPathKey(snapshot) {
-  const applied = appliedWallpaper(snapshot)
-  const path = memberKey(wallpaperPath(applied))
-  if (path) return path
-  return memberKey(state.lastAppliedPath)
-}
-
-// Is there a pending ENDED signal that belongs to the wallpaper that is on
-// the desktop right now? A stale signal (the scene changed in the meantime)
-// is dropped, never acted on.
-//
-// The signal is NOT consumed here: it is consumed when a change actually
-// happens (see fireChange). A change that cannot happen yet - no active
-// playlist, nothing left to play - must not throw the end away, or the
-// playlist would sit still until the wallpaper changed for another reason.
-function hasSceneEnded() {
-  const signal = sceneEndedSignal
-  if (!signal) return false
-  const snapshot = getSnapshot()
-  const current = appliedPathKey(snapshot)
-  // The wallpaper on the desktop is not known yet (the store is still
-  // loading it): keep the signal pending - it is the end of the scene that
-  // is playing, and it stays true until the wallpaper changes.
-  if (!current) return false
-  if (current !== memberKey(signal.path)) {
-    sceneEndedSignal = null
-    return false
-  }
-  return true
-}
-
-// The end was acted on (the wallpaper changed) - the signal has done its job.
-function clearSceneEnded() {
-  sceneEndedSignal = null
 }
 
 // The playlist that governs the wallpaper on the desktop.
@@ -533,15 +461,28 @@ function activePlaylistId() {
 // store's applied wallpaper (syncAppliedId), which is what scopes the
 // scene-end signal.
 let preparedPoolKey = null
+let preparedPoolReady = false
 function preparePlaylistPool(playlist) {
   if (!playlist) return
   const members = playlist.members ?? []
-  const key = `${playlist.id}:${members.length}`
+  const key = `${playlist.id}:${members.map(memberKey).join('>')}`
   if (preparedPoolKey === key) return
   preparedPoolKey = key
-  for (const member of members) {
-    Promise.resolve(ensureWallpaperForPath(member, { keepSelection: true })).catch(() => {})
+  preparedPoolReady = members.length === 0
+  if (members.length === 0) {
+    schedulePlanSync(0)
+    return
   }
+  const loads = members.map((member) =>
+    Promise.resolve(ensureWallpaperForPath(member, { keepSelection: true })).catch(() => null),
+  )
+  Promise.all(loads).then(() => {
+    if (preparedPoolKey !== key) return // a newer membership superseded this pass
+    preparedPoolReady = true
+    // The queue needs the members' settings (fit mode, volume, ...). Sync the
+    // plan only after they are in the store.
+    schedulePlanSync(0)
+  })
 }
 
 function filterPool(settings, pool, members) {
@@ -707,6 +648,330 @@ function shuffleArray(arr) {
   return copy
 }
 
+// ─── Rotation plan mirrored to main ────────────────────────────────────────
+//
+// The renderer owns the *selection* logic (membership, filters, order) and
+// the per-file settings; main owns the *clock*. Sending an ordered queue of
+// fully-described members means main needs no access to localStorage, and a
+// rotation it performs is byte-for-byte the same apply the UI would have done.
+//
+// The queue order is cached per (playlist order + pool) so Random/Shuffle do
+// not reshuffle on every 500 ms tick. A real membership/order change starts a
+// new cycle, which is the expected behaviour.
+
+let planOrderKey = null
+let planOrderIds = null
+let lastPlanSignature = null
+let planSyncPending = false
+let planSyncQueued = false
+let planSyncTimer = null
+let schedulerStatePending = false
+let unsubscribePlaylistApplied = null
+
+function playlistPoolKey(playlist) {
+  if (!playlist) return null
+  return `${playlist.id}:${(playlist.members ?? []).map(memberKey).join('>')}`
+}
+
+function weightedOrder(pool) {
+  const remaining = [...pool]
+  const ordered = []
+  while (remaining.length > 0) {
+    const weights = remaining.map((w) => {
+      let weight = 1
+      if (w.general?.favorite) weight += 3
+      if (w.info?.dateAdded) weight += 1
+      return weight
+    })
+    const total = weights.reduce((a, b) => a + b, 0)
+    let roll = Math.random() * total
+    let index = remaining.length - 1
+    for (let i = 0; i < remaining.length; i += 1) {
+      roll -= weights[i]
+      if (roll <= 0) {
+        index = i
+        break
+      }
+    }
+    ordered.push(remaining[index].id)
+    remaining.splice(index, 1)
+  }
+  return ordered
+}
+
+function orderPool(settings, pool, currentId) {
+  if (pool.length === 0) return []
+  if (settings.order === 'Repeat One' || settings.options.loopCurrent) {
+    const current = pool.find((w) => w.id === currentId) ?? pool[0]
+    return [current]
+  }
+  const key = [
+    settings.order,
+    settings.options.loopPlaylist ? 1 : 0,
+    (settings.modeSettings.customOrder ?? []).join(','),
+    pool.map((w) => `${w.id}:${memberKey(wallpaperPath(w))}`).join('>'),
+  ].join('|')
+  if (key !== planOrderKey) {
+    planOrderKey = key
+    const ids = pool.map((w) => w.id)
+    switch (settings.order) {
+      case 'Random':
+      case 'Shuffle':
+        planOrderIds = shuffleArray(ids)
+        break
+      case 'Weighted Random':
+        planOrderIds = weightedOrder(pool)
+        break
+      case 'Recently Added':
+      case 'Newest First':
+        planOrderIds = sortByDate(pool, true).map((w) => w.id)
+        break
+      case 'Oldest First':
+        planOrderIds = sortByDate(pool, false).map((w) => w.id)
+        break
+      case 'Alphabetical':
+        planOrderIds = sortByName(pool, true).map((w) => w.id)
+        break
+      case 'Custom Order': {
+        const configured = (settings.modeSettings.customOrder ?? []).filter((id) => pool.some((w) => w.id === id))
+        planOrderIds = [...configured, ...pool.filter((w) => !configured.includes(w.id)).map((w) => w.id)]
+        break
+      }
+      case 'Favorites First':
+        planOrderIds = [
+          ...pool.filter((w) => w.general?.favorite).map((w) => w.id),
+          ...pool.filter((w) => !w.general?.favorite).map((w) => w.id),
+        ]
+        break
+      case 'Highest Rated':
+        planOrderIds = [...pool].sort((a, b) => (b.general?.rating ?? 0) - (a.general?.rating ?? 0)).map((w) => w.id)
+        break
+      case 'Least Played':
+        planOrderIds = [...pool].sort((a, b) => (history.mostPlayed[a.id] ?? 0) - (history.mostPlayed[b.id] ?? 0)).map((w) => w.id)
+        break
+      case 'Most Played':
+        planOrderIds = [...pool].sort((a, b) => (history.mostPlayed[b.id] ?? 0) - (history.mostPlayed[a.id] ?? 0)).map((w) => w.id)
+        break
+      case 'Sequential':
+      case 'Repeat All':
+      default:
+        planOrderIds = ids
+    }
+  }
+  const byId = new Map(pool.map((w) => [w.id, w]))
+  const ordered = (planOrderIds ?? []).map((id) => byId.get(id)).filter(Boolean)
+  // Defensive: never drop a member the user just added because the cached
+  // order predates it (the key above should already prevent this).
+  if (ordered.length < pool.length) {
+    for (const wallpaper of pool) if (!ordered.includes(wallpaper)) ordered.push(wallpaper)
+  }
+  return ordered
+}
+
+function memberApplyPayload(w) {
+  if (!w) return null
+  const type = detectFileType(w.info?.source ?? wallpaperPath(w) ?? '') ?? 'IMAGE'
+  if (type === 'IMAGE') {
+    return { kind: 'image', mode: ENGINE_MODE_BY_MODE[w.display?.mode] ?? 'fill' }
+  }
+  if (type !== 'VIDEO') return null // WEB/SCENE/SHADER/AUDIO are not runtime scenes
+  return {
+    kind: 'video',
+    mode: ENGINE_MODE_BY_MODE[w.display?.mode] ?? 'fill',
+    loop: w.playback?.loop ?? true,
+    muted: w.playback?.mute ?? false,
+    volume: (w.playback?.volume ?? 100) / 100,
+    speed: w.playback?.speed ?? 1,
+    audioMode: w.playback?.audioMode,
+    // The engine's colour scale is 0..2 with 1.0 = unchanged; the app keeps
+    // percent 0..200 where 100 = unchanged.
+    brightness: (w.appearance?.brightness ?? 100) / 100,
+    contrast: (w.appearance?.contrast ?? 100) / 100,
+    saturation: (w.appearance?.saturation ?? 100) / 100,
+  }
+}
+
+// undefined = "not ready yet, keep the plan main already has"
+// null      = "the desktop file is not governed by a playlist, stop the plan"
+function buildRotationPlan() {
+  const snapshot = getSnapshot()
+  const current = appliedWallpaper(snapshot)
+  const currentPath = wallpaperPath(current) ?? state.lastAppliedPath
+  if (!currentPath) return undefined
+  if (!arePlaylistsHydrated()) return undefined
+  const active = playlistFor(snapshot, current) ?? activePlaylist()
+  if (!active) return null
+  // Materialise this playlist's members (they are what the queue rotates
+  // through). Preparation is keyed by the member list, so this is a no-op
+  // once the store has them.
+  preparePlaylistPool(active)
+  const members = active.members ?? []
+  if (members.length > 0 && (!preparedPoolReady || preparedPoolKey !== playlistPoolKey(active))) {
+    // The members exist but their records/settings are still loading. Do not
+    // overwrite the persisted plan with an empty one in the meantime.
+    return undefined
+  }
+  const settings = getSettings(active.id)
+  if (!settings) return null
+  const pool = filterPool(settings, poolWallpapers(), members)
+  let anchorId = current?.id ?? null
+  if (!anchorId || !pool.some((w) => w.id === anchorId)) {
+    const key = memberKey(currentPath)
+    anchorId = pool.find((w) => memberKey(wallpaperPath(w)) === key)?.id ?? null
+  }
+  const ordered = orderPool(settings, pool, anchorId)
+  const queue = ordered
+    .map((w) => {
+      const path = wallpaperPath(w)
+      const apply = memberApplyPayload(w)
+      return path && apply ? { path, apply } : null
+    })
+    .filter(Boolean)
+  const timer = settings.modeSettings.timer
+  return {
+    version: 1,
+    playlistId: active.id,
+    playlistName: active.name,
+    mode: settings.mode,
+    currentPath,
+    loop: settings.options.loopPlaylist !== false,
+    paused: Boolean(settings.options.pause),
+    updatedAt: Date.now(),
+    queue,
+    timer: {
+      totalMs: timerTotalMs(settings),
+      remainingMs: timerRemainingMs(settings),
+      running: Boolean(timer.running),
+      startedAt: timer.startedAt,
+      accumulatedMs: timer.accumulatedMs,
+      syncedAt: Date.now(),
+    },
+  }
+}
+
+function planSignature(plan) {
+  if (!plan) return 'null'
+  return JSON.stringify({
+    playlistId: plan.playlistId,
+    playlistName: plan.playlistName,
+    mode: plan.mode,
+    currentPath: plan.currentPath,
+    loop: plan.loop,
+    paused: plan.paused,
+    queue: plan.queue,
+    // remainingMs/syncedAt tick every second and are NOT changes; the stable
+    // timer identity (start/reset/pause) is what main re-arms on.
+    timer: {
+      totalMs: plan.timer.totalMs,
+      running: plan.timer.running,
+      startedAt: plan.timer.startedAt,
+      accumulatedMs: plan.timer.accumulatedMs,
+    },
+  })
+}
+
+function schedulePlanSync(delay = 150) {
+  if (!started) return
+  if (planSyncPending) {
+    planSyncQueued = true
+    return
+  }
+  if (planSyncTimer) clearTimeout(planSyncTimer)
+  planSyncTimer = setTimeout(() => {
+    planSyncTimer = null
+    syncPlan()
+  }, delay)
+}
+
+function syncPlan() {
+  if (!started || planSyncPending || schedulerStatePending) return
+  const bridge = window.rexDesktop?.syncPlaylistPlan
+  if (typeof bridge !== 'function') return
+  const plan = buildRotationPlan()
+  if (plan === undefined) return
+  const signature = planSignature(plan)
+  if (signature === lastPlanSignature) return
+  planSyncPending = true
+  Promise.resolve(bridge(plan))
+    .then((schedulerState) => {
+      lastPlanSignature = signature
+      applySchedulerState(schedulerState)
+    })
+    .catch(() => {
+      // Main is not ready / app is quitting. Keep the signature unsent so the
+      // next tick retries.
+    })
+    .finally(() => {
+      planSyncPending = false
+      if (planSyncQueued) {
+        planSyncQueued = false
+        schedulePlanSync(0)
+      }
+    })
+}
+
+// Main is authoritative about the live countdown. When the UI reopens after
+// rotations happened with no renderer, the persisted timer can be older than
+// main's due time; align it once instead of showing a countdown that no longer
+// matches when the wallpaper will change. The next plan sync then carries the
+// same timer identity, so main keeps (rather than resets) its deadline.
+function applySchedulerState(schedulerState) {
+  if (!schedulerState?.nextDueAt || !schedulerState.playlistId) return
+  const settings = getSettings(schedulerState.playlistId)
+  if (!settings || settings.mode !== 'Timer' || !settings.modeSettings.timer.running) return
+  const total = timerTotalMs(settings)
+  if (total <= 0) return
+  const dueIn = schedulerState.nextDueAt - Date.now()
+  if (dueIn < -1_500) return
+  const localDueIn = timerRemainingMs(settings)
+  if (Math.abs(dueIn - localDueIn) < 1_500) return
+  const timerState = settings.modeSettings.timer
+  timerState.accumulatedMs = 0
+  timerState.running = true
+  timerState.pausedAt = null
+  timerState.startedAt = Date.now() - Math.max(0, total - Math.max(0, dueIn))
+  // Re-sync with the corrected timer identity; main keeps the same due time.
+  bump()
+}
+
+// A rotation main performed (Timer or a native scene end). Adopt the file in
+// the store without asking DesktopApply to LOAD it again, and reset the local
+// countdown so the dialog shows the new interval immediately.
+function handlePlaylistApplied(event) {
+  if (!event || event.event !== 'applied' || !event.path) return
+  state.lastAppliedPath = event.path
+  const id = event.playlistId
+  if (id && event.mode === 'Timer') {
+    const settings = getSettings(id)
+    const timerState = settings.modeSettings.timer
+    timerState.accumulatedMs = 0
+    timerState.startedAt = Number(event.at) || Date.now()
+    timerState.running = true
+    timerState.pausedAt = null
+    settings.lastChangeAt = timerState.startedAt
+  }
+  adoptAppliedPath(event.path, { keepSelection: true, silent: true })
+    .then((wallpaperId) => {
+      if (wallpaperId) recordExternalPlay(wallpaperId)
+    })
+    .catch(() => {})
+    .finally(() => bump())
+}
+
+function recordExternalPlay(id) {
+  const wallpaper = getSnapshot().wallpapers.find((w) => w.id === id)
+  if (!wallpaper) return
+  history.recent = [id, ...history.recent.filter((x) => x !== id)].slice(0, 50)
+  history.mostPlayed[id] = (history.mostPlayed[id] ?? 0) + 1
+  history.playbackLog.unshift({
+    t: Date.now(),
+    id,
+    name: wallpaper.info?.name ?? 'Wallpaper',
+    type: detectFileType(wallpaper.info?.source ?? '') ?? 'IMAGE',
+  })
+  history.playbackLog = history.playbackLog.slice(0, 200)
+}
+
 function transitionName(settings, wallpaper) {
   if (settings.transitionPerWallpaper && wallpaper?.playlist?.transition && wallpaper.playlist.transition !== 'None' && wallpaper.playlist.transition !== 'Global') {
     return wallpaper.playlist.transition
@@ -730,14 +995,13 @@ function transitionName(settings, wallpaper) {
   return settings.transition
 }
 
-// Changes the wallpaper to the next file of the active playlist.
+// Changes the wallpaper to the next file of the active playlist. This is the
+// renderer-only path (Manual, schedules, idle, ...); Timer and scene-end are
+// applied by main from the mirrored plan.
 //
 // Returns true when the wallpaper actually changed. A change that cannot
-// happen (no active playlist, nothing left to play) returns false and
-// leaves the pending scene-end signal alone - the end of the current
-// wallpaper is still true, and it must fire as soon as the change becomes
-// possible.
-function fireChange(settings, reason) {
+// happen (no active playlist, nothing left to play) returns false.
+function fireChange(settings, _reason) {
   const snapshot = getSnapshot()
   // The rotation runs from the wallpaper that is ON THE DESKTOP (a preview
   // selection is not what is playing), and it is governed by the playlist
@@ -758,11 +1022,8 @@ function fireChange(settings, reason) {
       recordPlay(next, transition)
       settings.lastChangeAt = Date.now()
       applyWallpaper(next.id)
-      // The wallpaper changed: the scene that ended is gone, so its end
-      // signal has done its job. The new scene's path is what the desktop
-      // shows from now on.
+      // The wallpaper changed: the path is what the desktop shows from now on.
       state.lastAppliedPath = wallpaperPath(next)
-      clearSceneEnded()
       return true
     }
     return changeNow()
@@ -799,6 +1060,10 @@ function evaluateMode(settings) {
   const now = state.now
   const mode = settings.mode
   if (settings.options.pause) return null
+  // Timer and scene-end are main's job now: they have to keep firing after
+  // this window is destroyed and at a --background login start. Evaluating
+  // them here would run a second scheduler and rotate twice.
+  if (MAIN_SCHEDULED_MODES.has(mode)) return null
   for (const [key, enabled] of Object.entries(settings.behavior)) {
     const signal = {
       pauseOnFullscreen: state.system.fullscreen,
@@ -813,28 +1078,6 @@ function evaluateMode(settings) {
     if (enabled && signal) return null
   }
 
-  if (mode === 'Timer') {
-    if (timerTotalMs(settings) <= 0) return null
-    if (timerRemainingMs(settings) <= 0) {
-      ms.timer.accumulatedMs = 0
-      ms.timer.startedAt = now
-      ms.timer.running = true
-      return 'Timer elapsed'
-    }
-    return null
-  }
-  if (mode === 'After Current Ends' || mode === 'Video Ends' || mode === 'Audio Ends') {
-    // The native runtime reports the end of the current scene (the ENDED
-    // event). The signal belongs to the wallpaper on the desktop, so a
-    // stale end can never fire a change - and it is consumed only when a
-    // change really happens (see fireChange).
-    if (hasSceneEnded()) {
-      ms.endedHandled = true
-      return mode
-    }
-    ms.endedHandled = false
-    return null
-  }
   if (mode === 'Daily Schedule') return timeMatch(ms.dailyTime, now) && firedOnce(ms, now)
   if (mode === 'Weekly Schedule') {
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -978,6 +1221,7 @@ function tick() {
       .then((last) => {
         if (last?.path && !state.lastAppliedPath) {
           state.lastAppliedPath = last.path
+          adoptAppliedPath(last.path, { keepSelection: true, silent: true }).catch(() => {})
           bump()
         }
       })
@@ -995,20 +1239,14 @@ function tick() {
     changed = true
   }
   // The playlist's files have to be in the store before the engine can
-  // rotate through them - at boot the store knows none of them.
-  preparePlaylistPool((getSnapshot().playlists ?? []).find((p) => p.id === id) ?? null)
+  // rotate through them - at boot the store knows none of them. The plan
+  // builder prepares the APPLIED playlist (not a preview selection).
   const settings = state.currentPlaylistId ? getSettings(state.currentPlaylistId) : null
-  // Keep main's close handler in sync: with a live rotation the renderer has
-  // to survive the window being closed to the tray, or the desktop freezes on
-  // the file it is playing. Manual means nothing is scheduled.
-  reportRotationActive(Boolean(settings && settings.mode !== 'Manual'))
   if (settings) {
     const reason = evaluateMode(settings)
     if (reason) {
       // A reason that cannot change anything yet (no active playlist, the
-      // playlist ran out) must not re-render the UI every tick - and it
-      // must not throw the pending scene-end away: the end is still true
-      // and fires as soon as the change becomes possible.
+      // playlist ran out) must not re-render the UI every tick.
       changed = fireChange(settings, reason) || changed
     }
     if (settings.automation.enabled && evaluateAutomation(settings)) {
@@ -1023,6 +1261,10 @@ function tick() {
       }
     }
   }
+  // Mirror the rotation the user configured into main. The tick is the
+  // heartbeat: settings edits, membership changes and the initial pool load
+  // all converge here even if an invoke was dropped while main was starting.
+  syncPlan()
   if (changed) bump()
 }
 
@@ -1077,15 +1319,34 @@ export const playlistEngine = {
     load()
     if (started) return
     started = true
-    // The scene-end signal comes from the runtime as an event (no polling).
-    ensureRuntimeSubscription()
+    // Ask main for the authoritative countdown BEFORE mirroring a plan. The
+    // persisted renderer timer can be stale after rotations main performed
+    // with no window; sending it first would reset main's deadline.
+    const schedulerStateRequest = window.rexDesktop?.getPlaylistSchedulerState?.()
+    if (schedulerStateRequest?.then) {
+      schedulerStatePending = true
+      Promise.resolve(schedulerStateRequest)
+        .then((schedulerState) => applySchedulerState(schedulerState))
+        .catch(() => {})
+        .finally(() => {
+          schedulerStatePending = false
+          schedulePlanSync(0)
+        })
+    }
+    // Rotations main performs come back as events so an open window adopts
+    // the new file (and its countdown) without re-applying it.
+    unsubscribePlaylistApplied = window.rexDesktop?.onPlaylistApplied?.(handlePlaylistApplied) ?? null
     // The wallpaper that is on the desktop right now. Main re-applied it at
     // boot before the store knew about it, so the engine asks the runtime
-    // which file is playing: that path names the playlist that governs it
-    // and scopes the scene-end signal.
+    // which file is playing: that path names the playlist that governs it.
     window.rexDesktop?.getLastApplied?.()
       ?.then((last) => {
-        if (last?.path) state.lastAppliedPath = last.path
+        if (last?.path && !state.lastAppliedPath) {
+          state.lastAppliedPath = last.path
+          adoptAppliedPath(last.path, { keepSelection: true, silent: true })
+            .then(() => bump())
+            .catch(() => {})
+        }
       })
       ?.catch?.(() => {})
     state.idleSince = Date.now()
@@ -1113,15 +1374,29 @@ export const playlistEngine = {
   stop() {
     if (!started) return
     started = false
-    // A pending end belongs to a scene that may be gone by now.
-    sceneEndedSignal = null
+    if (typeof unsubscribePlaylistApplied === 'function') {
+      try {
+        unsubscribePlaylistApplied()
+      } catch {}
+    }
+    unsubscribePlaylistApplied = null
+    if (planSyncTimer) {
+      clearTimeout(planSyncTimer)
+      planSyncTimer = null
+    }
+    planSyncQueued = false
+    planSyncPending = false
+    schedulerStatePending = false
+    lastPlanSignature = null
     preparedPoolKey = null
+    preparedPoolReady = false
     state.lastAppliedPath = null
     clearInterval(timer)
     clearInterval(systemTimer)
     document.removeEventListener('pointerdown', onActivity)
     document.removeEventListener('keydown', onActivity)
-    reportRotationActive(false)
+    // Do NOT clear main's plan here: this stop is usually the window being
+    // destroyed, and the rotation is supposed to continue in the tray.
     flushPersist()
   },
   getSettings,

@@ -351,6 +351,18 @@ export function initPlaylistState() {
   pending
     .then((saved) => hydratePlaylists(saved))
     .catch(() => {})
+    .finally(() => {
+      playlistsHydrated = true
+    })
+}
+
+// The engine must not decide that "no playlist holds this file" until the
+// persisted membership has actually loaded: an empty built-in list looks the
+// same as a real "not a member" and would clear a valid rotation plan on a
+// cold start.
+let playlistsHydrated = false
+export function arePlaylistsHydrated() {
+  return playlistsHydrated
 }
 
 // Adopts the wallpaper main re-applied at startup. Without this the store
@@ -383,8 +395,10 @@ export function initLastAppliedState() {
   fetchLastAppliedPath()
     .then((path) => {
       if (!path) return
-      syncAppliedId()
-      bump()
+      // Materialise the file if the gallery has not restored it yet: the
+      // inspector's "Applied" state keys off appliedId, and live SET_* edits
+      // need a record even when the user never opened this tile.
+      adoptAppliedPath(path).catch(() => {})
     })
     .catch(() => {})
 }
@@ -400,6 +414,31 @@ function syncAppliedId() {
       return
     }
   }
+}
+
+// Adopt the scene the runtime is showing as "on desktop" WITHOUT reloading it.
+//
+// Main applies playlist members itself now; when the window is open it must
+// not send a second LOAD for a file that is already playing (DesktopApply
+// keys its effect on appliedId). Setting externallyApplied tells DesktopApply
+// to update its baseline and skip the apply. The same helper heals the cold
+// start, where the runtime reports the restored wallpaper before the store
+// has materialised its record.
+export async function adoptAppliedPath(path, opts = {}) {
+  const target = typeof path === 'string' ? path : ''
+  if (!target) return null
+  let id = null
+  try {
+    id = await ensureWallpaperForPath(target, { keepSelection: true })
+  } catch {
+    return null
+  }
+  if (!id) return null
+  lastAppliedPath = target
+  appliedId = id
+  externallyApplied = true
+  if (!opts.silent) bump()
+  return id
 }
 
 export async function loadWallpaperFile(file, pathHint = null, opts = {}) {
@@ -461,6 +500,26 @@ export async function loadWallpaperFile(file, pathHint = null, opts = {}) {
       // Bridge absent or unreadable entry — keep defaults.
     }
   }
+  // One record per file. Boot adoption, playlist materialisation and a tile
+  // click all resolve the same path, often concurrently; without this check
+  // each caller created its own record (measured: three records for one file).
+  // appliedId then pointed at a different record than the tile the user
+  // selected, so the inspector lost its "On desktop" state after a background
+  // rotation even though the right file was playing.
+  const resolvedPath = wallpaper.filePath ?? wallpaper.info?.filePath ?? null
+  if (resolvedPath) {
+    const key = playlistMemberKey(resolvedPath)
+    for (const existing of wallpapers.values()) {
+      const candidate = existing.filePath ?? existing.info?.filePath ?? existing.info?.source
+      if (playlistMemberKey(candidate) === key) {
+        if (!opts.keepSelection && selectedId !== existing.id) {
+          selectedId = existing.id
+          bump()
+        }
+        return existing.id
+      }
+    }
+  }
   await fetchLastAppliedPath()
   wallpapers.set(wallpaper.id, wallpaper)
   syncAppliedId()
@@ -474,6 +533,11 @@ export async function loadWallpaperFile(file, pathHint = null, opts = {}) {
 // Finds (or creates) the store record for a file path. The gallery's tiles
 // and the playlist dock both need to focus a file that has not been loaded
 // into the store yet — records are created lazily, on first select/apply.
+// In-flight creations keyed by normalized path: three callers (boot adoption,
+// playlist hydration, a tile click) can ask for the same file in the same tick,
+// and each would otherwise create its own record.
+const pendingPathLoads = new Map()
+
 export async function ensureWallpaperForPath(path, opts = {}) {
   if (!path) return null
   const key = playlistMemberKey(path)
@@ -481,7 +545,13 @@ export async function ensureWallpaperForPath(path, opts = {}) {
     const candidate = wallpaper.filePath ?? wallpaper.info?.filePath ?? wallpaper.info?.source
     if (playlistMemberKey(candidate) === key) return wallpaper.id
   }
+  const pending = pendingPathLoads.get(key)
+  if (pending) return pending
   const name = String(path).split(/[\\/]/).pop()
   if (!name) return null
-  return loadWallpaperFile(name, path, opts)
+  const load = loadWallpaperFile(name, path, opts).finally(() => {
+    pendingPathLoads.delete(key)
+  })
+  pendingPathLoads.set(key, load)
+  return load
 }

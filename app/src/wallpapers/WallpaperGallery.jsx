@@ -21,13 +21,19 @@ import {
   useWallpaperStore,
 } from './store'
 import DisplaySection from './inspector/sections/DisplaySection'
-import { playlistEngine } from './playlist/engine'
 import { createThumbnailFallback, createThumbnailFromUrl, deleteThumbnail, saveThumbnail, toFileUrl } from './thumbnail'
 import { setThumb } from './thumbCache'
 import { setLayoutState } from '../state/layout'
 import { buildFileRecord, galleryAdd, galleryGet, galleryList, galleryRemove, galleryRestoreFile } from './gallery'
 
 const DND_MIME = 'application/x-rex-wallpaper-paths'
+
+// Restore is a long chain of async poster decodes. Awaiting an already-
+// resolved promise does not yield to the browser, so a burst of cheap/failed
+// entries can keep the main thread busy for the whole chain. Yield a macrotask
+// between entries so React can paint tiles/posters and the supervisor's 2 s
+// heartbeat timer always gets a turn.
+const yieldToMain = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 const SORT_OPTIONS = [
   { key: 'name', label: 'Name' },
@@ -139,11 +145,6 @@ export default function WallpaperGallery() {
     }
   }
 
-  useEffect(() => {
-    playlistEngine.start()
-    return () => playlistEngine.stop()
-  }, [])
-
   // Restore persisted gallery tiles after a restart (P0.3). Rebuilds File
   // objects via the gallery.read-file bridge and the same record builder as
   // fresh imports. Missing/unreadable files are skipped (kept in the library,
@@ -189,8 +190,27 @@ export default function WallpaperGallery() {
         new Promise((resolve) => {
           if (!fileUrl) return resolve(null)
           const img = new Image()
-          img.onload = () => resolve(fileUrl)
-          img.onerror = () => resolve(null)
+          let timer = null
+          const done = (value) => {
+            if (timer) clearTimeout(timer)
+            img.onload = null
+            img.onerror = null
+            // Abort a failed/timed-out probe so it cannot pin the file handle.
+            // On success keep the decoded image (the tile reuses the same URL);
+            // clearing src here would only fire a spurious error.
+            if (!value) {
+              try {
+                img.src = ''
+              } catch { /* already detached */ }
+            }
+            resolve(value)
+          }
+          // A library path can point at a slow/offline drive. Without a
+          // timeout one probe would wedge the restore loop and every poster
+          // after it would never appear.
+          timer = setTimeout(() => done(null), 1500)
+          img.onload = () => done(fileUrl)
+          img.onerror = () => done(null)
           img.src = fileUrl
         })
       for (const r of restored) {
@@ -200,6 +220,7 @@ export default function WallpaperGallery() {
           : null
         if (cancelled) return
         if (cached) r.thumbDataUrl = cached
+        await yieldToMain()
       }
       for (const r of restored) {
         if (r.thumbDataUrl) {
@@ -209,6 +230,8 @@ export default function WallpaperGallery() {
       }
       forceThumbs((n) => n + 1)
       setFiles((prev) => [...prev, ...restored])
+      // Let React commit/paint the restored tiles before any poster decode.
+      await yieldToMain()
 
       // Posters, progressively, off the critical path.
       for (const r of restored) {
@@ -264,6 +287,10 @@ export default function WallpaperGallery() {
         } catch {
           // poster failed: the tile stays, just without an image
         }
+        // One poster at a time (bounded concurrency) and a real yield between
+        // entries: canvas.toDataURL is synchronous, so back-to-back decodes
+        // must not monopolise the main thread.
+        await yieldToMain()
       }
     })().catch(() => {})
     return () => {

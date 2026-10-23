@@ -28,6 +28,7 @@ const DEFAULTS = {
   heartbeatMissLimit: 3,
   rendererCheckIntervalMs: 5000,
   rendererStaleMs: 15000,
+  rendererProbeTimeoutMs: 2500,
   maxRecoveryAttempts: 3,
 }
 
@@ -63,6 +64,9 @@ class Supervisor {
     // 'renderer:ping', so the watchdog must still stay silent until the first
     // ping arrives — otherwise every visible window reloads in a loop.
     this.lastRendererPing = null
+    // Only one main-initiated probe may be outstanding; the 5 s tick must not
+    // stack probes while a reply is pending.
+    this._rendererProbeInFlight = false
 
     this._timers = []
     this._onExit = (code, info) => this._handleRuntimeExit(code, info)
@@ -124,7 +128,20 @@ class Supervisor {
   }
 
   _every(name, ms, fn) {
-    const t = setInterval(fn, ms)
+    const t = setInterval(() => {
+      try {
+        const pending = fn()
+        // Some ticks (renderer probe) are async; never let a rejection escape
+        // as an unhandled promise rejection that kills the watchdog.
+        if (pending && typeof pending.catch === 'function') {
+          pending.catch((err) => {
+            this.deps.logLine('supervisor:watchdog', name, 'error', err?.message ?? String(err))
+          })
+        }
+      } catch (err) {
+        this.deps.logLine('supervisor:watchdog', name, 'error', err?.message ?? String(err))
+      }
+    }, ms)
     if (t.unref) t.unref()
     this._timers.push(t)
     this.deps.logLine('supervisor:watchdog', name, 'started')
@@ -174,8 +191,8 @@ class Supervisor {
   }
 
   // ─── Renderer watchdog ────────────────────────────────────────────────────
-  _rendererTick() {
-    if (this.quitting) return
+  async _rendererTick() {
+    if (this.quitting || this._rendererProbeInFlight) return
     const win = this.deps.getWindow?.()
     if (!win || win.isDestroyed()) return
     // Hidden/minimized windows get throttled timers — don't flag them; the
@@ -185,6 +202,33 @@ class Supervisor {
     if (this.lastRendererPing === null) return
     const stale = Date.now() - this.lastRendererPing
     if (stale <= this.opts.rendererStaleMs) return
+    // Occlusion is the watchdog's blind spot: a window fully covered by
+    // another app still reports isVisible() === true, while Chromium throttles
+    // its page timers. A quiet heartbeat is therefore not proof of a hang.
+    // Ask the renderer directly over IPC first; main -> renderer IPC is not
+    // throttled, so a reply means the main thread is alive. Only a failed
+    // probe falls through to the reload, keeping the 15 s hang threshold.
+    if (typeof this.deps.probeRenderer === 'function') {
+      this._rendererProbeInFlight = true
+      let alive = false
+      try {
+        alive = await this.deps.probeRenderer(this.opts.rendererProbeTimeoutMs)
+      } catch {
+        alive = false
+      } finally {
+        this._rendererProbeInFlight = false
+      }
+      if (this.quitting) return
+      if (alive) {
+        this.deps.logLine(
+          'supervisor:renderer heartbeat quiet',
+          Math.round(stale / 1000) + 's',
+          '- IPC probe answered, re-baselining'
+        )
+        this.lastRendererPing = Date.now()
+        return
+      }
+    }
     if (win.webContents.isCrashed()) {
       this.deps.logLine('supervisor:renderer crashed (isCrashed)')
       this._writeReport({ reason: 'renderer-crashed', extra: { staleMs: stale } })

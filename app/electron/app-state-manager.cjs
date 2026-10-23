@@ -38,7 +38,7 @@ class AppStateManager {
       tray: { minimizeToTray: true, closeToTray: true },
       wallpaperSettings: {}, // per-wallpaper settings keyed by normalized path (Phase 2)
       wallpaper: { assignments: {}, playback: { position: 0, volume: 1.0, paused: false } },
-      playlistEngine: { playlists: [] }, // UI-only playlist state: [{ id, name, icon, members }]
+      playlistEngine: { playlists: [], rotation: null }, // UI playlists + the main-process rotation plan
     }
   }
 

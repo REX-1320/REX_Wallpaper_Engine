@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { seedWallpapers, useWallpaperStore, getSnapshot } from './store'
 import { applyWallpaperToDesktop, updateDesktopSettings } from './desktop'
 import { useWallpaperRuntimeStatus } from './runtimeEvents'
+import { playlistEngine } from './playlist/engine'
 
 export function reapplyDesktopWallpaper() {
   const { wallpapers, selectedId, appliedId } = getSnapshot()
@@ -16,6 +17,15 @@ export default function DesktopApply() {
 
   useEffect(() => {
     seedWallpapers()
+  }, [])
+
+  // The playlist engine follows the app, not the gallery tab: starting it
+  // here means switching pages cannot silently stop a rotation, and main keeps
+  // Timer/scene-end running after this window is destroyed (stopping here only
+  // releases the local view; it never clears main's plan).
+  useEffect(() => {
+    playlistEngine.start()
+    return () => playlistEngine.stop()
   }, [])
 
   useEffect(() => {

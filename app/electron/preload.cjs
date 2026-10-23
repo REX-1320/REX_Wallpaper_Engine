@@ -67,11 +67,17 @@ contextBridge.exposeInMainWorld('rexDesktop', {
   minimize: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.send('window:toggle-maximize'),
   close: () => ipcRenderer.send('window:close'),
-  // Playlist rotation keep-alive: while a playlist is rotating, main hides the
-  // window instead of destroying it, so this renderer's scheduler keeps the
-  // wallpaper changing while REX sits in the tray. Fire-and-forget; the engine
-  // reports only when the value changes.
-  setPlaylistRotationActive: (active) => ipcRenderer.send('playlist:rotation-active', Boolean(active)),
+  // Playlist rotation: the renderer mirrors the active plan (membership +
+  // order + live settings) into main, which owns Timer and the native ENDED
+  // trigger. This is what lets a closed window (or a --background login start)
+  // keep rotating. onPlaylistApplied reports a rotation back to the UI.
+  syncPlaylistPlan: (plan) => ipcRenderer.invoke('playlist:sync-plan', plan),
+  getPlaylistSchedulerState: () => ipcRenderer.invoke('playlist:scheduler-state'),
+  onPlaylistApplied: (callback) => {
+    const listener = (_event, msg) => callback(msg)
+    ipcRenderer.on('playlist:applied', listener)
+    return () => ipcRenderer.removeListener('playlist:applied', listener)
+  },
   isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
   onMaximized: (callback) => {
     const listener = (_event, maximized) => callback(maximized)
@@ -107,3 +113,15 @@ setInterval(() => {
     // renderer is tearing down
   }
 }, 2000)
+
+// Main-initiated liveness probe (Supervisor._rendererTick). Page timers can be
+// throttled while the window is occluded even though win.isVisible() is true,
+// so main asks directly before treating a quiet heartbeat as a hang. Echo the
+// token so a late reply cannot satisfy a newer probe.
+ipcRenderer.on('renderer:probe', (_event, token) => {
+  try {
+    ipcRenderer.send('renderer:probe-reply', token)
+  } catch {
+    // renderer is tearing down
+  }
+})

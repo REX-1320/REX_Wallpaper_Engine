@@ -11,6 +11,7 @@ const { isPathInside } = require('./path-guard.cjs')
 const { resolveWindowBounds } = require('./window-bounds.cjs')
 const { generatePoster } = require('./poster-worker.cjs')
 const { probeMediaFile } = require('./mediaInfo.cjs')
+const { PlaylistScheduler } = require('./playlist-scheduler.cjs')
 
 // ─── GPU thumbnail worker mode ────────────────────────────────────────────────
 // A separate, hardware-accelerated Electron process that decodes one poster and
@@ -53,11 +54,12 @@ let pendingNavigate = null // destination queued until that listener is ready
 let revealTimer = null
 let revealWin = null
 const closingWindows = new WeakSet()
-// Whether the renderer is running a playlist rotation (Timer, scene end,
-// schedule...). The scheduler lives in the renderer (playlist/engine.js), so
-// closing the window must hide it instead of destroying it while a playlist is
-// rotating - otherwise the desktop freezes on one file in the tray.
-let playlistRotationActive = false
+// The playlist scheduler lives HERE, not in the renderer (see
+// playlist-scheduler.cjs). The renderer mirrors a rotation plan (membership +
+// order + settings) and main owns the Timer and native scene-end triggers, so
+// the window can be destroyed on close and a --background login start can
+// rotate with no renderer at all.
+let playlistScheduler = null
 
 // Dev-aware login-item registration: packaged apps register the exe
 // directly, but dev Electron needs the app folder as argv[1] or Windows
@@ -155,6 +157,40 @@ const runtime = new WallpaperRuntime(getWallpaperCliPath(), logLine)
 // old inline recoverRuntime), hang/renderer watchdogs, crash
 // reports and recovery events. Assigned in app.whenReady (needs app paths).
 let supervisor = null
+
+// Main-initiated renderer liveness probe (Supervisor._rendererTick). A page
+// timer can be throttled while the window is still "visible" (fully occluded
+// by another always-on-top window), so a quiet heartbeat alone is not proof of
+// a hang. The supervisor asks the renderer over IPC before reloading it; main
+// process -> renderer IPC is not subject to page-timer throttling, so a reply
+// proves the main thread is alive. Tokens stop a late reply from satisfying a
+// newer probe.
+let rendererProbeSeq = 0
+const pendingRendererProbes = new Map()
+
+function probeRenderer(timeoutMs = 2500) {
+  const win = mainWindow
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.resolve(false)
+  const token = ++rendererProbeSeq
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingRendererProbes.delete(token)
+      resolve(false)
+    }, timeoutMs)
+    pendingRendererProbes.set(token, () => {
+      clearTimeout(timer)
+      pendingRendererProbes.delete(token)
+      resolve(true)
+    })
+    try {
+      win.webContents.send('renderer:probe', token)
+    } catch {
+      clearTimeout(timer)
+      pendingRendererProbes.delete(token)
+      resolve(false)
+    }
+  })
+}
 
 // Persisted UI state + gallery library (P0.3). Assigned in app.whenReady:
 // both constructors resolve userData paths, which need the app module ready.
@@ -351,6 +387,80 @@ async function applyStoredWallpaper(entry) {
   }
 }
 
+// Apply one image through the OS wallpaper path. Shared by the wallpaper IPC
+// handler and the main-process playlist scheduler so a rotation uses exactly
+// the same LOAD sequence (and the same lastApplied/persistence bookkeeping) as
+// a user apply.
+async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set') {
+  if (typeof filePath !== 'string' || !IMAGE_EXT.test(filePath)) {
+    throw new Error('unsupported file type')
+  }
+  const engineMode = mode ?? 'fill'
+  // No INIT: LOAD applies the image through the OS wallpaper API and is valid
+  // with no engine (the runtime spawns on demand). INIT would build a 4K D3D12
+  // engine the image never uses - measured 84 MB private and ~103 MB VRAM.
+  await runtime.send('LOAD', { path: filePath, type: 'image', mode: engineMode })
+  capabilities = null // adapter changed - refresh on next query
+  lastApplied = { kind: 'image', params: { path: filePath, mode: engineMode } }
+  startup.saveLastApplied(app.getPath('userData'), lastApplied)
+  if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
+  setRuntimeAvailable(true)
+  // The image is on the desktop now: free the engine instead of leaving it
+  // warm for a video that may never come.
+  reclaimIdleRuntime(`${source} image applied`)
+  logLine(`${source}: image applied`, filePath)
+  return { ok: true, style: engineMode }
+}
+
+// Apply one video scene. Same contract as applyImageEntry; mirrors the
+// wallpaper:video handler (audio layout and colour are live SET_* commands,
+// not part of LOAD).
+async function applyVideoEntry(params, source = 'wallpaper:video') {
+  const { path: filePath, mode, fps, loop, muted, volume, speed, audioMode, brightness, contrast, saturation } = params
+  if (typeof filePath !== 'string' || !filePath) throw new Error('invalid video path')
+  const init = engineInitOptions()
+  await runtime.init(init.maxFps, init.hardwareAcceleration)
+  await runtime.send('LOAD', {
+    path: filePath,
+    type: 'video',
+    mode: mode ?? 'fill',
+    loop: loop ?? true,
+    muted: muted ?? true,
+    volume: volume ?? 1,
+    speed: speed ?? 1,
+  })
+  if (audioMode != null) {
+    // Non-fatal: the wallpaper must apply even if the layout request is
+    // refused (the engine falls back and reports it).
+    try {
+      await runtime.send('SET_AUDIO_MODE', { value: audioMode })
+    } catch (err) {
+      logLine(`${source} SET_AUDIO_MODE failed`, err.message)
+    }
+  }
+  // A scene starts at 1.0/1.0/1.0, so without these a wallpaper switch would
+  // inherit the previous file's brightness. Non-fatal, same as above.
+  for (const [cmd, value] of [['SET_BRIGHTNESS', brightness], ['SET_CONTRAST', contrast], ['SET_SATURATION', saturation]]) {
+    if (value == null) continue
+    try {
+      await runtime.send(cmd, { value })
+    } catch (err) {
+      logLine(`${source} ${cmd} failed`, err.message)
+    }
+  }
+  capabilities = null // adapter changed - refresh on next query
+  await runtime.send('PLAY', {})
+  lastApplied = {
+    kind: 'video',
+    params: { path: filePath, mode, loop, muted, volume, speed, fps, audioMode, brightness, contrast, saturation },
+  }
+  startup.saveLastApplied(app.getPath('userData'), lastApplied)
+  if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
+  setRuntimeAvailable(true)
+  logLine(`${source}: video applied`, filePath)
+  return { ok: true }
+}
+
 function createWindow() {
   // Remember where the user put the window -- but only restore those bounds
   // if they are still on a display (a monitor may have been unplugged).
@@ -387,13 +497,12 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      // REX lives in the tray: closing the window hides it, and the wallpaper
-      // is watched with the window hidden. Chromium freezes timers in hidden
-      // windows, which silently stopped the playlist engine's 500 ms tick -
-      // Timer never elapsed and a scene-end event was never processed, so the
-      // desktop sat on one file. The scheduler has to run while hidden.
-      // (Also makes document.visibilityState stay 'visible'; nothing else in
-      // the app reads it.)
+      // Keep renderer timers at full rate when the window is occluded/hidden.
+      // Chromium throttles background pages, and after ~5 minutes it drops
+      // timers to about once a minute. The 2 s supervisor heartbeat lives in a
+      // page timer, so throttling made the watchdog reload a healthy renderer
+      // ("renderer stale 16s - reloading" every ~75 s) while the window was
+      // covered by another app. Playlist timers benefit from the same setting.
       backgroundThrottling: false,
     },
   })
@@ -450,11 +559,9 @@ function createWindow() {
   // (rather than hiding) is what actually releases the renderer and its GPU
   // allocations; a hidden window otherwise keeps both for the app's lifetime.
   //
-  // EXCEPTION: a running playlist. Its scheduler IS this renderer, so while a
-  // rotation is active the window is hidden and kept alive - destroying it
-  // stopped the rotation the moment the user closed the window to watch the
-  // wallpaper (the normal use). backgroundThrottling is off in webPreferences,
-  // so the hidden renderer's clock keeps running.
+  // A running playlist is NOT a reason to keep the renderer alive any more:
+  // its Timer/scene-end scheduler is in main (playlist-scheduler.cjs), so the
+  // rotation continues in the tray.
   //
   // "Quit REX on close" is the user's choice (tray.closeToTray === false);
   // the default keeps the app alive in the tray.
@@ -467,10 +574,6 @@ function createWindow() {
       return
     }
     win.hide()
-    if (playlistRotationActive) {
-      logLine('window: hiding (playlist rotation active)')
-      return
-    }
     closingWindows.add(win)
     logLine('window: destroying (close)')
     // destroy() skips beforeunload/unload, so essential main-process state is
@@ -485,7 +588,6 @@ function createWindow() {
     // during teardown). Only clear state that still belongs to this window.
     if (mainWindow !== win) return
     mainWindow = null
-    playlistRotationActive = false
     navigateReady = false
     pendingNavigate = null
     if (revealWin === win) {
@@ -645,6 +747,10 @@ app.whenReady().then(() => {
   runtime.on('event', (event, data) => {
     if (event === 'PAUSED') trayManager?.updateWallpaperState(true)
     else if (event === 'PLAYING') trayManager?.updateWallpaperState(false)
+    // Scene end is a rotation trigger for main now (the UI may not exist).
+    if (event === 'ENDED' && playlistScheduler) {
+      playlistScheduler.handleEvent(event, data).catch((err) => logLine('playlist: ENDED handler ERROR', err.message))
+    }
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send('wallpaper:event', { event, data })
     }
@@ -657,20 +763,7 @@ app.whenReady().then(() => {
     }
     const mode = MODE_BY_STYLE[style] ?? 'fill'
     try {
-      // No INIT: LOAD applies the image through the OS wallpaper API and is
-      // valid with no engine (the runtime spawns on demand). INIT would build
-      // a 4K D3D12 engine the image never uses — measured 84 MB private and
-      // ~103 MB VRAM for an image-only desktop.
-      await runtime.send('LOAD', { path: filePath, type: 'image', mode })
-      capabilities = null // adapter changed — refresh on next query
-      lastApplied = { kind: 'image', params: { path: filePath, mode } }
-      startup.saveLastApplied(app.getPath('userData'), lastApplied)
-      if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
-      setRuntimeAvailable(true)
-      // The image is on the desktop now: free the engine (and every pinned
-      // video pool) instead of leaving it warm for a video that may never come.
-      reclaimIdleRuntime('image applied')
-      return { ok: true, style: mode }
+      return await applyImageEntry({ path: filePath, mode }, 'wallpaper:set')
     } catch (err) {
       logLine('wallpaper:set ERROR', err.message)
       return { ok: false, error: err.message }
@@ -696,49 +789,7 @@ app.whenReady().then(() => {
     }
 
     try {
-      const init = engineInitOptions()
-      await runtime.init(init.maxFps, init.hardwareAcceleration)
-      await runtime.send('LOAD', {
-        path: filePath,
-        type: 'video',
-        mode: mode ?? 'fill',
-        loop: loop ?? true,
-        muted: muted ?? true,
-        volume: volume ?? 1,
-        speed: speed ?? 1,
-      })
-      if (audioMode != null) {
-        // The audio layout is a live playback property, not part of LOAD —
-        // omitting this left the UI's choice on the apply path (audit Q2).
-        // Non-fatal: the wallpaper must apply even if the layout request
-        // is refused (the engine falls back and reports it).
-        try {
-          await runtime.send('SET_AUDIO_MODE', { value: audioMode })
-        } catch (err) {
-          logLine('wallpaper:video SET_AUDIO_MODE failed', err.message)
-        }
-      }
-      // Colour adjustments are live properties too, NOT part of LOAD: a
-      // scene starts at 1.0/1.0/1.0, so without these a wallpaper switch
-      // would inherit the previous file's brightness. Non-fatal, same as
-      // the audio layout above.
-      for (const [cmd, value] of [['SET_BRIGHTNESS', brightness], ['SET_CONTRAST', contrast], ['SET_SATURATION', saturation]]) {
-        if (value == null) continue
-        try {
-          await runtime.send(cmd, { value })
-        } catch (err) {
-          logLine(`wallpaper:video ${cmd} failed`, err.message)
-        }
-      }
-      capabilities = null // adapter changed — refresh on next query
-      await runtime.send('PLAY', {})
-      lastApplied = {
-        kind: 'video',
-        params: { path: filePath, mode, loop, muted, volume, speed, fps, audioMode, brightness, contrast, saturation },
-      }
-      startup.saveLastApplied(app.getPath('userData'), lastApplied)
-      if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
-      setRuntimeAvailable(true)
+      await applyVideoEntry({ path: filePath, mode, fps, loop, muted, volume, speed, audioMode, brightness, contrast, saturation }, 'wallpaper:video')
       return { ok: true }
     } catch (err) {
       logLine('wallpaper:video ERROR', err.message)
@@ -865,6 +916,17 @@ app.whenReady().then(() => {
   // preload sends one every 2 s; only a visible-but-stale renderer is treated
   // as hung (Supervisor._rendererTick).
   ipcMain.on('renderer:ping', () => supervisor?.recordRendererPing())
+
+  // Reply to the supervisor's main-initiated liveness probe. A reply is also a
+  // heartbeat: it proves the renderer's main thread is responsive even when
+  // its page timers are throttled. The sender check keeps other windows from
+  // satisfying a probe aimed at the app window.
+  ipcMain.on('renderer:probe-reply', (event, token) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (event.sender !== mainWindow.webContents) return
+    supervisor?.recordRendererPing()
+    pendingRendererProbes.get(token)?.()
+  })
 
   // Tray "Settings" may target a window that was just created. The preload
   // announces when the renderer's onNavigate listener is actually mounted;
@@ -1051,15 +1113,15 @@ app.whenReady().then(() => {
   ipcMain.on('window:close', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close()
   })
-  // The playlist engine tells main whether a rotation is running, so the close
-  // handler knows to hide the window (keep the scheduler alive) or destroy it.
-  ipcMain.on('playlist:rotation-active', (event, active) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win || win !== mainWindow) return
-    const next = Boolean(active)
-    if (next === playlistRotationActive) return
-    playlistRotationActive = next
-    logLine('playlist: rotation', next ? 'active' : 'inactive')
+  // The renderer mirrors a compact rotation plan (active playlist, ordered
+  // queue, live settings). Main schedules Timer + native scene-end from it, so
+  // the rotation survives the window being destroyed and a --background start.
+  // The invoke returns the authoritative countdown/state for the dialog.
+  ipcMain.handle('playlist:sync-plan', (event, plan) => {
+    return playlistScheduler ? playlistScheduler.setPlan(plan) : { active: false }
+  })
+  ipcMain.handle('playlist:scheduler-state', () => {
+    return playlistScheduler ? playlistScheduler.state() : { active: false }
   })
   ipcMain.handle('window:is-maximized', (event) => {
     const v = BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
@@ -1097,6 +1159,36 @@ app.whenReady().then(() => {
   try { appState.set('version', app.getVersion()) } catch {}
   logLine('persistence: app-state + gallery library ready')
 
+  // Playlist scheduling that outlives the UI. The renderer sends the plan;
+  // main owns Timer and the native ENDED event, applies through the same
+  // helpers the IPC handlers use, and persists enough state to resume after a
+  // login start. Every side effect is injected so the rules are unit-tested
+  // without Electron (playlist-scheduler.test.cjs).
+  playlistScheduler = new PlaylistScheduler({
+    now: Date.now,
+    log: logLine,
+    exists: (entry) => {
+      try {
+        return fs.statSync(entry.path).isFile()
+      } catch {
+        return false
+      }
+    },
+    apply: async (entry) => {
+      const apply = entry.apply ?? {}
+      if (apply.kind === 'image') return applyImageEntry({ path: entry.path, mode: apply.mode }, 'playlist')
+      if (apply.kind === 'video') return applyVideoEntry({ ...apply, path: entry.path }, 'playlist')
+      throw new Error(`unsupported playlist member kind: ${apply.kind ?? 'none'}`)
+    },
+    emit: (event) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('playlist:applied', event)
+      }
+    },
+    persist: (snapshot) => appState.set('playlistEngine.rotation', snapshot),
+  })
+  logLine('playlist: main-process scheduler ready')
+
   trayManager = new TrayManager({
     getWindow: () => mainWindow,
     onShowWindow: (navigateTo) => showMainWindow(navigateTo),
@@ -1124,9 +1216,11 @@ app.whenReady().then(() => {
   const bootEntry = appState.get('startup.restoreWallpaper') === false
     ? null
     : startup.loadLastApplied(app.getPath('userData'))
+  let bootApplyDone = Promise.resolve(false)
   if (bootEntry) {
-    applyStoredWallpaper(bootEntry).then((ok) => {
+    bootApplyDone = applyStoredWallpaper(bootEntry).then((ok) => {
       if (!ok) logLine('startup: re-apply failed, desktop left as-is')
+      return ok
     })
   } else if (appState.get('startup.restoreWallpaper') === false) {
     logLine('startup: restore-at-launch is off, desktop left as-is')
@@ -1168,6 +1262,7 @@ app.whenReady().then(() => {
     runtime,
     logLine,
     getWindow: () => mainWindow,
+    probeRenderer,
     getLastApplied: () => lastApplied,
     reapply: async () => {
       if (!lastApplied || isQuitting) return true // nothing to do: not a failure
@@ -1191,6 +1286,26 @@ app.whenReady().then(() => {
     },
   })
   supervisor.start()
+
+  // ─── Resume the playlist rotation in main ────────────────────────────────
+  // Must run AFTER the boot replay: an overdue Timer restored from the plan
+  // would otherwise race the wallpaper main is restoring. A normal launch's
+  // renderer may have already mirrored a fresher plan; in that case keep it.
+  // With --background there is no renderer at all, so the persisted plan is
+  // the only source - this is what makes a login start rotate.
+  bootApplyDone.finally(() => {
+    if (!playlistScheduler) return
+    if (!playlistScheduler.state().mode) {
+      const saved = appState.get('playlistEngine.rotation')
+      if (saved?.plan) {
+        playlistScheduler.restore(saved)
+        logLine('playlist: restored rotation', saved.plan.mode, `queue=${saved.plan.queue?.length ?? 0}`)
+      }
+    }
+    const bootPath = lastApplied?.params?.path
+    if (bootPath) playlistScheduler.reconcile(bootPath)
+    playlistScheduler.start()
+  })
 
   // Normal launch opens the UI; --background (e.g. Windows startup) starts the
   // tray + native services only and defers the window to the first tray open.
@@ -1246,5 +1361,8 @@ app.on('window-all-closed', () => {})
 
 app.on('will-quit', () => {
   if (supervisor) supervisor.stop() // quitting: exits must not trigger recovery
+  if (playlistScheduler) playlistScheduler.stop() // stop timers; plan is already persisted
+  // The scheduler's last change may still sit in the app-state debounce.
+  try { appState?.flush() } catch {}
   runtime.stop()
 })
