@@ -597,7 +597,7 @@ class FfmpegVideoDecoder {
     /// rings (torn samples possible, never a crash).
     std::vector<DecodeStage> SnapshotStages() const;
 
-    /// Write the stage ring to %TEMP%\REX\perframe_decode.csv (overwrite).
+    /// Write the stage ring to %TEMP%\Paiint\perframe_decode.csv (overwrite).
     /// No-op unless REX_PERFRAME_CSV=1. Returns rows written.
     size_t DumpDecodeStages() const;
 

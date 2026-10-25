@@ -2,7 +2,7 @@
 
 // ─── Minidump ───────────────────────────────────────────────────────────────
 // Captures a full user-mode minidump of the runtime process via the native
-// rex-minidump.exe helper (dbghelp MiniDumpWriteDump). The helper is bundled
+// paiint-minidump.exe helper (dbghelp MiniDumpWriteDump). The helper is bundled
 // next to the runtime in resources/bin and falls back to the dev build tree.
 
 const { spawn } = require('node:child_process')
@@ -13,10 +13,10 @@ const CAPTURE_TIMEOUT_MS = 15000
 
 function defaultHelperPath() {
   const packaged = process.resourcesPath
-    ? path.join(process.resourcesPath, 'bin', 'rex-minidump.exe')
+    ? path.join(process.resourcesPath, 'bin', 'paiint-minidump.exe')
     : null
   if (packaged && fs.existsSync(packaged)) return packaged
-  const devPath = path.join(__dirname, '..', '..', '..', 'rex-core', '.build', 'Release', 'rex-minidump.exe')
+  const devPath = path.join(__dirname, '..', '..', '..', 'rex-core', '.build', 'Release', 'paiint-minidump.exe')
   if (fs.existsSync(devPath)) return devPath
   return packaged || devPath
 }

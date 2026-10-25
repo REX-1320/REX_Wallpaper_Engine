@@ -33,7 +33,7 @@ wallpaper load. Tier detection runs once per runtime spawn against the adapter t
    ~180 MiB for a 4K P010 pool). Nothing in this feature may add a second import per frame/session.
 4. **Build tree is `rex-core/.build`, not `rex-core/build`.**
    `cmake --build rex-core/.build --config Release` and `ctest --test-dir rex-core/.build -C Release --output-on-failure`
-   (offline vcpkg toolchain: `C:\Users\Moinu\AppData\Local\Temp\opencode\vcpkg-offline-toolchain.cmake`).
+   (offline vcpkg toolchain: `%TEMP%\opencode\vcpkg-offline-toolchain.cmake`).
 5. **CMake has no globs.** Every new `.cpp` and every new test executable needs an explicit entry in
    `rex-core/CMakeLists.txt` — sources at `:54-69`, tests at `:369-411`.
 6. **`kProtocolVersion` stays 1.** `SET_MODE`, `GET_MODE`, and `INIT.perfSelection` / `INIT.perfPresets` are additive;

@@ -3,7 +3,7 @@
 // The gallery never mounts <video> elements: at import time the renderer
 // decodes ONE small poster frame (a temporary in-memory URL that is revoked
 // immediately), exports it as a ~480px WebP data URL, and persists it to the
-// REX cache via the main process. Nothing video-related is retained in
+// Paiint cache via the main process. Nothing video-related is retained in
 // Chromium or in the wallpaper store.
 
 export function toFileUrl(p) {
@@ -12,12 +12,12 @@ export function toFileUrl(p) {
 }
 
 export async function saveThumbnail(id, dataUrl) {
-  const res = await window.rexDesktop?.saveThumbnail?.(id, dataUrl)
+  const res = await window.paiintDesktop?.saveThumbnail?.(id, dataUrl)
   return res?.path ?? null
 }
 
 export async function deleteThumbnail(path) {
-  await window.rexDesktop?.deleteThumbnail?.(path)
+  await window.paiintDesktop?.deleteThumbnail?.(path)
 }
 
 // HEVC posters: this window runs without hardware acceleration (the UI keeps
@@ -28,7 +28,7 @@ export async function deleteThumbnail(path) {
 export async function createThumbnailFallback(filePath, maxSize = 480) {
   if (!filePath) return null
   try {
-    const res = await window.rexDesktop?.fallbackThumbnail?.(filePath, maxSize)
+    const res = await window.paiintDesktop?.fallbackThumbnail?.(filePath, maxSize)
     if (!res?.ok || !res.path) return null
     return { dataUrl: toFileUrl(res.path), path: res.path }
   } catch {

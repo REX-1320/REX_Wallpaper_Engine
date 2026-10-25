@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { notifyError } from './notify'
 
 // ─── Runtime event bridge ──────────────────────────────────────────────────
-// Subscribes once to the Electron bridge (window.rexDesktop.onWallpaperEvent)
+// Subscribes once to the Electron bridge (window.paiintDesktop.onWallpaperEvent)
 // and fans events out to React hooks. Events: READY, LOADED, PLAYING,
 // PAUSED, STOPPED, UNLOADED, ERROR — each `{ event, data }`, plus supervisor
 // recovery events (recovery-start/ok/gave-up/parked-poison). ERROR,
@@ -36,9 +36,9 @@ function bump(event) {
 }
 
 function ensureSubscribed() {
-  if (subscribed || !window.rexDesktop?.onWallpaperEvent) return
+  if (subscribed || !window.paiintDesktop?.onWallpaperEvent) return
   subscribed = true
-  window.rexDesktop.onWallpaperEvent(bump)
+  window.paiintDesktop.onWallpaperEvent(bump)
 }
 
 export function useWallpaperRuntimeStatus() {

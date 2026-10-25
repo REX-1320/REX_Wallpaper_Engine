@@ -37,7 +37,7 @@ function fileName(value) {
   return parts[parts.length - 1] || value
 }
 
-// The engine's state enum (rex-core/include/rex/wallpaper/IWallpaperEngine.hpp:23).
+// The engine's state enum (IWallpaperEngine.hpp:23).
 // The raw number is what GET_STATUS reports; the names are what a user reads.
 const ENGINE_STATES = {
   0: 'uninitialized',

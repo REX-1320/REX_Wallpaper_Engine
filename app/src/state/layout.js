@@ -49,7 +49,7 @@ function pickLayout(saved) {
 export function initLayoutState() {
   if (loaded) return
   loaded = true
-  const pending = window.rexDesktop?.appState?.get?.('ui')
+  const pending = window.paiintDesktop?.appState?.get?.('ui')
   if (!pending?.then) return
   pending
     .then((saved) => {
@@ -75,7 +75,7 @@ function persist() {
   if (persistTimer) return
   persistTimer = setTimeout(() => {
     persistTimer = null
-    window.rexDesktop?.appState?.set?.('ui', ui)?.catch?.(() => {})
+    window.paiintDesktop?.appState?.set?.('ui', ui)?.catch?.(() => {})
   }, 200)
 }
 

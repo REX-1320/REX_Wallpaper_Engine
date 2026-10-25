@@ -1,11 +1,11 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-# Renders a multi-size REX tray icon into app/assets/rex-tray.ico
+# Renders a multi-size Paiint tray icon into app/assets/paiint-tray.ico
 # (PNG-compressed ICO: 16,20,24,32,40,48,64,256).
 
 $root = Split-Path -Parent $PSScriptRoot
-$outFile = Join-Path $root 'assets\rex-tray.ico'
+$outFile = Join-Path $root 'assets\paiint-tray.ico'
 New-Item -ItemType Directory -Path (Split-Path $outFile) -Force | Out-Null
 
 function New-RoundedRectPath([single]$x, [single]$y, [single]$w, [single]$h, [single]$r) {
@@ -47,7 +47,7 @@ foreach ($s in $sizes) {
         $fmt = New-Object System.Drawing.StringFormat
         $fmt.Alignment = [System.Drawing.StringAlignment]::Center
         $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
-        $g.DrawString('R', $font, [System.Drawing.Brushes]::White, $rect, $fmt)
+        $g.DrawString('P', $font, [System.Drawing.Brushes]::White, $rect, $fmt)
         $fmt.Dispose()
         $font.Dispose()
     }
@@ -85,3 +85,10 @@ $bw.Close()
 $fs.Close()
 
 Write-Output "tray icon written: $outFile ($((Get-Item $outFile).Length) bytes, $($images.Count) sizes)"
+
+# electron-builder app icon (same mark, multi-size ICO) so the exe and the
+# taskbar entry do not fall back to the default Electron logo.
+$appIcon = Join-Path $root 'build\icon.ico'
+New-Item -ItemType Directory -Path (Split-Path $appIcon) -Force | Out-Null
+Copy-Item $outFile $appIcon -Force
+Write-Output "app icon written: $appIcon"

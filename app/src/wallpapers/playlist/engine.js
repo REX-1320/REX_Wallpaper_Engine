@@ -181,7 +181,9 @@ export const PLAYLIST_OPTIONS = {
   validateBeforePlayback: 'Validate playlist before playback',
 }
 
-const STORAGE_KEY = 'rex.playlistEngine.v1'
+const STORAGE_KEY = 'paiint.playlistEngine.v1'
+// Pre-rename key. Read once so presets/history survive the rename, then removed.
+const LEGACY_STORAGE_KEY = 'rex.playlistEngine.v1'
 
 function deepDefault() {
   return {
@@ -340,7 +342,15 @@ function persist() {
 
 function load() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    let raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) {
+      const legacy = localStorage.getItem(LEGACY_STORAGE_KEY)
+      if (legacy) {
+        localStorage.setItem(STORAGE_KEY, legacy)
+        localStorage.removeItem(LEGACY_STORAGE_KEY)
+        raw = legacy
+      }
+    }
     if (!raw) return
     const parsed = JSON.parse(raw)
     if (parsed.settingsByPlaylist) settingsByPlaylist = parsed.settingsByPlaylist
@@ -885,7 +895,7 @@ function schedulePlanSync(delay = 150) {
 
 function syncPlan() {
   if (!started || planSyncPending || schedulerStatePending) return
-  const bridge = window.rexDesktop?.syncPlaylistPlan
+  const bridge = window.paiintDesktop?.syncPlaylistPlan
   if (typeof bridge !== 'function') return
   const plan = buildRotationPlan()
   if (plan === undefined) return
@@ -1217,7 +1227,7 @@ function tick() {
   if (!state.lastAppliedPath && !lastAppliedPending && state.now - lastAppliedRetryAt >= 2000) {
     lastAppliedPending = true
     lastAppliedRetryAt = state.now
-    Promise.resolve(window.rexDesktop?.getLastApplied?.())
+    Promise.resolve(window.paiintDesktop?.getLastApplied?.())
       .then((last) => {
         if (last?.path && !state.lastAppliedPath) {
           state.lastAppliedPath = last.path
@@ -1322,7 +1332,7 @@ export const playlistEngine = {
     // Ask main for the authoritative countdown BEFORE mirroring a plan. The
     // persisted renderer timer can be stale after rotations main performed
     // with no window; sending it first would reset main's deadline.
-    const schedulerStateRequest = window.rexDesktop?.getPlaylistSchedulerState?.()
+    const schedulerStateRequest = window.paiintDesktop?.getPlaylistSchedulerState?.()
     if (schedulerStateRequest?.then) {
       schedulerStatePending = true
       Promise.resolve(schedulerStateRequest)
@@ -1335,11 +1345,11 @@ export const playlistEngine = {
     }
     // Rotations main performs come back as events so an open window adopts
     // the new file (and its countdown) without re-applying it.
-    unsubscribePlaylistApplied = window.rexDesktop?.onPlaylistApplied?.(handlePlaylistApplied) ?? null
+    unsubscribePlaylistApplied = window.paiintDesktop?.onPlaylistApplied?.(handlePlaylistApplied) ?? null
     // The wallpaper that is on the desktop right now. Main re-applied it at
     // boot before the store knew about it, so the engine asks the runtime
     // which file is playing: that path names the playlist that governs it.
-    window.rexDesktop?.getLastApplied?.()
+    window.paiintDesktop?.getLastApplied?.()
       ?.then((last) => {
         if (last?.path && !state.lastAppliedPath) {
           state.lastAppliedPath = last.path
@@ -1506,7 +1516,7 @@ export const playlistEngine = {
     export(id) {
       const preset = presets.find((p) => p.id === id)
       if (!preset) return
-      downloadJson(`rex-preset-${preset.name}.json`, JSON.stringify({ type: 'rex-preset', version: 1, preset }, null, 2))
+      downloadJson(`paiint-preset-${preset.name}.json`, JSON.stringify({ type: 'paiint-preset', version: 1, preset }, null, 2))
     },
     import(text) {
       const parsed = JSON.parse(text)
@@ -1565,7 +1575,7 @@ export const playlistEngine = {
       const playlist = snapshot.playlists.find((p) => p.id === id)
       if (!playlist) return
       const settings = settingsByPlaylist[id] ?? deepDefault()
-      downloadJson(`rex-playlist-${playlist.name}.json`, JSON.stringify({ type: 'rex-playlist', version: 1, playlist: { name: playlist.name, icon: playlist.icon }, settings }, null, 2))
+      downloadJson(`paiint-playlist-${playlist.name}.json`, JSON.stringify({ type: 'paiint-playlist', version: 1, playlist: { name: playlist.name, icon: playlist.icon }, settings }, null, 2))
     },
     importPlaylist(text) {
       const parsed = JSON.parse(text)
@@ -1577,8 +1587,8 @@ export const playlistEngine = {
     },
     backup() {
       const snapshot = getSnapshot()
-      downloadJson('rex-playlist-backup.json', JSON.stringify({
-        type: 'rex-playlist-backup',
+      downloadJson('paiint-playlist-backup.json', JSON.stringify({
+        type: 'paiint-playlist-backup',
         version: 1,
         playlists: snapshot.playlists,
         settingsByPlaylist,

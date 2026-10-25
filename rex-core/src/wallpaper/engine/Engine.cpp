@@ -2484,7 +2484,7 @@ void Engine::DumpPresentStages() const {
     wchar_t tmp[MAX_PATH] = {};
     if (GetTempPathW(MAX_PATH, tmp) == 0) return;
     std::wstring path(tmp);
-    path += L"REX\\perframe_present.csv";
+    path += L"Paiint\\perframe_present.csv";
     FILE* f = nullptr;
     // Plain narrow mode: "ccs=UTF-8" would switch the stream wide-oriented
     // and every narrow fputs below would fail silently (measured: BOM-only

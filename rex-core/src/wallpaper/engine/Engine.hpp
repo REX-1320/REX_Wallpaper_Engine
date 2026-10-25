@@ -95,7 +95,7 @@ private:
     void Update(double deltaTime);
     void SetState(EngineState state);
     void RenderLoop();
-    /// Write the present stage ring to %TEMP%\REX\perframe_present.csv
+    /// Write the present stage ring to %TEMP%\Paiint\perframe_present.csv
     /// (overwrite). Render-thread only; caller checks REX_PERFRAME_CSV.
     void DumpPresentStages() const;
     /// P16: sleep until the next expected frame (decoder cadence clamped

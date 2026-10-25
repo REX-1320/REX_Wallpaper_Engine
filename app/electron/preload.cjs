@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
-contextBridge.exposeInMainWorld('rexDesktop', {
+contextBridge.exposeInMainWorld('paiintDesktop', {
   getPathForFile: (file) => webUtils.getPathForFile(file),
 
   // Wallpaper apply — driven by the persistent Wallpaper Runtime.

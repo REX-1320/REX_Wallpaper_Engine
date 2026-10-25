@@ -6,7 +6,7 @@
 // offline deadline analysis ("which stage misses the budget"): demux /
 // send / receive+convert on the decode thread, begin-wait / draw-submit /
 // end-frame(present) on the render thread. Rings are overwritten in place
-// (latest N survive); dumps to %TEMP%\REX\perframe_*.csv happen only when
+// (latest N survive); dumps to %TEMP%\Paiint\perframe_*.csv happen only when
 // REX_PERFRAME_CSV=1, so steady-state cost when off is a few integer ops.
 //
 // Conventions:

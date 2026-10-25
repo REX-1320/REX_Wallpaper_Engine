@@ -1,9 +1,9 @@
 param([string]$Secs = 12)
-$exe = 'D:\REX_doc\rex-core\.build\Release\rex-wallpaper-runtime.exe'
+$exe = 'D:\REX_doc\rex-core\.build\Release\paiint-wallpaper-runtime.exe'
 $media = 'D:\live wallpaper\astral-defender-acheron.3840x2160.mp4'
-$dir = 'C:\Users\Moinu\AppData\Local\Temp\opencode\rex-verify\probe2'
+$dir = "$env:TEMP\opencode\rex-verify\probe2"
 New-Item -ItemType Directory -Path $dir -Force | Out-Null
-$cjs = 'C:\Users\Moinu\AppData\Local\Temp\opencode\rex-verify\fps_log.cjs'
+$cjs = "$env:TEMP\opencode\rex-verify\fps_log.cjs"
 $fp = Join-Path $dir 'fps.txt'
 if (Test-Path $fp) { Remove-Item $fp -Force }
 $err = Join-Path $dir 'node.err'

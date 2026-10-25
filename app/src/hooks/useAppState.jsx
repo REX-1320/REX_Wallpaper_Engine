@@ -8,7 +8,7 @@ export function useAppState(keyPath, defaultValue) {
 
   useEffect(() => {
     let cancelled = false
-    window.rexDesktop?.appState
+    window.paiintDesktop?.appState
       ?.get(keyPath)
       .then((v) => {
         if (!cancelled && v !== undefined && v !== null) setValue(v)
@@ -22,7 +22,7 @@ export function useAppState(keyPath, defaultValue) {
   const updateValue = useCallback(
     (newValue) => {
       setValue(newValue)
-      window.rexDesktop?.appState?.set(keyPath, newValue)
+      window.paiintDesktop?.appState?.set(keyPath, newValue)
     },
     [keyPath]
   )

@@ -5,7 +5,7 @@ const { spawn, execFileSync } = require('node:child_process')
 const exe = process.env.REX_PROBE_EXE || 'D:\\REX_doc\\rex-core\\.build\\Release\\rex-rt-test.exe'
 const video = 'D:\\live wallpaper\\astral-defender-acheron.3840x2160.mp4'
 const image = 'D:\\REX_doc\\e2e_a.png'
-const winvis = 'C:\\Users\\Moinu\\AppData\\Local\\Temp\\opencode\\rex-verify\\winvis.ps1'
+const winvis = process.env.TEMP + '\\opencode\\rex-verify\\winvis.ps1'
 function vis(tag) {
   let out = ''
   try {

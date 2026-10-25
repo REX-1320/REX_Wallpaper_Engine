@@ -866,8 +866,8 @@ HWND WorkerWManager::FindBlankWorkerW(bool requestWorkerWSpawn) {
     wchar_t tempDir[MAX_PATH] = {};
     std::string diagPath;
     if (GetTempPathW(MAX_PATH, tempDir)) {
-        diagPath = WidenToUtf8(std::wstring(tempDir) + L"REX\\workerw_diag.log");
-        CreateDirectoryW((std::wstring(tempDir) + L"REX").c_str(), nullptr);
+        diagPath = WidenToUtf8(std::wstring(tempDir) + L"Paiint\\workerw_diag.log");
+        CreateDirectoryW((std::wstring(tempDir) + L"Paiint").c_str(), nullptr);
     }
     FILE* diag = nullptr;
     fopen_s(&diag, diagPath.c_str(), "w");

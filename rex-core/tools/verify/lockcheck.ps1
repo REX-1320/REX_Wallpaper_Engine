@@ -5,7 +5,7 @@ try {
   Write-Output ('PID-11872: ' + $_.Exception.Message)
 }
 try {
-  $s = [IO.File]::Open('D:\REX_doc\rex-core\.build\Release\rex-wallpaper-runtime.exe', 'Open', 'ReadWrite', 'None')
+  $s = [IO.File]::Open('D:\REX_doc\rex-core\.build\Release\paiint-wallpaper-runtime.exe', 'Open', 'ReadWrite', 'None')
   Write-Output 'exe-open: UNLOCKED'
   $s.Close()
 } catch {

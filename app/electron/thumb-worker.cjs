@@ -9,7 +9,7 @@
 // zero-VRAM budget.
 //
 // Protocol (files, not stdio — Electron on Windows has no reliable stdout):
-//   electron [appPath] --rex-thumb-worker <request.json>
+//   electron [appPath] --paiint-thumb-worker <request.json>
 //   request  = { path, maxSize, outPath, resultPath }
 //   response = { ok, path, reason, ms }
 //
@@ -60,7 +60,7 @@ function isFlatFrame(stats) {
   return stats.std < 3 || stats.mean < 2 || stats.mean > 253
 }
 
-const WORKER_FLAG = '--rex-thumb-worker'
+const WORKER_FLAG = '--paiint-thumb-worker'
 
 function fail(resultPath, reason, startedAt) {
   const result = { ok: false, reason, ms: Date.now() - startedAt }

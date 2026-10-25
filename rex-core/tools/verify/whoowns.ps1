@@ -1,4 +1,4 @@
-$ps = Get-CimInstance Win32_Process -Filter "Name='rex-wallpaper-runtime.exe'" -ErrorAction SilentlyContinue
+$ps = Get-CimInstance Win32_Process -Filter "Name='paiint-wallpaper-runtime.exe'" -ErrorAction SilentlyContinue
 foreach ($p in $ps) {
   $owner = 'n/a'
   try { $o = $p.GetOwner(); $owner = ($o.Domain + '\' + $o.User) } catch { }

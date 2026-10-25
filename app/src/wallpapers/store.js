@@ -7,7 +7,7 @@ import { applyDefaults, sanitizeDefaults } from '../settings/defaults'
 // corrupt entry falls back to the built-in baseline.
 async function loadDefaults() {
   try {
-    const raw = await window.rexDesktop?.appState?.get?.('defaults')
+    const raw = await window.paiintDesktop?.appState?.get?.('defaults')
     return sanitizeDefaults(raw)
   } catch {
     return null
@@ -56,7 +56,7 @@ const settingsPersistPayloads = new Map()
 function scheduleSettingsPersist(wallpaper) {
   const filePath = wallpaper?.filePath
   if (!filePath) return
-  const gallery = window.rexDesktop?.gallery
+  const gallery = window.paiintDesktop?.gallery
   if (typeof gallery?.update !== 'function') return
 
   settingsPersistPayloads.set(filePath, pickLiveSettings(wallpaper))
@@ -311,7 +311,7 @@ function persistPlaylists() {
       const index = Number(String(p.id).replace('pl-', ''))
       return p.name !== PLAYLISTS[index] || p.icon !== (PLAYLIST_ICON_DEFAULTS[index] ?? 'music')
     }).map((p) => ({ id: p.id, name: p.name, icon: p.icon, members: p.members }))
-    window.rexDesktop?.appState?.set?.('playlistEngine.playlists', payload)?.catch?.(() => {})
+    window.paiintDesktop?.appState?.set?.('playlistEngine.playlists', payload)?.catch?.(() => {})
   }, 250)
 }
 
@@ -346,7 +346,7 @@ export function hydratePlaylists(saved) {
 // Loads the persisted playlists (definitions + membership) into the store.
 // Called once at startup, next to the layout state.
 export function initPlaylistState() {
-  const pending = window.rexDesktop?.appState?.get?.('playlistEngine.playlists')
+  const pending = window.paiintDesktop?.appState?.get?.('playlistEngine.playlists')
   if (!pending?.then) return
   pending
     .then((saved) => hydratePlaylists(saved))
@@ -377,7 +377,7 @@ async function fetchLastAppliedPath() {
   if (!lastAppliedRequest) {
     lastAppliedRequest = (async () => {
       try {
-        const last = await window.rexDesktop?.getLastApplied?.()
+        const last = await window.paiintDesktop?.getLastApplied?.()
         if (typeof last?.path === 'string' && last.path) lastAppliedPath = last.path
       } catch {
         // bridge gone or runtime never applied anything
@@ -391,7 +391,7 @@ async function fetchLastAppliedPath() {
 }
 
 export function initLastAppliedState() {
-  if (!window.rexDesktop?.getLastApplied) return
+  if (!window.paiintDesktop?.getLastApplied) return
   fetchLastAppliedPath()
     .then((path) => {
       if (!path) return
@@ -467,9 +467,9 @@ export async function loadWallpaperFile(file, pathHint = null, opts = {}) {
     wallpaper.info.filePath = file
   } else {
     wallpaper.filePath = file.path ?? null
-    if (!wallpaper.filePath && window.rexDesktop?.getPathForFile) {
+    if (!wallpaper.filePath && window.paiintDesktop?.getPathForFile) {
       try {
-        wallpaper.filePath = (await window.rexDesktop.getPathForFile(file)) ?? wallpaper.filePath
+        wallpaper.filePath = (await window.paiintDesktop.getPathForFile(file)) ?? wallpaper.filePath
       } catch {
         // keep fallback
       }
@@ -491,7 +491,7 @@ export async function loadWallpaperFile(file, pathHint = null, opts = {}) {
   // a miss here simply means "defaults".
   if (wallpaper.filePath) {
     try {
-      const stored = await window.rexDesktop?.gallery?.get?.(wallpaper.filePath)
+      const stored = await window.paiintDesktop?.gallery?.get?.(wallpaper.filePath)
       if (stored?.settings) {
         const hydrated = applySettings(wallpaper, stored.settings)
         if (hydrated) wallpaper = hydrated

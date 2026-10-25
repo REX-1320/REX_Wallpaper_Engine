@@ -26,7 +26,7 @@ import { setThumb } from './thumbCache'
 import { setLayoutState } from '../state/layout'
 import { buildFileRecord, galleryAdd, galleryGet, galleryList, galleryRemove, galleryRestoreFile } from './gallery'
 
-const DND_MIME = 'application/x-rex-wallpaper-paths'
+const DND_MIME = 'application/x-paiint-wallpaper-paths'
 
 // Restore is a long chain of async poster decodes. Awaiting an already-
 // resolved promise does not yield to the browser, so a burst of cheap/failed
@@ -117,7 +117,7 @@ export default function WallpaperGallery() {
     // whose thumbnail is the source file itself is never touched.
     try {
       const rp =
-        (window.rexDesktop?.getPathForFile ? await window.rexDesktop.getPathForFile(record.file) : null) ??
+        (window.paiintDesktop?.getPathForFile ? await window.paiintDesktop.getPathForFile(record.file) : null) ??
         null
       if (rp) {
         const entry = await galleryGet(rp).catch(() => null)
@@ -136,10 +136,10 @@ export default function WallpaperGallery() {
     setMenu(null)
     try {
       const path =
-        (window.rexDesktop?.getPathForFile ? await window.rexDesktop.getPathForFile(record.file) : null) ??
+        (window.paiintDesktop?.getPathForFile ? await window.paiintDesktop.getPathForFile(record.file) : null) ??
         record.filePath ??
         null
-      if (path) window.rexDesktop?.showInFolder?.(path)
+      if (path) window.paiintDesktop?.showInFolder?.(path)
     } catch {
       // no-op outside desktop
     }
@@ -343,7 +343,7 @@ export default function WallpaperGallery() {
       raw.map(async (f) => {
         try {
           const p =
-            (window.rexDesktop?.getPathForFile ? await window.rexDesktop.getPathForFile(f) : null) ??
+            (window.paiintDesktop?.getPathForFile ? await window.paiintDesktop.getPathForFile(f) : null) ??
             f.path ??
             null
           if (p) realPaths.set(f, p)

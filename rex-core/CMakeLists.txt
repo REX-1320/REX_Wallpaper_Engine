@@ -725,6 +725,11 @@ target_link_libraries(rex-wallpaper-runtime PRIVATE
     ${FFMPEG_LIBRARIES}
 )
 
+# The shipped binary is Paiint-branded. The CMake target name stays as-is so
+# existing build scripts and object files keep working; only the output file
+# (and therefore the Task Manager / install-folder name) changes.
+set_target_properties(rex-wallpaper-runtime PROPERTIES OUTPUT_NAME "paiint-wallpaper-runtime")
+
 # ─── Dev tool: synthetic MP4 generator ─────────────────────────────────────
 # Writes a short MPEG4+AAC test video (see tools/GenTestMedia.cpp) so the
 # runtime's decode / audio / preview surfaces can be exercised without media.

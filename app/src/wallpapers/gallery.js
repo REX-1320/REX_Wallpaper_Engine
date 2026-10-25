@@ -7,7 +7,7 @@ import { createThumbnail, createThumbnailFallback, saveThumbnail } from './thumb
 
 export async function galleryAdd(filePath, type = 'auto', extra = undefined) {
   try {
-    return await window.rexDesktop?.gallery?.add(filePath, type, extra) ?? null
+    return await window.paiintDesktop?.gallery?.add(filePath, type, extra) ?? null
   } catch {
     return null
   }
@@ -15,7 +15,7 @@ export async function galleryAdd(filePath, type = 'auto', extra = undefined) {
 
 export async function galleryGet(filePath) {
   try {
-    return await window.rexDesktop?.gallery?.get(filePath) ?? null
+    return await window.paiintDesktop?.gallery?.get(filePath) ?? null
   } catch {
     return null
   }
@@ -23,7 +23,7 @@ export async function galleryGet(filePath) {
 
 export async function galleryList(filter = undefined) {
   try {
-    return (await window.rexDesktop?.gallery?.list(filter)) ?? []
+    return (await window.paiintDesktop?.gallery?.list(filter)) ?? []
   } catch {
     return []
   }
@@ -31,7 +31,7 @@ export async function galleryList(filter = undefined) {
 
 export async function galleryRemove(filePath) {
   try {
-    return await window.rexDesktop?.gallery?.remove(filePath) ?? false
+    return await window.paiintDesktop?.gallery?.remove(filePath) ?? false
   } catch {
     return false
   }
@@ -104,7 +104,7 @@ export async function buildFileRecord(f, pathHint = null, thumbUrl = null,
 // renderer as base64.
 export async function galleryRestoreFile(item) {
   try {
-    const res = await window.rexDesktop?.gallery?.readFile(item?.path)
+    const res = await window.paiintDesktop?.gallery?.readFile(item?.path)
     if (!res || res.ok !== true) return { missing: true }
     // A real File carrying the true metadata but no payload: everything
     // downstream (apply, sorting, display) reads name/size/type/mtime, and the

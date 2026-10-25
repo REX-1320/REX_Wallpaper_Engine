@@ -1,8 +1,8 @@
-# REX Tools
+# Paiint
 
-> A modern desktop platform for Windows — widgets, wallpaper, window effects, and automation.
+> A modern desktop platform for Windows — widgets, wallpaper, window effects, and automation. By MoiNeX.
 
-**Status:** Active development — native core engine + Electron shell functional (well past Phase 0)
+**Status:** Active development — native core engine + Electron shell functional; **Paiint 0.1.0** packaged (`Paiint-0.1.0-2026-10-25.exe`), unsigned tester build
 **Target hardware:** Windows 10/11
 **See also:** [everything.md](everything.md) (what exists & what's done) · [TODO.md](TODO.md) (what's left) · [#project_status.md](%23project_status.md) (per-feature audit)
 
@@ -10,7 +10,7 @@
 
 ## Overview
 
-REX is the layer between Windows and the user that Windows never built: fast, native, deeply customizable, with a real plugin economy.
+Paiint is the layer between Windows and the user that Windows never built: fast, native, deeply customizable, with a real plugin economy.
 
 - **Widgets** — live info on your desktop (clock, weather, system monitor)
 - **Wallpaper** — static, video, web, interactive, audio-reactive

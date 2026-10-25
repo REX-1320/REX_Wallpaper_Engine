@@ -13,14 +13,14 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const WORKER_FLAG = '--rex-thumb-worker'
+const WORKER_FLAG = '--paiint-thumb-worker'
 const WORKER_TIMEOUT_MS = 30000
 
 const inFlight = new Map()
 let queue = Promise.resolve()
 
 function workDir() {
-  return path.join(app.getPath('temp'), 'rex-thumb-worker')
+  return path.join(app.getPath('temp'), 'paiint-thumb-worker')
 }
 
 function spawnWorker(filePath, maxSize) {

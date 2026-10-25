@@ -13,8 +13,8 @@ import {
   useWallpaperStore,
 } from './store'
 
-const DND_MIME = 'application/x-rex-wallpaper-paths'
-const REORDER_MIME = 'application/x-rex-playlist-reorder'
+const DND_MIME = 'application/x-paiint-wallpaper-paths'
+const REORDER_MIME = 'application/x-paiint-playlist-reorder'
 
 function memberKey(path) {
   if (!path) return null
@@ -58,7 +58,7 @@ export default function PlaylistStrip({ playlistId }) {
 
   useEffect(() => {
     let cancelled = false
-    const pending = window.rexDesktop?.gallery?.list?.()
+    const pending = window.paiintDesktop?.gallery?.list?.()
     if (!pending?.then) return undefined
     pending
       .then((entries) => {
@@ -226,7 +226,7 @@ export default function PlaylistStrip({ playlistId }) {
             type="button"
             className="playlist-context-item"
             onClick={() => {
-              window.rexDesktop?.showInFolder?.(menu.member)
+              window.paiintDesktop?.showInFolder?.(menu.member)
               setMenu(null)
             }}
           >

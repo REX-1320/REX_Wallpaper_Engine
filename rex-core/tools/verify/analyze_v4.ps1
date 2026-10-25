@@ -1,4 +1,4 @@
-param([string]$F = 'C:\Users\Moinu\AppData\Local\Temp\opencode\rex-verify\v4\fps.txt')
+param([string]$F = "$env:TEMP\opencode\rex-verify\v4\fps.txt")
 $rows = @()
 foreach ($l in (Get-Content $F)) {
   if ($l -match 'out=([\d.]+) \| eff=([\d.]+) \| drop=(\d+) \| rep=(\d+) \| wrap=(\d+) \| cons=(\d+) \| decc=(\d+)') {

@@ -1,7 +1,7 @@
-# REX — TODO
+# Paiint (formerly REX) — TODO
 
 > Everything remaining, prioritized. Checked items move to [`everything.md`](everything.md) / `#project_status.md`.
-> Last updated: **2026-10-22** · Source of truth for per-feature status: `#project_status.md` (~164 ⬜, ~24 🟡)
+> Last updated: **2026-10-25** · Source of truth for per-feature status: `#project_status.md` (~164 ⬜, ~24 🟡)
 > **Stage research completed 2026-10-15: [`research.md`](research.md)** — four read-only tracks (gallery/import, WorkerW lifecycle, multi-monitor, recovery/supervision) with DONE/FOUNDATION/GAP verdicts per item, file:line evidence, and live-pass checklists. The forward plan below incorporates its findings; genuinely NEW defects it surfaced are tracked as P0-5/P0-6/P1 items.
 > **Video Playback Excellence milestone CLOSED 2026-10-14** — the stutter investigation is done: three mechanisms root-caused (driver AV1 decode hogs · startup phase-lock slips · one 384 ms OS stall), cadence retiming falsified and retired. See the campaign entry in 🐛 Bug backlog. Remaining open items below are *not* stutter-related.
 
@@ -18,6 +18,14 @@
 ## 🐛 Bug backlog (top priority — main job)
 
 > Full audit with file:line evidence + refuted claims: [`docs/bugs/AUDIT-2026-10-06-parallel-audit.md`](docs/bugs/AUDIT-2026-10-06-parallel-audit.md) (2026-10-06, 4 parallel subsystem audits, high-severity items hand-verified).
+
+### Release / packaging - Paiint 0.1.0 (2026-10-25)
+
+- [x] **P0 - the product rename shipped: REX -> Paiint, author MoiNeX - DONE + LIVE VERIFIED 2026-10-25.** `app/package.json` (`name: paiint`, `productName: Paiint`, `version: 0.1.0`, `appId: com.paiint.desktop`, `author: MoiNeX`), every user-visible `REX`/`Moinu` surface scrubbed (window title, tray, logs, IPC names, `window.paiintDesktop`, export names/types, demo metadata, icons), runtime staged as `paiint-wallpaper-runtime.exe` (CMake `OUTPUT_NAME`) and minidump as `paiint-minidump.exe`, artefact named `Paiint-<version>-<date>.exe`. Upgrade path: `userdata-migrate.cjs` copies the newest of `%APPDATA%\REX` / `%APPDATA%\pg` into `%APPDATA%\Paiint` before any consumer runs and `main.cjs` pins that path; `login-item-migrate.cjs` removes the stale HKCU Run entry pointing at `REX*.exe`; the playlist engine migrates `rex.playlistEngine.v1` -> `paiint.playlistEngine.v1`. **Live:** the packaged exe created `%APPDATA%\Paiint` with 35 library records / 1 playlist / rotation `After Current Ends` queue=11, re-applied the last wallpaper, left `%APPDATA%\pg` intact, and a second launch spawned no duplicate. `pnpm lint` 0, `typecheck` 0, `build` 0, app tests **72/72** (8 new migration tests).
+- [x] **P1 - the runtime wrote its diagnostics to `%TEMP%\REX` while the shell reported `%TEMP%\Paiint` - FIXED + LIVE VERIFIED 2026-10-25.** Five native sites hardcoded the old directory (`BuildLogPath`, `WorkerWManager`, `Engine::DumpPresentStages`, `FfmpegVideoDecoder::DumpDecodeStages`, the compositor's debug trace) and the runtime settings store used `%LOCALAPPDATA%\REX`. All now use the Paiint directories; the settings file is copied once from the legacy path. **Live:** a fresh runtime creates `%TEMP%\Paiint\runtime.log`; `%TEMP%\REX` is no longer created.
+- [ ] **P1 - the shipped exe is unsigned (`Get-AuthenticodeSignature` = `NotSigned`) - OPEN.** Windows SmartScreen will show "Unknown publisher" on first run, which is a real adoption blocker for a public release. Needs an OV/EV code-signing certificate (or Azure Trusted Signing) wired into `electron-builder`'s `win.signingHashAlgorithms` / `signtool` step. Until then the build is a tester build, not a public release.
+- [ ] **P2 - the app and tray icons are a generated capital-P placeholder - OPEN (waiting on the user's logo).** `app/build/icon.ico` and `app/assets/paiint-tray.ico` come from `app/scripts/make-tray-icon.ps1`; drop the final artwork in and rerun the script (it writes both files), then rebuild.
+- [ ] **P2 - `rex-core/.build` cannot be reconfigured - OPEN (workaround documented).** Its `CMakeCache.txt` points at `%TEMP%\opencode\vcpkg-offline-toolchain.cmake`, which no longer exists, and reconfiguring with the surviving shim (`C:/vcpkg/scripts/buildsystems/vcpkg.cmake`) fails to resolve FFMPEG. The healthy tree is `rex-core/build` (same shim, FFMPEG found) - `cmake --build rex-core/build --config Release --target rex-wallpaper-runtime` is the supported native build. Fix: delete `.build` (its only unique artefact, `rex-minidump.exe`, is already staged) or repopulate its cache from `build/`.
 
 ### Gallery / thumbnails (2026-10-21)
 

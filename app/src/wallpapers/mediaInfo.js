@@ -18,7 +18,7 @@ export async function getMediaInfo(filePath) {
 
   let result = { container: null, hasAudio: null, size: 0 }
   try {
-    result = (await window.rexDesktop?.getMediaInfo?.(filePath)) ?? result
+    result = (await window.paiintDesktop?.getMediaInfo?.(filePath)) ?? result
   } catch {
     result = { container: null, hasAudio: null, size: 0 }
   }

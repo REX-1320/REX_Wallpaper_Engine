@@ -1,8 +1,8 @@
 {
-  "name": "rex-ui",
+  "name": "paiint-ui",
   "version": "0.1.0",
   "private": true,
-  "description": "REX UI framework — Phase 1: Surface System (architecture only)",
+  "description": "Paiint desktop — live wallpaper engine for Windows",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -1,7 +1,7 @@
 'use strict'
 
 // ─── WallpaperRuntime ──────────────────────────────────────────────────────
-// Persistent client for rex-wallpaper-runtime.exe --runtime.
+// Persistent client for paiint-wallpaper-runtime.exe --runtime.
 //
 // The runtime process lives for the lifetime of the app. Wallpaper applies
 // are fast LOAD/PLAY commands instead of kill+respawn cycles, and the
@@ -66,7 +66,7 @@ class WallpaperRuntime extends EventEmitter {
       const pid = proc.pid ?? null
       // Deliberate idle stops (image applied) must not be reported/replayed
       // as crashes — the supervisor reads this flag (see supervisor.cjs).
-      const intentional = proc.__rexIntentionalStop === true
+      const intentional = proc.__paiintIntentionalStop === true
       if (this.proc === proc) this._teardown(proc, `runtime exited (${code})`)
       this.emit('exit', code, { pid, intentional })
     })
@@ -228,7 +228,7 @@ class WallpaperRuntime extends EventEmitter {
     // reclaim (static image applied), not a crash: the supervisor must not
     // write a crash report or replay the wallpaper — a replay would spawn a
     // new runtime and undo the reclaim immediately.
-    proc.__rexIntentionalStop = opts.intentional === true
+    proc.__paiintIntentionalStop = opts.intentional === true
 
     // Graceful shutdown: write SHUTDOWN directly (NOT via this.send(),
     // which would re-spawn a fresh process) and close stdin. The runtime

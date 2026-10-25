@@ -1,4 +1,4 @@
-// Startup persistence for REX: remembers the last applied wallpaper across
+// Startup persistence for Paiint: remembers the last applied wallpaper across
 // app restarts so a login-time launch can re-apply it with no user step.
 // Pure fs/path logic (userData dir injected) so it runs under plain node.
 const fs = require('node:fs')
@@ -81,7 +81,7 @@ function mergeLiveUpdate(entry, applied, values) {
 // main.cjs) so the contract is visible and the shape is unit-testable.
 // In a packaged app the executable IS the app, so args suffice. In dev the
 // executable is bare Electron and the app folder must be argv[1] — without
-// it Windows launches a default Electron window instead of REX.
+// it Windows launches a default Electron window instead of Paiint.
 //
 // `startMinimized` (default true) adds --background: the login item then
 // starts the tray and the wallpaper without opening the window.

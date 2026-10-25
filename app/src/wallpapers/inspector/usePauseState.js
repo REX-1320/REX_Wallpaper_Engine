@@ -21,7 +21,7 @@ export function usePauseState(enabled) {
 
   const toggle = useCallback(async () => {
     if (!enabled || pending) return
-    const bridge = window.rexDesktop
+    const bridge = window.paiintDesktop
     if (!bridge?.pauseWallpaper || !bridge?.resumeWallpaper) return
 
     setPending(true)

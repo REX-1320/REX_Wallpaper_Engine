@@ -106,7 +106,7 @@ test('probing a real file reports its size and its audio tracks', async () => {
   const os = require('node:os')
   const path = require('node:path')
 
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rex-media-'))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paiint-media-'))
   const file = path.join(dir, 'clip.mp4')
   const data = mp4(['vide', 'soun'])
   await fs.writeFile(file, data)
@@ -121,7 +121,7 @@ test('probing a real file reports its size and its audio tracks', async () => {
 })
 
 test('probing a missing file is unknown, never silent', async () => {
-  const result = await probeMediaFile('D:/definitely-not-here/rex-missing.mp4')
+  const result = await probeMediaFile('D:/definitely-not-here/paiint-missing.mp4')
   assert.equal(result.hasAudio, null)
   assert.equal(result.size, 0)
 })

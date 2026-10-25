@@ -112,12 +112,22 @@ struct SettingsBundle {
 // Audit 5.5 #9: the settings store used to be opened cwd-relative
 // ("config/settings.json"), so dev shells and packaged Electron (spawned
 // with no cwd) persisted to different files on the same machine. Anchor it
-// to the user profile, matching the %TEMP%\REX convention used for logs.
+// to the user profile, matching the %TEMP%\Paiint convention used for logs.
+//
+// Renamed from %LOCALAPPDATA%\REX with the product. Pre-rename builds keep
+// their per-monitor assignments, so the old file is copied once (and left in
+// place, so downgrading to an old build still finds its settings).
 static std::string RuntimeSettingsPath() {
     if (const char* local = std::getenv("LOCALAPPDATA")) {
-        const std::string dir = std::string(local) + "\\REX";
+        const std::string dir = std::string(local) + "\\Paiint";
         CreateDirectoryA(dir.c_str(), nullptr);  // ERROR_ALREADY_EXISTS ok
-        return dir + "\\settings.json";
+        const std::string path = dir + "\\settings.json";
+        const std::string legacy = std::string(local) + "\\REX\\settings.json";
+        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesA(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            CopyFileA(legacy.c_str(), path.c_str(), TRUE);
+        }
+        return path;
     }
     return "config/settings.json";  // no profile env: keep legacy behaviour
 }
@@ -161,14 +171,16 @@ static double GetProcessPrivateMemoryMB() {
     return 0.0;
 }
 
-// Logs land in %TEMP%\REX\ so packaged builds are diagnosable regardless
-// of the working directory the process was launched from.
+// Logs land in %TEMP%\Paiint\ so packaged builds are diagnosable regardless
+// of the working directory the process was launched from. The Electron shell
+// reports this same directory in its "diagnostics:" log line
+// (app/electron/main.cjs) — keep the two in sync if the brand changes.
 static std::string BuildLogPath(const wchar_t* fileName) {
     wchar_t tempDir[MAX_PATH] = {};
     if (!GetTempPathW(MAX_PATH, tempDir)) {
         wcscpy_s(tempDir, L".\\");
     }
-    std::wstring dir = std::wstring(tempDir) + L"REX";
+    std::wstring dir = std::wstring(tempDir) + L"Paiint";
     CreateDirectoryW(dir.c_str(), nullptr);
     return WidenToUtf8(dir + L"\\" + fileName);
 }

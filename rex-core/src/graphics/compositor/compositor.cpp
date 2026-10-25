@@ -1070,7 +1070,7 @@ bool Compositor::UpdateLayerPixels(uint64_t layerId,
 // Debug tracing for the file-background path. Gated behind REX_BG_LOG
 // (audit 5.8 #11): it used to append to a hardcoded developer path
 // (C:\Users\munna\...) that exists on no other machine, unconditionally, on
-// every call. Enabled runs write to %TEMP%\REX\rex_bg_log.txt.
+// every call. Enabled runs write to %TEMP%\Paiint\paiint_bg_log.txt.
 static void LogToFile(const char* msg) {
     static const bool enabled = std::getenv("REX_BG_LOG") != nullptr;
     if (!enabled) return;
@@ -1078,9 +1078,9 @@ static void LogToFile(const char* msg) {
     const DWORD n = GetTempPathA(MAX_PATH, tmp);
     if (n == 0 || n >= MAX_PATH) return;
     std::string path(tmp);
-    path += "REX";
+    path += "Paiint";
     CreateDirectoryA(path.c_str(), nullptr);
-    path += "\\rex_bg_log.txt";
+    path += "\\paiint_bg_log.txt";
     if (FILE* f = fopen(path.c_str(), "a")) {
         fprintf(f, "%s\n", msg);
         fclose(f);

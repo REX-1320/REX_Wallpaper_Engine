@@ -1,4 +1,4 @@
-param([string]$Base = 'C:\Users\Moinu\AppData\Local\Temp\opencode\rex-verify')
+param([string]$Base = "$env:TEMP\opencode\rex-verify")
 foreach ($v in @('v1','v2','v3','v4','v5')) {
   $f = Join-Path $Base "$v\fps.txt"
   if (!(Test-Path $f)) { Write-Output ($v + ': NO FILE'); continue }

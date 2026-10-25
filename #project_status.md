@@ -1,11 +1,13 @@
-# REX Project Status
+# Paiint (formerly REX) Project Status
 
-> Last updated: 2026-07-25
+> Last updated: 2026-10-25
 > Auto-generated from codebase audit. Update this file when a feature reaches ✅.
 > See also: [everything.md](everything.md) (done inventory) · [TODO.md](TODO.md) (remaining work).
 > Note: the "Shell UI" section below is **retired/historical** — the native C++ shell was archived in `dump/` (and the orphaned `wallpaper/renderer/` subsystem was archived there on 2026-10-19). The current UI is the Electron app in `app/`; statuses inside that section are snapshots from its July audit and are not maintained.
 
 ## Recent changes since the July audit
+
+**2026-10-25 — product rename shipped (✅ live verified).** The app is now **Paiint 0.1.0**, authored by **MoiNeX**. Every user-visible `REX`/`Moinu` surface was scrubbed (window, tray, logs, IPC names, exports, icons); the native runtime ships as `paiint-wallpaper-runtime.exe`. Upgrades are lossless: `%APPDATA%\REX` / `%APPDATA%\pg` are copied into `%APPDATA%\Paiint` on first launch (pinned path), stale `REX*.exe` login items are removed, and the playlist storage key migrates in place. The runtime's diagnostics moved from `%TEMP%\REX` to `%TEMP%\Paiint` (five native sites) and its settings from `%LOCALAPPDATA%\REX` to `%LOCALAPPDATA%\Paiint`. Live: 35 library records, 1 playlist and the `After Current Ends` rotation (queue=11) survived; second launch is single-instance. Open for a public release: code signing and the final logo.
 
 **2026-10-24 — playlist rotation outlives the UI (✅ live verified).** The Timer and scene-end scheduler moved from the renderer to the main process (`app/electron/playlist-scheduler.cjs`, 13/13 unit tests). Closing the window now always destroys the renderer, and a `--background` login start rotates with no renderer at all. Live: two native-ENDED rotations with the window destroyed (`igris` → `KALYANI`, `reason=After Current Ends`), and reopening the UI adopted the rotated file with no second LOAD.
 

@@ -50,18 +50,18 @@ export function applyWallpaperToDesktop(w) {
     // seed selected before any file exists). Do nothing instead.
     return
   }
-  if (w.filePath.toLowerCase().startsWith('c:\\rex\\')) return
+  if (w.filePath.toLowerCase().startsWith('c:\\paiint\\')) return
   if (w.type === 'IMAGE') {
     const style = DESKTOP_STYLE_BY_MODE[w.display.mode] ?? 'cover'
-    window.rexDesktop?.setDesktopVideo?.({ path: null })
-    window.rexDesktop?.setDesktopWallpaper?.(w.filePath, style)?.then((res) => {
+    window.paiintDesktop?.setDesktopVideo?.({ path: null })
+    window.paiintDesktop?.setDesktopWallpaper?.(w.filePath, style)?.then((res) => {
       if (res && !res.ok) notifyError('Could not apply image wallpaper', res.error)
     })
     return
   }
   if (w.type === 'VIDEO') {
     const mode = ENGINE_MODE_BY_MODE[w.display.mode] ?? 'fill'
-    window.rexDesktop?.setDesktopVideo?.({
+    window.paiintDesktop?.setDesktopVideo?.({
       path: w.filePath,
       mode,
       fps: 0,
@@ -88,10 +88,10 @@ export function applyWallpaperToDesktop(w) {
 // properties the runtime renderer supports are transmitted; everything
 // else is dropped (and reported) instead of silently no-oping.
 export async function updateDesktopSettings(w) {
-  if (!w || !w.filePath || w.filePath.toLowerCase().startsWith('c:\\rex\\')) return
-  if (!window.rexDesktop?.updateWallpaper) return
+  if (!w || !w.filePath || w.filePath.toLowerCase().startsWith('c:\\paiint\\')) return
+  if (!window.paiintDesktop?.updateWallpaper) return
 
-  const caps = await effectiveCapabilities(DESKTOP_CAPABILITIES[w.type] ?? [], window.rexDesktop)
+  const caps = await effectiveCapabilities(DESKTOP_CAPABILITIES[w.type] ?? [], window.paiintDesktop)
   const opts = {}
   if (w.type === 'IMAGE') {
     // SET_FILL_MODE speaks the ENGINE vocabulary (fill/fit/stretch/center/
@@ -117,7 +117,7 @@ export async function updateDesktopSettings(w) {
   }
 
   try {
-    const res = await window.rexDesktop.updateWallpaper(opts)
+    const res = await window.paiintDesktop.updateWallpaper(opts)
     if (res && !res.ok) notifyError('Could not update wallpaper', res.error)
     else if (res?.skipped?.length) console.info('updateWallpaper skipped (unsupported):', res.skipped)
   } catch (err) {

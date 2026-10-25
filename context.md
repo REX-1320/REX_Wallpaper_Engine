@@ -59,7 +59,7 @@ User-sequenced end state: finish the remaining Batch 3–4 audit fixes, **then**
 ### After the batches (user-sequenced, do NOT start early)
 
 - **Odyssey green tint — DONE (unit 18, 2026-10-19).** Pool mirrors the decoder surface (`desc11.Format`) + P010 SDR shader path; live-confirmed on the actual clip (`fmt=P010 hdr=false pool=P010 copy=match`).
-- **Oppenheimer colours — NEXT (unit 19).** Player A/B in mpv/VLC + `capture_wall.ps1` capture vs `opp_frame_709.bmp` (`C:\Users\Moinu\AppData\Local\Temp\opencode\`).
+- **Oppenheimer colours — NEXT (unit 19).** Player A/B in mpv/VLC + `capture_wall.ps1` capture vs `opp_frame_709.bmp` (`%TEMP%\opencode\`).
 
 ## Key file pointers
 

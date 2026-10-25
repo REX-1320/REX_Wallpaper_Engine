@@ -1,4 +1,4 @@
-﻿const { app, BrowserWindow, shell, ipcMain, screen } = require('electron')
+const { app, BrowserWindow, shell, ipcMain, screen } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { WallpaperRuntime } = require('./wallpaperRuntime.cjs')
@@ -12,13 +12,32 @@ const { resolveWindowBounds } = require('./window-bounds.cjs')
 const { generatePoster } = require('./poster-worker.cjs')
 const { probeMediaFile } = require('./mediaInfo.cjs')
 const { PlaylistScheduler } = require('./playlist-scheduler.cjs')
+const { migrateUserData } = require('./userdata-migrate.cjs')
+const { cleanupLegacyLoginItem } = require('./login-item-migrate.cjs')
+
+// ─── Identity ────────────────────────────────────────────────────────────────
+// Pin userData BEFORE any consumer (including the thumbnail worker below).
+// Electron derives it from the app name, so a rename would otherwise silently
+// move it and orphan every library, playlist and setting. The migration is
+// idempotent and never deletes the old profile.
+const userDataMigration = migrateUserData(app.getPath('appData'))
+app.setPath('userData', userDataMigration.target)
+app.setAppUserModelId('com.paiint.desktop')
+if (userDataMigration.source) {
+  const errors = userDataMigration.errors.length
+    ? ` (errors: ${userDataMigration.errors.join('; ')})`
+    : ''
+  console.log(
+    `[migrate] copied ${userDataMigration.copied} item(s) from ${userDataMigration.source}${errors}`,
+  )
+}
 
 // ─── GPU thumbnail worker mode ────────────────────────────────────────────────
 // A separate, hardware-accelerated Electron process that decodes one poster and
 // exits (see thumb-worker.cjs). It must be handled BEFORE
 // disableHardwareAcceleration() below, and must never touch the single-instance
 // lock, tray, runtime or window lifecycle that follow.
-if (process.argv.includes('--rex-thumb-worker')) {
+if (process.argv.includes('--paiint-thumb-worker')) {
   require('./thumb-worker.cjs')
     .run(process.argv)
     .then((code) => app.exit(code || 0))
@@ -33,13 +52,19 @@ if (process.argv.includes('--rex-thumb-worker')) {
 app.disableHardwareAcceleration()
 
 // ─── Single-instance protection ─────────────────────────────────────────────
-// REX is a background app: one instance, one tray icon, one runtime. A second
+// Paiint is a background app: one instance, one tray icon, one runtime. A second
 // launch forwards a "restore window" command to the first instance and exits.
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   // Another instance owns the single-instance lock - this one has nothing to do.
   logLine('app: quit', 'another instance holds the lock')
   app.quit()
+}
+
+// Windows keeps the old login entry under the app's previous name. Remove it
+// once so signing in cannot start the retired build alongside this one.
+if (gotLock) {
+  cleanupLegacyLoginItem({ log: (line) => console.log(line) })
 }
 
 let mainWindow = null
@@ -63,7 +88,7 @@ let playlistScheduler = null
 
 // Dev-aware login-item registration: packaged apps register the exe
 // directly, but dev Electron needs the app folder as argv[1] or Windows
-// boots a default Electron window instead of REX.
+// boots a default Electron window instead of Paiint.
 // "Start minimised" (the default) adds --background: the login item then
 // starts the tray and the wallpaper without opening the window.
 function applyLoginItem(enabled) {
@@ -117,7 +142,7 @@ const LOG_PATH_MAX_BYTES = 2 * 1024 * 1024
 
 function logLine(...args) {
   try {
-    const logPath = path.join(app.getPath('temp'), 'rex-app.log')
+    const logPath = path.join(app.getPath('temp'), 'paiint-app.log')
     try {
       // A tray app runs for days and this logger is synchronous; never let
       // the file grow without bound. Previous log moves aside once.
@@ -129,18 +154,18 @@ function logLine(...args) {
   } catch {}
 }
 
-// Window-interaction diagnostics. Off by default; set REX_WINDBG=1 to trace
+// Window-interaction diagnostics. Off by default; set PAIINT_WINDBG=1 to trace
 // maximize-state and drag size-drift while reproducing titlebar bugs.
 function winDbg(...args) {
-  if (process.env.REX_WINDBG) logLine('[win]', ...args)
+  if (process.env.PAIINT_WINDBG) logLine('[win]', ...args)
 }
 
 function getWallpaperCliPath() {
   const packaged = process.resourcesPath
-    ? path.join(process.resourcesPath, 'bin', 'rex-wallpaper-runtime.exe')
+    ? path.join(process.resourcesPath, 'bin', 'paiint-wallpaper-runtime.exe')
     : null
   if (packaged && fs.existsSync(packaged)) return packaged
-  const devPath = path.join(__dirname, '..', '..', 'rex-core', '.build', 'Release', 'rex-wallpaper-runtime.exe')
+  const devPath = path.join(__dirname, '..', '..', 'rex-core', '.build', 'Release', 'paiint-wallpaper-runtime.exe')
   if (fs.existsSync(devPath)) return devPath
   logLine('wallpaper:runtime binary not found at', packaged || devPath)
   return packaged || devPath
@@ -478,7 +503,7 @@ function createWindow() {
     ...(restored ? { x: restored.x, y: restored.y } : {}),
     minWidth: 960,
     minHeight: 640,
-    title: 'REX',
+    title: 'Paiint',
     // NOT transparent. A transparent window is not snap-assist aware
     // (electron#37888) and cannot be maximized by double-click (PR #28207), so
     // it can never behave like a normal Windows app. Instead the glass comes
@@ -509,11 +534,11 @@ function createWindow() {
   mainWindow = win
   navigateReady = false
 
-  // REX_WINDBG=1: log the OS move-loop boundaries so a drag that never starts
+  // PAIINT_WINDBG=1: log the OS move-loop boundaries so a drag that never starts
   // (or starts then aborts) can be told apart instead of guessed at.
   // ENTERSIZEMOVE = OS modal move loop started. EXITSIZEMOVE = it ended.
   // CAPTURECHANGED = mouse capture lost (aborts a drag).
-  if (process.env.REX_WINDBG && typeof win.hookWindowMessage === 'function') {
+  if (process.env.PAIINT_WINDBG && typeof win.hookWindowMessage === 'function') {
     const WM = { LBUTTONDOWN: 0x201, LBUTTONUP: 0x202, CAPTURECHANGED: 0x215, ENTERSIZEMOVE: 0x231, EXITSIZEMOVE: 0x232, MOVING: 0x216 }
     for (const [name, id] of Object.entries(WM)) {
       try {
@@ -554,7 +579,7 @@ function createWindow() {
     win.webContents.send('window:maximized', false)
   })
 
-  // Close → tear the renderer down. REX lives in the tray, and the native
+  // Close → tear the renderer down. Paiint lives in the tray, and the native
   // runtime is a separate process that keeps the wallpaper playing. Destroying
   // (rather than hiding) is what actually releases the renderer and its GPU
   // allocations; a hidden window otherwise keeps both for the app's lifetime.
@@ -563,7 +588,7 @@ function createWindow() {
   // its Timer/scene-end scheduler is in main (playlist-scheduler.cjs), so the
   // rotation continues in the tray.
   //
-  // "Quit REX on close" is the user's choice (tray.closeToTray === false);
+  // "Quit Paiint on close" is the user's choice (tray.closeToTray === false);
   // the default keeps the app alive in the tray.
   win.on('close', (event) => {
     if (isQuitting) return
@@ -738,10 +763,10 @@ app.whenReady().then(() => {
   const tempDir = app.getPath('temp')
   logLine(
     'diagnostics:',
-    'runtime.log=' + path.join(tempDir, 'REX', 'runtime.log'),
-    'crash.log=' + path.join(tempDir, 'REX', 'crash.log'),
-    'workerw_diag.log=' + path.join(tempDir, 'REX', 'workerw_diag.log'),
-    'rex-app.log=' + path.join(tempDir, 'rex-app.log')
+    'runtime.log=' + path.join(tempDir, 'Paiint', 'runtime.log'),
+    'crash.log=' + path.join(tempDir, 'Paiint', 'crash.log'),
+    'workerw_diag.log=' + path.join(tempDir, 'Paiint', 'workerw_diag.log'),
+    'paiint-app.log=' + path.join(tempDir, 'paiint-app.log')
   )
 
   runtime.on('event', (event, data) => {
@@ -948,7 +973,7 @@ app.whenReady().then(() => {
   })
 
   // ─── Cached gallery thumbnails ────────────────────────────────────────────
-  // Small ~480px WebP posters persisted to the REX cache at import time; the
+  // Small ~480px WebP posters persisted to the Paiint cache at import time; the
   // gallery only ever reads these files (no video decoding in Chromium).
   const thumbDir = () => path.join(app.getPath('userData'), 'thumbnails')
 
@@ -1042,7 +1067,7 @@ app.whenReady().then(() => {
     }
   })
 
-  // Where REX keeps things, so the page can show the real paths and open
+  // Where Paiint keeps things, so the page can show the real paths and open
   // them. The poster cache and the log folder are the two a user actually
   // needs when something looks wrong.
   ipcMain.handle('app:paths', () => {
@@ -1050,20 +1075,20 @@ app.whenReady().then(() => {
     return {
       library: path.join(app.getPath('userData'), 'wallpaper-library.json'),
       posters: path.join(app.getPath('userData'), 'thumbnails'),
-      logs: path.join(tempDir, 'REX'),
-      crashes: path.join(tempDir, 'REX', 'crashes'),
-      appLog: path.join(tempDir, 'rex-app.log'),
+      logs: path.join(tempDir, 'Paiint'),
+      crashes: path.join(tempDir, 'Paiint', 'crashes'),
+      appLog: path.join(tempDir, 'paiint-app.log'),
     }
   })
 
-  // Open one of REX's own folders in Explorer. Guarded: only paths the app
+  // Open one of Paiint's own folders in Explorer. Guarded: only paths the app
   // itself reported may be opened.
   ipcMain.handle('app:open-path', async (event, { target } = {}) => {
     const dirs = {
       library: path.dirname(path.join(app.getPath('userData'), 'wallpaper-library.json')),
       posters: path.join(app.getPath('userData'), 'thumbnails'),
-      logs: path.join(app.getPath('temp'), 'REX'),
-      crashes: path.join(app.getPath('temp'), 'REX', 'crashes'),
+      logs: path.join(app.getPath('temp'), 'Paiint'),
+      crashes: path.join(app.getPath('temp'), 'Paiint', 'crashes'),
     }
     const dir = dirs[target]
     if (!dir) return { ok: false, reason: 'unknown-target' }
@@ -1276,13 +1301,13 @@ app.whenReady().then(() => {
       }
     },
     logs: {
-      runtimeLog: path.join(tempDir, 'REX', 'runtime.log'),
-      crashLog: path.join(tempDir, 'REX', 'crash.log'),
-      workerwDiagLog: path.join(tempDir, 'REX', 'workerw_diag.log'),
+      runtimeLog: path.join(tempDir, 'Paiint', 'runtime.log'),
+      crashLog: path.join(tempDir, 'Paiint', 'crash.log'),
+      workerwDiagLog: path.join(tempDir, 'Paiint', 'workerw_diag.log'),
       // Unchanged from logLine(): the Electron log lives at the temp root,
-      // not under REX\ — the old path never existed, so reports silently
+      // not under Paiint\ — the old path never existed, so reports silently
       // lacked the app log (audit 5.10 #10).
-      appLog: path.join(tempDir, 'rex-app.log'),
+      appLog: path.join(tempDir, 'paiint-app.log'),
     },
   })
   supervisor.start()
@@ -1312,10 +1337,10 @@ app.whenReady().then(() => {
   if (!startInBackground) {
     showMainWindow()
     logLine('window: shown (normal launch)')
-    // REX_WINDBG=1: DOM-level caption audit. Logs what actually sits at the
+    // PAIINT_WINDBG=1: DOM-level caption audit. Logs what actually sits at the
     // titlebar viewport points, so a dead drag region can be blamed on a
     // covering overlay instead of guessed at.
-    if (process.env.REX_WINDBG) {
+    if (process.env.PAIINT_WINDBG) {
       setTimeout(() => {
         if (!mainWindow || mainWindow.isDestroyed()) return
         mainWindow.webContents.executeJavaScript(`(() => {
@@ -1354,9 +1379,9 @@ app.whenReady().then(() => {
   })
 })
 
-// REX is a background application — the tray owns the lifetime. Closing the
+// Paiint is a background application — the tray owns the lifetime. Closing the
 // window destroys it (see the close handler) but leaves the app and the native
-// runtime running; only Exit REX (quitApp) terminates the process.
+// runtime running; only Exit Paiint (quitApp) terminates the process.
 app.on('window-all-closed', () => {})
 
 app.on('will-quit', () => {

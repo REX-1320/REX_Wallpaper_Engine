@@ -27,7 +27,7 @@ import './settings.css'
 
 const CLOSE_OPTIONS = [
   { value: 'tray', label: 'Keep in tray' },
-  { value: 'quit', label: 'Quit REX' },
+  { value: 'quit', label: 'Quit Paiint' },
 ]
 
 const FIT_OPTIONS = FIT_MODES.map((mode) => ({
@@ -51,7 +51,7 @@ function EngineStatus() {
     let alive = true
     const read = async () => {
       try {
-        const res = await window.rexDesktop?.getStatus?.()
+        const res = await window.paiintDesktop?.getStatus?.()
         if (!alive) return
         if (!res?.available) {
           setStopped(true)
@@ -114,12 +114,12 @@ function Files() {
   const [cleared, setCleared] = useState(null)
 
   useEffect(() => {
-    window.rexDesktop?.getPaths?.().then((p) => setPaths(p)).catch(() => {})
+    window.paiintDesktop?.getPaths?.().then((p) => setPaths(p)).catch(() => {})
   }, [])
 
-  const open = (target) => window.rexDesktop?.openPath?.(target)
+  const open = (target) => window.paiintDesktop?.openPath?.(target)
   const clear = async () => {
-    const res = await window.rexDesktop?.clearPosters?.()
+    const res = await window.paiintDesktop?.clearPosters?.()
     setCleared(res?.removed ?? 0)
   }
 
@@ -168,21 +168,21 @@ export default function SettingsPage() {
   const [version, setVersion] = useState('')
 
   useEffect(() => {
-    window.rexDesktop?.appState?.get?.('defaults').then((raw) => {
+    window.paiintDesktop?.appState?.get?.('defaults').then((raw) => {
       if (raw) setDefaults(sanitizeDefaults(raw))
     }).catch(() => {})
-    window.rexDesktop?.appState?.get?.('version').then((v) => setVersion(v ?? '')).catch(() => {})
-    window.rexDesktop?.loginItem?.().then((s) => setLaunchAtLogin(!!s?.enabled)).catch(() => {})
+    window.paiintDesktop?.appState?.get?.('version').then((v) => setVersion(v ?? '')).catch(() => {})
+    window.paiintDesktop?.loginItem?.().then((s) => setLaunchAtLogin(!!s?.enabled)).catch(() => {})
   }, [])
 
   const saveDefaults = (next) => {
     setDefaults(next)
-    window.rexDesktop?.appState?.set?.('defaults', next)?.catch?.(() => {})
+    window.paiintDesktop?.appState?.set?.('defaults', next)?.catch?.(() => {})
   }
   const setDefault = (group, key, value) => saveDefaults({ ...defaults, [group]: { ...defaults[group], [key]: value } })
 
   const toggleLogin = async (enabled) => {
-    const res = await window.rexDesktop?.loginItem?.(enabled)
+    const res = await window.paiintDesktop?.loginItem?.(enabled)
     setLaunchAtLogin(!!res?.enabled)
   }
 
@@ -194,7 +194,7 @@ export default function SettingsPage() {
             <PropertyGroup>
               <PropertyToggle
                 label="Launch at login"
-                description="Start REX when you sign in to Windows"
+                description="Start Paiint when you sign in to Windows"
                 checked={launchAtLogin}
                 onChange={toggleLogin}
               />
@@ -206,7 +206,7 @@ export default function SettingsPage() {
               />
               <PropertyToggle
                 label="Restore the last wallpaper at launch"
-                description="Put the wallpaper back on the desktop when REX starts"
+                description="Put the wallpaper back on the desktop when Paiint starts"
                 checked={restoreWallpaper !== false}
                 onChange={(v) => setRestoreWallpaper(v)}
               />
@@ -294,11 +294,11 @@ export default function SettingsPage() {
 
           <PropertySection title="About" icon={<Info size={15} />} defaultOpen={false}>
             <PropertyGroup>
-              <PropertyRow label="REX">
+              <PropertyRow label="Paiint">
                 <span className="pl-mono">{version || '—'}</span>
               </PropertyRow>
               <PropertyRow label="Engine">
-                <span className="pl-mono">rex-wallpaper-runtime</span>
+                <span className="pl-mono">paiint-wallpaper-runtime</span>
               </PropertyRow>
             </PropertyGroup>
           </PropertySection>

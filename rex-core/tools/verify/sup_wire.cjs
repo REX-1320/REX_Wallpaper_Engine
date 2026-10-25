@@ -11,7 +11,7 @@ const { RuntimeManager } = require('D:\\REX_doc\\app\\electron\\supervisor\\runt
 const { Supervisor } = require('D:\\REX_doc\\app\\electron\\supervisor\\supervisor.cjs')
 const { CrashReporter } = require('D:\\REX_doc\\app\\electron\\supervisor\\crash-reporter.cjs')
 
-const FAKE = 'C:\\Users\\Moinu\\AppData\\Local\\Temp\\opencode\\rex-verify\\fake_native.cjs'
+const FAKE = process.env.TEMP + '\\opencode\\rex-verify\\fake_native.cjs'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failures = 0
 function check(name, cond, extra) {

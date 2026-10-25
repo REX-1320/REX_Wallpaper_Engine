@@ -117,7 +117,7 @@ def centers():
 if __name__ == "__main__":
     import os
     base = os.environ.get("REX_BANDS_DIR",
-                          r"C:\Users\Moinu\AppData\Local\Temp\opencode\rex-verify")
+                          os.path.join(os.environ.get("TEMP", "."), "opencode", "rex-verify"))
     os.makedirs(base, exist_ok=True)
     sdr = [(v, v, v) for v in SDR_CODES]
     hdr = []

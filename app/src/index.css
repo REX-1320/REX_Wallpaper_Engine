@@ -118,7 +118,7 @@ body {
   --sidebar-border: rgb(var(--champagne-350) / 0.24);
   --sidebar-ring: rgb(var(--champagne-350));
 
-  /* ── REX app palette — "Obsidian & Champagne" ────────────────────────────
+  /* ── Paiint app palette — "Obsidian & Champagne" ────────────────────────────
      Two scales, and nothing else. Every surface, text step, border, fill and
      accent in the app is a STEP of one of these ramps — never an ad-hoc
      alpha, never a colour that belongs to neither. That is what makes the

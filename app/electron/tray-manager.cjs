@@ -1,7 +1,7 @@
 'use strict'
 
 // ─── TrayManager ────────────────────────────────────────────────────────────
-// Owns the Windows system tray for REX. Pure main-process concern; the
+// Owns the Windows system tray for Paiint. Pure main-process concern; the
 // renderer never touches Tray/Menu. Renderer-visible behavior is exposed
 // only through the narrow IPC API (see main.cjs / preload.cjs).
 
@@ -9,7 +9,7 @@ const { Tray, Menu, nativeImage } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 
-const TRAY_ICON_PATH = path.join(__dirname, '..', 'assets', 'rex-tray.ico')
+const TRAY_ICON_PATH = path.join(__dirname, '..', 'assets', 'paiint-tray.ico')
 
 class TrayManager {
   constructor({ getWindow, onShowWindow, onQuit, onPauseWallpaper, onResumeWallpaper, isLoginItemEnabled, onToggleLoginItem }) {
@@ -34,7 +34,7 @@ class TrayManager {
   create() {
     if (this.tray) return
     this.tray = new Tray(this._icon())
-    this.tray.setToolTip('REX')
+    this.tray.setToolTip('Paiint')
     this.rebuildMenu()
 
     // Double-click (or single-click) restores the window.
@@ -89,7 +89,7 @@ class TrayManager {
       loginChecked = this.isLoginItemEnabled ? !!this.isLoginItemEnabled() : false
     } catch {}
     const template = [
-      { label: 'Open REX', click: () => this.showWindow() },
+      { label: 'Open Paiint', click: () => this.showWindow() },
       { type: 'separator' },
       {
         label: 'Wallpaper',
@@ -110,7 +110,7 @@ class TrayManager {
           this.rebuildMenu()
         },
       },
-      { label: 'Exit REX', click: () => this.onQuit() },
+      { label: 'Exit Paiint', click: () => this.onQuit() },
     ]
     this.menu = Menu.buildFromTemplate(template)
     this.tray.setContextMenu(this.menu)

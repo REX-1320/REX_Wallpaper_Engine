@@ -4,14 +4,14 @@
 // Collects everything needed to diagnose a runtime failure and writes it to a
 // timestamped report directory:
 //
-//   %TEMP%\REX\crashes\<yyyy-mm-ddThh-mm-ss.mmmZ>\
+//   %TEMP%\Paiint\crashes\<yyyy-mm-ddThh-mm-ss.mmmZ>\
 //     report.json        — what happened, when, process/exit details
 //     system-info.json   — OS, CPU, memory, versions (best-effort)
 //     runtime.log        — native trace log (if present)
 //     crash.log          — native crash log (if present)
 //     workerw_diag.log   — desktop-layer diagnostics (if present)
-//     rex-app.log        — Electron-side log (if present)
-//     <name>.dmp         — minidump captured by rex-minidump.exe (optional)
+//     paiint-app.log        — Electron-side log (if present)
+//     <name>.dmp         — minidump captured by paiint-minidump.exe (optional)
 
 const fs = require('node:fs')
 const os = require('node:os')
@@ -45,7 +45,7 @@ function systemInfo() {
 
 class CrashReporter {
   constructor({ baseDir, logLine = () => {} } = {}) {
-    this.baseDir = baseDir || path.join(os.tmpdir(), 'REX', 'crashes')
+    this.baseDir = baseDir || path.join(os.tmpdir(), 'Paiint', 'crashes')
     this.logLine = logLine
   }
 
@@ -79,7 +79,7 @@ class CrashReporter {
       fs.mkdirSync(dir, { recursive: true })
 
       const reportJson = {
-        app: { name: 'REX', mainPid: process.pid },
+        app: { name: 'Paiint', mainPid: process.pid },
         timestamp: new Date().toISOString(),
         reason: report.reason,
         exitCode: report.exitCode ?? null,
@@ -95,7 +95,7 @@ class CrashReporter {
       this._copyLogIfPresent(logs.runtimeLog, dir, 'runtime.log')
       this._copyLogIfPresent(logs.crashLog, dir, 'crash.log')
       this._copyLogIfPresent(logs.workerwDiagLog, dir, 'workerw_diag.log')
-      this._copyLogIfPresent(logs.appLog, dir, 'rex-app.log')
+      this._copyLogIfPresent(logs.appLog, dir, 'paiint-app.log')
 
       this.logLine('crash-reporter: report written to', dir)
       return dir

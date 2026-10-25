@@ -29,7 +29,7 @@ export default function FileSection({ wallpaper }) {
           <Copy size={14} /> {copied ? 'Copied' : 'Copy path'}
         </PropertyButton>
         <PropertyButton
-          onClick={() => filePath && window.rexDesktop?.showInFolder?.(filePath)}
+          onClick={() => filePath && window.paiintDesktop?.showInFolder?.(filePath)}
           disabled={!filePath}
         >
           <FolderOpen size={14} /> Open location

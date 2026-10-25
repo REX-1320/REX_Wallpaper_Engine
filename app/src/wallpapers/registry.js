@@ -307,7 +307,7 @@ const DEFAULT_ADVANCED = {
   logs: true,
   diagnostics: false,
   rendererStats: true,
-  metadata: '{"engine":"REX","format":2,"fps":60}',
+  metadata: '{"engine":"Paiint","format":2,"fps":60}',
   variables: 'WALLPAPER_NAME="Aurora Loop"',
   arguments: '--fullscreen --vsync',
 }
@@ -323,7 +323,7 @@ const RENDERER_DEFAULTS = {
     subtitle: '',
   },
   WEB: {
-    url: 'https://rex.studio/wallpapers/aurora',
+    url: 'https://paiint.app/wallpapers/aurora',
     reload: false,
     devTools: false,
     zoom: 100,
@@ -366,8 +366,8 @@ export function createWallpaperFromType(type) {
     type,
     info: {
       name: `Aurora ${meta.label}`,
-      author: 'REX Studio',
-      source: `C:\\REX\\wallpapers\\aurora`,
+      author: 'Paiint Studio',
+      source: `C:\\Paiint\\wallpapers\\aurora`,
       version: '1.2.0',
       license: 'MIT',
       category: 'Nature',
@@ -385,7 +385,7 @@ export function createWallpaperFromType(type) {
       supportedMonitors: '2',
       favorite: true,
       rating: 4.5,
-      filePath: `C:\\REX\\wallpapers\\${type.toLowerCase()}.rexwall`,
+      filePath: `C:\\Paiint\\wallpapers\\${type.toLowerCase()}.rexwall`,
     },
     general: { ...DEFAULT_GENERAL },
     display: { ...DEFAULT_DISPLAY },

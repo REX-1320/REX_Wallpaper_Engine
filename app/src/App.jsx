@@ -24,10 +24,10 @@ const PAGES = {
     sub: 'Your library, your playlists, one click to the desktop.',
   },
   Settings: {
-    sub: 'How REX behaves on your machine.',
+    sub: 'How Paiint behaves on your machine.',
   },
   About: {
-    sub: 'REX — the wallpaper engine.',
+    sub: 'Paiint — the wallpaper engine.',
   },
 }
 

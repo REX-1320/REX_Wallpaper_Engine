@@ -51,8 +51,8 @@ function SidebarLayout({ active, onSelect, children }) {
   // Fully optional-chained: safe in browser/dev where the bridge is absent.
   useEffect(() => {
     try {
-      window.rexDesktop?.isMaximized?.()?.then?.(setMaximized)?.catch?.(() => {})
-      return window.rexDesktop?.onMaximized?.(setMaximized)
+      window.paiintDesktop?.isMaximized?.()?.then?.(setMaximized)?.catch?.(() => {})
+      return window.paiintDesktop?.onMaximized?.(setMaximized)
     } catch {
       return undefined
     }
@@ -60,13 +60,13 @@ function SidebarLayout({ active, onSelect, children }) {
 
   // Tray-driven navigation (e.g. tray "Settings" -> Settings tab).
   useEffect(() => {
-    return window.rexDesktop?.onNavigate?.((page) => onSelect?.(page))
+    return window.paiintDesktop?.onNavigate?.((page) => onSelect?.(page))
   }, [onSelect])
 
   const winControls = {
-    minimize: () => window.rexDesktop?.minimize?.(),
-    toggleMaximize: () => window.rexDesktop?.toggleMaximize?.(),
-    close: () => window.rexDesktop?.close?.(),
+    minimize: () => window.paiintDesktop?.minimize?.(),
+    toggleMaximize: () => window.paiintDesktop?.toggleMaximize?.(),
+    close: () => window.paiintDesktop?.close?.(),
   }
 
   // The titlebar strip is a real `-webkit-app-region: drag` region and the window
