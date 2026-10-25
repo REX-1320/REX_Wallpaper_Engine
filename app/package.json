@@ -26,35 +26,35 @@
     ],
     "extraResources": [
       {
-        "from": "../rex-core/.build/Release/paiint-wallpaper-runtime.exe",
+        "from": "../rex-core/build/Release/paiint-wallpaper-runtime.exe",
         "to": "bin/paiint-wallpaper-runtime.exe"
       },
       {
-        "from": "../rex-core/.build/Release/spdlog.dll",
+        "from": "../rex-core/build/Release/spdlog.dll",
         "to": "bin/spdlog.dll"
       },
       {
-        "from": "../rex-core/.build/Release/fmt.dll",
+        "from": "../rex-core/build/Release/fmt.dll",
         "to": "bin/fmt.dll"
       },
       {
-        "from": "../rex-core/.build/Release/avcodec-62.dll",
+        "from": "../rex-core/build/Release/avcodec-62.dll",
         "to": "bin/avcodec-62.dll"
       },
       {
-        "from": "../rex-core/.build/Release/avformat-62.dll",
+        "from": "../rex-core/build/Release/avformat-62.dll",
         "to": "bin/avformat-62.dll"
       },
       {
-        "from": "../rex-core/.build/Release/avutil-60.dll",
+        "from": "../rex-core/build/Release/avutil-60.dll",
         "to": "bin/avutil-60.dll"
       },
       {
-        "from": "../rex-core/.build/Release/swscale-9.dll",
+        "from": "../rex-core/build/Release/swscale-9.dll",
         "to": "bin/swscale-9.dll"
       },
       {
-        "from": "../rex-core/.build/Release/paiint-minidump.exe",
+        "from": "../rex-core/build/Release/paiint-minidump.exe",
         "to": "bin/paiint-minidump.exe"
       }
     ],
