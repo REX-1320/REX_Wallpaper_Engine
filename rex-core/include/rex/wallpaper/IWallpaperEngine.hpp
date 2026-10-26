@@ -393,6 +393,14 @@ public:
     /// Process-local NT handle of a pool slot texture (0..slotCount-1).
     virtual uint64_t GetFrameSlotHandle(uint32_t slot) const = 0;
 
+    // ─── Frame snapshot ───────────────────────────────────────────────────
+    /// Writes the frame currently on the desktop to `pathUtf8` as a PNG —
+    /// the still the OS keeps as the wallpaper after the engine exits.
+    /// Serviced by the render thread (it owns the renderer); blocks for at
+    /// most ~10 s. Returns false when nothing is loaded or the encode
+    /// failed. Call before Shutdown().
+    virtual bool CaptureFrame(const std::string& pathUtf8) = 0;
+
     // ─── Telemetry ────────────────────────────────────────────────────────
     /// Snapshot of live allocation counters (decoder/ring/GPU/scenes).
     /// May briefly take the engine lock; safe from any thread.

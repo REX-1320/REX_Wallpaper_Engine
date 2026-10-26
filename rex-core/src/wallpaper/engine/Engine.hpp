@@ -79,6 +79,7 @@ public:
     void DumpStats() const override;
     FrameSurface GetFrameSurface() const override;
     uint64_t GetFrameSlotHandle(uint32_t slot) const override;
+    bool CaptureFrame(const std::string& pathUtf8) override;
     void GetTelemetry(EngineTelemetry& out) const override;
     bool TryGetTelemetry(EngineTelemetry& out) const override;
     shared::UUID GetSessionId() const override { return m_sessionId; }
@@ -164,6 +165,17 @@ private:
     // GetPosition/DumpStats under m_mutex — atomic so the unlocked render
     // write is race-free.
     std::atomic<double> m_currentPosition{0.0};
+
+    // ─── Quit-time frame snapshot ───────────────────────────────────────
+    // CaptureFrame (command thread) queues a request; RenderLoop (render
+    // thread, the renderer's owner) services it and posts the result back.
+    std::atomic<bool> m_captureRequested{false};
+    std::mutex m_captureMutex;
+    std::condition_variable m_captureCv;
+    std::string m_capturePath;      // written before the request, read after
+    bool m_capturePending = false;  // queued or running (guarded by m_captureMutex)
+    bool m_captureDone = false;     // guarded by m_captureMutex
+    bool m_captureOk = false;       // guarded by m_captureMutex
 
     // ─── Render cadence (P2-15): cached decoder fps, render-thread only.
     // Refreshed at most twice/sec (telemetry does ring math); PaceLoop

@@ -6,6 +6,9 @@
 #include "wallpaper/decoder/WICTextureLoader.hpp"
 #include <shared/Logger.hpp>
 #include <d3dcompiler.h>
+#include <wincodec.h>
+
+#include <vector>
 
 // DXGI_STATUS_OCCLUDED was introduced in dxgi1_2 / Windows 8 SDK.
 #ifndef DXGI_STATUS_OCCLUDED
@@ -1751,8 +1754,16 @@ shared::Result<void> D3D12Renderer::AcquireCopyContext(
 
 bool D3D12Renderer::BeginFrame() {
     m_renderMutex.lock();
+    if (!BeginFrameLocked()) {
+        m_renderMutex.unlock();
+        return false;
+    }
+    return true;
+}
+
+bool D3D12Renderer::BeginFrameLocked() {
     // R1: arm the reentry detector while the frame lock is held; EndFrame
-    // (and the early-out below) disarm it before unlocking.
+    // (and the early-out below) disarm it before the caller unlocks.
     m_frameLock.EnterFrame();
 
     m_lastFrameLatencyWaitMs.store(m_swapChain.MeasureWaitForFrameMs(),
@@ -1773,7 +1784,6 @@ bool D3D12Renderer::BeginFrame() {
                           ctx.fenceValue, kFrameFenceWaitMs);
             m_deviceRemoved = true;
             m_frameLock.ExitFrame();
-            m_renderMutex.unlock();
             return false;
         }
     }
@@ -1819,7 +1829,6 @@ bool D3D12Renderer::BeginFrame() {
             m_deviceRemoved = true;
         }
         m_frameLock.ExitFrame();
-        m_renderMutex.unlock();
         return false;
     }
     m_stateTracker.Reset();
@@ -1966,14 +1975,42 @@ void D3D12Renderer::RenderFrame() {
         }
     }
 
-    // Transition back to present
+    // Transition back to present — via COPY_SOURCE when this frame is the
+    // quit snapshot. The copy runs after the draw and before the buffer is
+    // handed to the compositor, so the PNG is exactly the picture that was
+    // presented (fill mode, adjustments, rotation and tone map included).
     barrier.Transition.pResource   = backBuffer;
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter  = m_captureReadback
+                                         ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                                         : D3D12_RESOURCE_STATE_PRESENT;
     m_commandList->ResourceBarrier(1, &barrier);
+
+    if (m_captureReadback) {
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource       = m_captureReadback.Get();
+        dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = m_captureFootprint;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource        = backBuffer;
+        src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+        m_commandList->ResourceBarrier(1, &barrier);
+    }
 }
 
 void D3D12Renderer::EndFrame() {
+    EndFrameLocked();
+    m_renderMutex.unlock();
+}
+
+bool D3D12Renderer::EndFrameLocked() {
     const HRESULT closeHr = m_commandList->Close();
     // Audit 5.6 #13: never ExecuteCommandLists a list that failed to Close —
     // dropping this frame is safer than submitting corrupted command memory.
@@ -1984,8 +2021,7 @@ void D3D12Renderer::EndFrame() {
             m_deviceRemoved = true;
         }
         m_frameLock.ExitFrame();
-        m_renderMutex.unlock();
-        return;
+        return false;
     }
     ActiveQueue().Execute(m_commandList.Get());
 
@@ -2059,7 +2095,266 @@ void D3D12Renderer::EndFrame() {
             ActiveQueue().Signal();
     ++m_frameNumber;
     m_frameLock.ExitFrame();
-    m_renderMutex.unlock();
+    return true;
+}
+
+// ─── Frame snapshot ───────────────────────────────────────────────────────
+
+namespace {
+std::wstring Utf8ToWide(std::string_view sv) {
+    if (sv.empty()) return {};
+    const int len = MultiByteToWideChar(CP_UTF8, 0, sv.data(),
+                                        static_cast<int>(sv.size()), nullptr, 0);
+    if (len <= 0) return {};
+    std::wstring out(static_cast<size_t>(len), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()),
+                        out.data(), len);
+    return out;
+}
+} // namespace
+
+bool D3D12Renderer::CaptureFrameToPng(std::string_view pathUtf8) {
+    const std::wstring path = Utf8ToWide(pathUtf8);
+    if (path.empty() || !m_initialized) return false;
+
+    // Hold the frame mutex across the setup AND the capture frame: the HDR
+    // switch below calls ResizeBuffers, which must never race a frame that
+    // is still being recorded into a back buffer.
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    if (m_deviceRemoved) return false;
+    if (!m_hasVideoFrame && !m_hasTexture) {
+        // Nothing is loaded (e.g. an image wallpaper already owns the
+        // desktop). A black clear would be a lie, so leave the desktop alone.
+        REX_LOG_INFO("D3D12", "frame snapshot skipped: no scene on screen");
+        return false;
+    }
+
+    const UINT width  = static_cast<UINT>(m_width);
+    const UINT height = static_cast<UINT>(m_height);
+    if (width == 0 || height == 0) return false;
+
+    // HDR presents FP16/PQ, which a PNG cannot carry. Render the capture
+    // frame through the SDR pipeline instead: the shader's tone map (the
+    // mpv/libplacebo-parity curve) produces the SDR rendition of the very
+    // same picture. Deliberately not restored — this runs on the way out.
+    if (m_swapChain.IsHDRActive()) {
+        REX_LOG_INFO("D3D12", "frame snapshot: rendering the capture frame in SDR");
+        m_swapChain.SetForceSdr(true);
+        SyncHdrStateLocked();
+    }
+
+    // D3D12 forbids textures on READBACK heaps, so the capture target is a
+    // readback BUFFER sized by the copy footprints. CopyTextureRegion then
+    // fills it row by row; RowPitch is 256-byte aligned and is NOT width*4.
+    ID3D12Resource* backBuffer =
+        m_swapChain.GetBuffer(m_swapChain.GetCurrentIndex());
+    if (!backBuffer) {
+        REX_LOG_ERROR("D3D12", "frame snapshot: no back buffer to capture");
+        return false;
+    }
+    const D3D12_RESOURCE_DESC backDesc = backBuffer->GetDesc();
+
+    // The narrowing below understands exactly the two SDR formats the swap
+    // chain can use. Anything else (in practice FP16, i.e. the HDR switch
+    // above did not take) would be decoded as if it were 8-bit RGBA and
+    // produce a garbage image — and this image becomes the user's wallpaper,
+    // so refuse instead of writing it.
+    if (backDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM &&
+        backDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+        REX_LOG_ERROR("D3D12", "frame snapshot: unsupported back-buffer format {}",
+                      static_cast<int>(backDesc.Format));
+        return false;
+    }
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+    UINT64 totalBytes = 0;
+    m_device.Get()->GetCopyableFootprints(&backDesc, 0, 1, 0, &footprint,
+                                          nullptr, nullptr, &totalBytes);
+    if (totalBytes == 0) {
+        REX_LOG_ERROR("D3D12", "frame snapshot: copy footprint is empty");
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC bufferDesc = {};
+    bufferDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDesc.Width            = totalBytes;
+    bufferDesc.Height           = 1;
+    bufferDesc.DepthOrArraySize = 1;
+    bufferDesc.MipLevels        = 1;
+    bufferDesc.Format           = DXGI_FORMAT_UNKNOWN;
+    bufferDesc.SampleDesc.Count = 1;
+    bufferDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type             = D3D12_HEAP_TYPE_READBACK;
+    heap.CreationNodeMask = 1;
+    heap.VisibleNodeMask  = 1;
+
+    HRESULT hr = m_device.Get()->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(&m_captureReadback));
+    if (FAILED(hr)) {
+        REX_LOG_ERROR("D3D12", "frame snapshot: readback buffer allocation failed "
+                               "(0x{:08X}, {} bytes, row pitch {})",
+                      static_cast<unsigned>(hr),
+                      static_cast<unsigned long long>(totalBytes),
+                      footprint.Footprint.RowPitch);
+        return false;
+    }
+    m_captureFootprint = footprint;
+
+    if (!BeginFrameLocked()) {
+        m_captureReadback.Reset();
+        return false;
+    }
+    RenderFrame();   // copies the finished frame into m_captureReadback
+    const bool submitted = EndFrameLocked();
+    if (!submitted) {
+        m_captureReadback.Reset();
+        return false;
+    }
+
+    // Wait for THIS frame's copy only — the render loop may keep submitting.
+    const UINT64 fence = ActiveQueue().Signal();
+    if (!ActiveQueue().WaitForValue(fence, 10000)) {
+        REX_LOG_ERROR("D3D12", "frame snapshot: GPU readback timed out");
+        m_captureReadback.Reset();
+        return false;
+    }
+
+    D3D12_RANGE readRange{0, static_cast<SIZE_T>(totalBytes)};
+    void* mapped = nullptr;
+    hr = m_captureReadback->Map(0, &readRange, &mapped);
+    if (FAILED(hr) || !mapped) {
+        REX_LOG_ERROR("D3D12", "frame snapshot: readback map failed "
+                               "(0x{:08X})", static_cast<unsigned>(hr));
+        m_captureReadback.Reset();
+        return false;
+    }
+
+    // Back buffer -> 8-bit BGRA, the PNG's native layout. The SDR pipeline
+    // writes transfer-encoded sRGB values into a plain UNORM target, so a
+    // straight 10/8-bit narrowing is the correct conversion (no second
+    // transfer function).
+    const DXGI_FORMAT format = backDesc.Format;
+    const UINT rowPitch = m_captureFootprint.Footprint.RowPitch;
+    std::vector<uint8_t> bgra(static_cast<size_t>(width) * height * 4);
+    const uint8_t* srcBase = static_cast<const uint8_t*>(mapped);
+    for (UINT y = 0; y < height; ++y) {
+        const uint32_t* row = reinterpret_cast<const uint32_t*>(
+            srcBase + static_cast<size_t>(y) * rowPitch);
+        uint8_t* dst = bgra.data() + static_cast<size_t>(y) * width * 4;
+        for (UINT x = 0; x < width; ++x) {
+            const uint32_t p = row[x];
+            uint8_t r, g, b;
+            if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+                r = static_cast<uint8_t>(((p & 0x3FF) * 255u + 511u) / 1023u);
+                g = static_cast<uint8_t>((((p >> 10) & 0x3FF) * 255u + 511u) / 1023u);
+                b = static_cast<uint8_t>((((p >> 20) & 0x3FF) * 255u + 511u) / 1023u);
+            } else {
+                // R8G8B8A8_UNORM (the driver refused a 10-bit SDR buffer).
+                r = static_cast<uint8_t>(p & 0xFF);
+                g = static_cast<uint8_t>((p >> 8) & 0xFF);
+                b = static_cast<uint8_t>((p >> 16) & 0xFF);
+            }
+            dst[0] = b;
+            dst[1] = g;
+            dst[2] = r;
+            dst[3] = 255;
+            dst += 4;
+        }
+    }
+    m_captureReadback->Unmap(0, nullptr);
+    m_captureReadback.Reset();
+
+    if (!WriteBgraPng(path, bgra.data(), width, height, width * 4)) {
+        return false;
+    }
+    REX_LOG_INFO("D3D12", "frame snapshot written: {}x{} -> {}",
+                 width, height, pathUtf8);
+    return true;
+}
+
+bool D3D12Renderer::WriteBgraPng(const std::wstring& path, const uint8_t* bgra,
+                                 UINT width, UINT height, UINT rowPitch) {
+    if (!bgra || width == 0 || height == 0 || rowPitch < width * 4) return false;
+
+    // WIC needs COM on this thread. RPC_E_CHANGED_MODE means COM is already
+    // initialized with another model, which is fine — we just must not
+    // uninitialize in that case.
+    const HRESULT coHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool ownsCom = SUCCEEDED(coHr);
+
+    // Encode to a sibling temp file and rename on success. The desktop is
+    // pointed at `path` right after this returns, and Windows re-reads that
+    // path at sign-in — so a process kill or crash halfway through the encode
+    // must never leave a truncated PNG where the wallpaper loader will find
+    // it. MOVEFILE_WRITE_THROUGH flushes the rename before we report success.
+    const std::wstring tempPath = path + L".tmp";
+    DeleteFileW(tempPath.c_str());
+
+    bool ok = false;
+    {
+        Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+        Microsoft::WRL::ComPtr<IWICStream> stream;
+        Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
+        Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
+        Microsoft::WRL::ComPtr<IPropertyBag2> props;
+
+        HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                      CLSCTX_INPROC_SERVER,
+                                      IID_PPV_ARGS(&factory));
+        if (SUCCEEDED(hr)) hr = factory->CreateStream(&stream);
+        if (SUCCEEDED(hr))
+            hr = stream->InitializeFromFilename(tempPath.c_str(), GENERIC_WRITE);
+        if (SUCCEEDED(hr))
+            hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+        if (SUCCEEDED(hr))
+            hr = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+        if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, &props);
+        if (SUCCEEDED(hr)) hr = frame->Initialize(props.Get());
+        if (SUCCEEDED(hr)) hr = frame->SetSize(width, height);
+
+        WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
+        if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&fmt);
+        if (SUCCEEDED(hr)) {
+            const UINT bufferSize = rowPitch * height;
+            if (IsEqualGUID(fmt, GUID_WICPixelFormat32bppBGRA)) {
+                hr = frame->WritePixels(height, rowPitch, bufferSize,
+                                        const_cast<BYTE*>(bgra));
+            } else {
+                // The encoder picked another layout; hand it the pixels as a
+                // source bitmap and let WIC convert.
+                Microsoft::WRL::ComPtr<IWICBitmap> bitmap;
+                hr = factory->CreateBitmapFromMemory(
+                    width, height, GUID_WICPixelFormat32bppBGRA, rowPitch,
+                    bufferSize, const_cast<BYTE*>(bgra), &bitmap);
+                if (SUCCEEDED(hr)) hr = frame->WriteSource(bitmap.Get(), nullptr);
+            }
+        }
+        if (SUCCEEDED(hr)) hr = frame->Commit();
+        if (SUCCEEDED(hr)) hr = encoder->Commit();
+
+        ok = SUCCEEDED(hr);
+        if (!ok) {
+            REX_LOG_ERROR("D3D12", "frame snapshot: PNG encode failed "
+                                   "(0x{:08X})", static_cast<unsigned>(hr));
+        }
+    }
+
+    if (ownsCom) CoUninitialize();
+
+    if (ok) {
+        if (!MoveFileExW(tempPath.c_str(), path.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            REX_LOG_ERROR("D3D12", "frame snapshot: PNG rename failed ({})",
+                          GetLastError());
+            ok = false;
+        }
+    }
+    if (!ok) DeleteFileW(tempPath.c_str());
+    return ok;
 }
 
 void D3D12Renderer::SetClearColor(float r, float g, float b) {

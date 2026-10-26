@@ -65,6 +65,22 @@ public:
     /// changed (idempotent). Also runs inside Resize.
     void RefreshHdrOutput();
 
+    // ─── Frame snapshot (the still the desktop keeps) ──────────────────
+    /// Renders the current scene once more, reads the back buffer back and
+    /// writes it as a PNG at `pathUtf8`. This is the image the desktop is
+    /// showing, so the OS can keep it after the engine exits.
+    ///
+    /// An HDR swap chain presents FP16/PQ, which a PNG cannot carry; the
+    /// capture frame is rendered through the SDR pipeline instead, where the
+    /// existing mpv-parity tone map produces the SDR rendition. The swap
+    /// chain is left in SDR (this is a shutdown-time call).
+    ///
+    /// Returns false when nothing is loaded (a blank clear would be a lie),
+    /// when the GPU readback failed, or when the encode failed. Blocks for
+    /// at most a few frames; MUST NOT be called between BeginFrame and
+    /// EndFrame.
+    bool CaptureFrameToPng(std::string_view pathUtf8);
+
     // ─── Texture Loading ────────────────────────────────────────────────
     shared::Result<void> LoadTexture(std::string_view path);
     // NOT wired in-tree (audit 5.6 #10): the live video path is DrawVideoFrame
@@ -149,7 +165,6 @@ public:
     void RenderFrame();
     void EndFrame();
     void SetClearColor(float r, float g, float b);
-
     bool IsInitialized()   const { return m_initialized; }
     bool IsDeviceRemoved() const { return m_deviceRemoved; }
 
@@ -206,6 +221,17 @@ private:
                                    const void* psBytecode, SIZE_T psSize,
                                    Microsoft::WRL::ComPtr<ID3D12PipelineState>& outPs);
     bool CreateVertexBuffer();
+
+    /// Frame-window cores: the public BeginFrame/EndFrame wrap these with
+    /// m_renderMutex. They exist so a capture can hold the lock across
+    /// setup + one whole frame (the swap-chain HDR switch must not race a
+    /// frame in flight) without self-deadlocking.
+    bool BeginFrameLocked();
+    bool EndFrameLocked();
+
+    /// Writes 32-bit BGRA pixels as a PNG through WIC.
+    static bool WriteBgraPng(const std::wstring& path, const uint8_t* bgra,
+                             UINT width, UINT height, UINT rowPitch);
 
     /// Rebuilds m_transformMatrix from rotation/flip (row-major, matches
     /// the vertex shader's row-vector mul(v, M)). Caller holds m_renderMutex.
@@ -290,6 +316,20 @@ private:
     FrameContext m_frameContexts[graphics::kFrameContextCount];
     UINT64 m_frameNumber = 0;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
+
+    // ─── Frame snapshot ────────────────────────────────────────────────
+    // Readback target for the capture frame; non-null only while
+    // CaptureFrameToPng renders. RenderFrame copies the finished back buffer
+    // into it before the PRESENT transition (the copy must see the finished
+    // picture, before the compositor takes the buffer).
+    //
+    // This is a BUFFER, not a texture: D3D12 forbids textures on READBACK
+    // heaps (D3D11-style staging textures do not exist). The copy is a
+    // CopyTextureRegion into a placed footprint, so the rows carry the
+    // 256-byte-aligned RowPitch below and must never be walked as
+    // width * 4.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_captureReadback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_captureFootprint{};
 
     // ─── Pipeline state ────────────────────────────────────────────────
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSignature;

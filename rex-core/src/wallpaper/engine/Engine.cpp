@@ -1347,6 +1347,38 @@ uint64_t Engine::GetFrameSlotHandle(uint32_t slot) const {
     return reinterpret_cast<uint64_t>(m_videoManager->GetSlotHandle(slot));
 }
 
+bool Engine::CaptureFrame(const std::string& pathUtf8) {
+    {
+        std::lock_guard<std::mutex> lock(m_captureMutex);
+        if (m_capturePending) {
+            REX_LOG_WARN("Engine", "frame snapshot already in progress");
+            return false;
+        }
+        m_capturePath = pathUtf8;
+        m_captureDone = false;
+        m_captureOk = false;
+        m_capturePending = true;
+    }
+    // Release: RenderLoop's acquire exchange sees the path written above.
+    m_captureRequested.store(true, std::memory_order_release);
+
+    std::unique_lock<std::mutex> lock(m_captureMutex);
+    // The render loop services this at the top of its next iteration, so a
+    // paced frame (~250 ms worst case) plus one SDR re-render, readback and
+    // PNG encode. The bound only exists so a wedged GPU can never turn a
+    // quit into a hang; the app's own SHUTDOWN watchdog is the backstop.
+    const bool done = m_captureCv.wait_for(
+        lock, std::chrono::seconds(10), [this] { return m_captureDone; });
+    if (!done) {
+        // Leave m_capturePending set: the request is still queued/running,
+        // and a second request must not overwrite its path under the
+        // render thread's feet.
+        REX_LOG_WARN("Engine", "frame snapshot timed out");
+        return false;
+    }
+    return m_captureOk;
+}
+
 void Engine::GetTelemetry(EngineTelemetry& out) const {
     // Locked: the 5 s telemetry sampler runs on its own thread while the
     // render thread may be tearing these objects down in ReinitializeRenderer.
@@ -1975,6 +2007,24 @@ void Engine::RenderLoop() {
 
     while (m_running) {
         auto frameStart = high_resolution_clock::now();
+
+        // ── Quit-time still (render thread owns the renderer) ───────────
+        // The command thread queues the request in CaptureFrame and waits;
+        // servicing it here keeps every renderer call on its owning thread
+        // and out of the BeginFrame/EndFrame window.
+        if (m_captureRequested.exchange(false, std::memory_order_acq_rel)) {
+            bool ok = false;
+            if (m_renderer && m_renderer->IsInitialized()) {
+                ok = m_renderer->CaptureFrameToPng(m_capturePath);
+            }
+            {
+                std::lock_guard<std::mutex> lock(m_captureMutex);
+                m_captureOk = ok;
+                m_captureDone = true;
+                m_capturePending = false;
+            }
+            m_captureCv.notify_all();
+        }
 
         // ── Auto-pause behind full-screen apps (throttled) ──────────────
         if (m_frameCount.load(std::memory_order_relaxed) % 30 == 0) {

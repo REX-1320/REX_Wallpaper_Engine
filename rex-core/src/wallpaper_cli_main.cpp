@@ -132,6 +132,20 @@ static std::string RuntimeSettingsPath() {
     return "config/settings.json";  // no profile env: keep legacy behaviour
 }
 
+// Quit-time still: the last rendered video frame, handed to the OS as the
+// desktop wallpaper so the desktop keeps a picture after the engine exits.
+// %LOCALAPPDATA% rather than %TEMP%: Windows stores the wallpaper PATH and
+// re-reads it at sign-in, so a cleaned temp directory would leave a black
+// desktop. One file, overwritten on every quit.
+static std::string LastFrameImagePath() {
+    if (const char* local = std::getenv("LOCALAPPDATA")) {
+        const std::string dir = std::string(local) + "\\Paiint";
+        CreateDirectoryA(dir.c_str(), nullptr);  // ERROR_ALREADY_EXISTS ok
+        return dir + "\\last-frame.png";
+    }
+    return {};
+}
+
 static std::shared_ptr<rex::settings::ISettingsService> CreateSettingsService() {
     static std::shared_ptr<SettingsBundle> bundle; // kept alive for the process
 
@@ -207,6 +221,15 @@ static std::string BuildLogPath(const wchar_t* fileName) {
 static std::mutex g_symMutex;      // serializes all dbghelp calls
 static bool       g_symReady = false;
 static HANDLE     g_symProc  = nullptr;
+
+// Set once a deliberate teardown has begun. The VEH records every first-chance
+// exception, and WTSUnRegisterSessionNotification raises a benign RPC
+// exception (0x71A) while the session-notification window is destroyed — so a
+// clean quit used to append a false "VEH exception" entry to crash.log, making
+// every exit look like a crash in support logs. Only that code, and only after
+// teardown has started, is ignored; the same code at any other time (and every
+// other code) is still recorded.
+static std::atomic<bool> g_teardownStarted{false};
 
 static void EnsureSymInit() {
     // Must be called under g_symMutex.
@@ -356,6 +379,11 @@ static LONG WINAPI CrashHandler(PEXCEPTION_POINTERS ep) {
         case 0x40010006:     // DBG_PRINTEXCEPTION_C (OutputDebugStringA)
         case 0x4001000A:     // DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)
             return EXCEPTION_CONTINUE_SEARCH;
+        case 0x0000071A:     // RPC exception raised by WTS unregister on quit
+            if (g_teardownStarted.load(std::memory_order_acquire)) {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            break;
         default:
             break;
     }
@@ -959,6 +987,10 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
         }
 
         if (cmd == "SHUTDOWN") {
+            // A deliberate exit starts here: the benign WTS/RPC first-chance
+            // exception raised while unregistering session notifications must
+            // not be recorded as a crash (see g_teardownStarted).
+            g_teardownStarted.store(true, std::memory_order_release);
             // Stop the watchdog first (it holds no engine references, just
             // suspends threads and writes to crash.log).
             watchdogStop.store(true, std::memory_order_release);
@@ -967,6 +999,29 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             // Telemetry reads engine state — must be gone before Shutdown.
             telemetryStop.store(true, std::memory_order_release);
             if (telemetryThread.joinable()) telemetryThread.join();
+
+            // Quit-time still: only when the host asked (the app's Exit
+            // path). CaptureFrame reports false when no scene is on screen,
+            // so an idle reclaim after an image apply never overwrites the
+            // image the user just chose. Order matters: capture, then hand
+            // the PNG to the OS as the wallpaper, then tear the WorkerW
+            // down — the desktop never flashes black in between.
+            if (params["snapshot"].AsBool(false) && engine) {
+                const std::string snapshotPath = LastFrameImagePath();
+                if (!snapshotPath.empty() && engine->CaptureFrame(snapshotPath)) {
+                    const std::wstring widePath = Utf8ToWiden(snapshotPath);
+                    if (!widePath.empty() &&
+                        SetImageWallpaper(widePath, FillMode::Fill) == 0) {
+                        REX_LOG_INFO("Runtime",
+                                     "last frame left on the desktop: {}",
+                                     snapshotPath.c_str());
+                    } else {
+                        REX_LOG_WARN("Runtime",
+                                     "last frame captured but applying it as "
+                                     "the wallpaper failed");
+                    }
+                }
+            }
 
             framePollStop.store(true, std::memory_order_release);
             if (framePollThread.joinable()) {
@@ -1543,6 +1598,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
     // stdin closed (host quit without SHUTDOWN) â€” clean up.
     // Mirror the SHUTDOWN path so both watchdog and frame-poll threads
     // are stopped/joined before any std::thread members are destroyed.
+    g_teardownStarted.store(true, std::memory_order_release);
     watchdogStop.store(true, std::memory_order_release);
     if (watchdogThread.joinable()) {
         watchdogThread.join();
