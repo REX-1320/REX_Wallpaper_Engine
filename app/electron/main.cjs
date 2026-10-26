@@ -1410,5 +1410,8 @@ app.on('will-quit', () => {
   if (playlistScheduler) playlistScheduler.stop() // stop timers; plan is already persisted
   // The scheduler's last change may still sit in the app-state debounce.
   try { appState?.flush() } catch {}
-  runtime.stop()
+  // Exit leaves the last video frame on the desktop as a still (the runtime
+  // captures it and applies it through the OS wallpaper API). Idle reclaims
+  // pass no snapshot, so switching to an image never gets overwritten.
+  runtime.stop({ snapshot: true })
 })

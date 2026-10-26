@@ -55,6 +55,7 @@ function harness(opts = {}) {
     persist: (snapshot) => persisted.push(snapshot),
     log: () => {},
     retryMs: opts.retryMs ?? 60_000,
+    imageDwellMs: opts.imageDwellMs,
   })
 
   const dueIn = () => [...timers.values()].map((timer) => timer.due - now).sort((a, b) => a - b)
@@ -266,4 +267,59 @@ test('a plan with no next member stops instead of scheduling a phantom change', 
   assert.deepEqual(h.dueIn(), [])
   assert.equal(h.scheduler.state().active, false)
   assert.equal(h.applied.length, 0)
+})
+
+test('a scene-end mode gives a still image a dwell before advancing', async () => {
+  const h = harness()
+
+  // The desktop holds an image, which emits no ENDED: without a dwell the
+  // rotation parks here forever (TODO P2, found live 2026-10-24).
+  h.scheduler.setPlan(makePlan({ mode: 'After Current Ends', currentPath: C.path }))
+
+  assert.deepEqual(h.dueIn(), [30_000])
+  assert.equal(h.applied.length, 0)
+
+  h.advance(30_000)
+  await h.runDue()
+
+  assert.equal(h.applied[0].path, A.path)
+  assert.equal(h.events.at(-1).reason, 'After Current Ends')
+  // The next member is a video again, so the clock is the video's own end.
+  assert.deepEqual(h.dueIn(), [])
+})
+
+test('rebroadcasting a scene-end plan does not restart the image dwell', async () => {
+  const h = harness()
+
+  h.scheduler.setPlan(makePlan({ mode: 'After Current Ends', currentPath: C.path }))
+  h.advance(10_000)
+  h.scheduler.setPlan(makePlan({ mode: 'After Current Ends', currentPath: C.path, updatedAt: h.now() + 1 }))
+
+  assert.deepEqual(h.dueIn(), [20_000])
+})
+
+test('landing on an image inside a scene-end mode arms the dwell', async () => {
+  const h = harness()
+
+  h.scheduler.setPlan(makePlan({ mode: 'Video Ends', currentPath: A.path, queue: [A, C, B] }))
+  assert.deepEqual(h.dueIn(), [], 'a video scene is event-driven, not timed')
+
+  await h.scheduler.handleEvent('ENDED', { path: A.path })
+  assert.equal(h.applied[0].path, C.path)
+  assert.deepEqual(h.dueIn(), [30_000])
+
+  h.advance(30_000)
+  await h.runDue()
+  assert.equal(h.applied[1].path, B.path)
+  assert.deepEqual(h.dueIn(), [])
+})
+
+test('the image dwell is configurable and never applies to the Timer', async () => {
+  const h = harness({ imageDwellMs: 5_000 })
+
+  h.scheduler.setPlan(makePlan({ mode: 'After Current Ends', currentPath: C.path }))
+  assert.deepEqual(h.dueIn(), [5_000])
+
+  h.scheduler.setPlan(makePlan({ mode: 'Timer', currentPath: C.path, updatedAt: h.now() + 1 }))
+  assert.deepEqual(h.dueIn(), [60_000], 'the Timer owns the clock, image or not')
 })

@@ -234,7 +234,8 @@ class WallpaperRuntime extends EventEmitter {
     // which would re-spawn a fresh process) and close stdin. The runtime
     // exits once it sees the frame or EOF.
     try {
-      const payload = JSON.stringify({ id: 0xffffffff, cmd: 'SHUTDOWN', params: {} })
+      const params = opts.snapshot === true ? { snapshot: true } : {}
+      const payload = JSON.stringify({ id: 0xffffffff, cmd: 'SHUTDOWN', params })
       const frame = Buffer.allocUnsafe(4 + Buffer.byteLength(payload))
       frame.writeUInt32LE(Buffer.byteLength(payload), 0)
       frame.write(payload, 4, 'utf8')
@@ -255,6 +256,16 @@ class WallpaperRuntime extends EventEmitter {
     // (telemetry join ≤250 ms after the unit-11 slicing + engine teardown,
     // GPU drains included); 3 s used to truncate that teardown (audit 5.10
     // #4). Cleared on exit so a clean quit never signals a dead process.
+    //
+    // A snapshot quit is slower by design: the runtime reads back a
+    // full-resolution frame, PNG-encodes it, then applies it through
+    // SystemParametersInfo (a synchronous WM_SETTINGCHANGE broadcast that
+    // waits for Explorer to load the new wallpaper) before tearing down
+    // WorkerW. Measured ~4 s on a 4K desktop; a slower disk or 8K panel can
+    // double that. Killing inside that window would abort the capture, so
+    // the snapshot path gets a wider deadline — still a guard against a
+    // genuinely wedged runtime, never the normal exit path.
+    const deadlineMs = opts.snapshot === true ? 15000 : 5000
     const killTimer = setTimeout(() => {
       try {
         this.logLine('wallpaper-runtime: no SHUTDOWN response, terminating process')
@@ -262,7 +273,7 @@ class WallpaperRuntime extends EventEmitter {
       } catch {
         // already gone
       }
-    }, 5000)
+    }, deadlineMs)
     if (killTimer.unref) killTimer.unref()
     proc.once('exit', () => clearTimeout(killTimer))
   }

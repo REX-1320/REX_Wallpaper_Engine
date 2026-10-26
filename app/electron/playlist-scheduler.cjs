@@ -25,6 +25,11 @@
 const SCENE_END_MODES = new Set(['After Current Ends', 'Video Ends', 'Audio Ends'])
 const TIMER_MODE = 'Timer'
 const MAX_TIMER_DELAY = 2_147_483_647 // setTimeout's 32-bit limit (~24.8 days)
+// How long a still image stays on the desktop in a scene-end mode before the
+// playlist moves on. A still never emits ENDED, so without this the rotation
+// stops dead the first time it reaches one.
+const DEFAULT_IMAGE_DWELL_MS = 30_000
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|webp|bmp|gif|avif)$/i
 
 function pathKey(value) {
   if (!value) return null
@@ -42,11 +47,15 @@ class PlaylistScheduler {
     this.persist = options.persist ?? (() => {})
     this.log = options.log ?? (() => {})
     this.retryMs = options.retryMs ?? 60_000
+    // A still image emits no ENDED, so a scene-end mode would park on it
+    // forever. Stills therefore get a dwell time (see _applyDwellPlan).
+    this.imageDwellMs = Number(options.imageDwellMs) > 0 ? Number(options.imageDwellMs) : DEFAULT_IMAGE_DWELL_MS
 
     this.plan = null
     this.currentPath = null
     this.nextDueAt = null
     this.timerKey = null
+    this.dwellKey = null
     this.timerHandle = null
     this.applying = false
     this.exhausted = false
@@ -67,6 +76,7 @@ class PlaylistScheduler {
       this.currentPath = null
       this.nextDueAt = null
       this.timerKey = null
+      this.dwellKey = null
       this.exhausted = false
       this.exhaustedIdentity = null
       this._persist()
@@ -124,10 +134,9 @@ class PlaylistScheduler {
     if (mode === TIMER_MODE) {
       this._applyTimerPlan(normalized, opts, at)
     } else {
-      // Scene-end is event-driven; every other mode is the renderer's job.
-      this._cancelTimer()
-      this.nextDueAt = null
-      this.timerKey = null
+      // Scene-end is event-driven, except for still images (no ENDED); every
+      // other mode is the renderer's job.
+      this._applyDwellPlan(normalized, opts, at)
     }
 
     this._persist()
@@ -215,6 +224,7 @@ class PlaylistScheduler {
     this.currentPath = null
     this.nextDueAt = null
     this.timerKey = null
+    this.dwellKey = null
     this.exhausted = false
     this.exhaustedIdentity = null
     this._persist()
@@ -303,6 +313,67 @@ class PlaylistScheduler {
     this._schedule(this.nextDueAt)
   }
 
+  // ─── Still images in scene-end modes ─────────────────────────────────────
+
+  _imageDwellMs(plan) {
+    const override = Number(plan?.imageDwellMs)
+    if (Number.isFinite(override) && override > 0) return override
+    return this.imageDwellMs
+  }
+
+  _currentEntry(plan) {
+    const index = this._indexOf(this.currentPath ?? plan?.currentPath)
+    return index < 0 ? null : plan.queue[index]
+  }
+
+  // `apply` is the host's payload, but its `kind` is the one field the
+  // scheduler needs: a still image has no end event to wait for.
+  _isStill(entry) {
+    if (!entry) return false
+    const kind = entry.apply?.kind
+    if (typeof kind === 'string' && kind) return kind === 'image'
+    return IMAGE_EXTENSIONS.test(entry.path ?? '')
+  }
+
+  _dwellKey(plan) {
+    return [plan?.playlistId ?? '', plan?.mode ?? '', pathKey(this.currentPath ?? plan?.currentPath) ?? ''].join('|')
+  }
+
+  _applyDwellPlan(plan, opts, at) {
+    const still = SCENE_END_MODES.has(plan.mode) && this._isActive(plan) && this._isStill(this._currentEntry(plan))
+    if (!still) {
+      this._cancelTimer()
+      this.nextDueAt = null
+      this.timerKey = null
+      this.dwellKey = null
+      return
+    }
+
+    const key = this._dwellKey(plan)
+    if (opts.restoredDueAt != null) {
+      this.dwellKey = key
+      this.nextDueAt = Number(opts.restoredDueAt)
+    } else if (key !== this.dwellKey || this.nextDueAt == null) {
+      // Only a new dwell identity re-arms it: the renderer rebroadcasts the
+      // plan often, and resetting the clock each time would park on the image
+      // just as effectively as having no dwell at all.
+      this.dwellKey = key
+      this.nextDueAt = at + this._imageDwellMs(plan)
+    }
+
+    this.timerKey = null
+    this._log('image dwell', `due in ${Math.max(0, this.nextDueAt - at)}ms`, this.currentPath ?? plan.currentPath)
+    this._schedule(this.nextDueAt)
+  }
+
+  _armDwell(plan, at = this.now()) {
+    this.dwellKey = this._dwellKey(plan)
+    this.timerKey = null
+    this.nextDueAt = at + this._imageDwellMs(plan)
+    this._log('image dwell', `due in ${this._imageDwellMs(plan)}ms`, plan.currentPath)
+    this._schedule(this.nextDueAt)
+  }
+
   _schedule(dueAt) {
     this._cancelTimer()
     const at = this.now()
@@ -375,11 +446,17 @@ class PlaylistScheduler {
           this.currentPath = candidate.path
           this.lastApplyAt = at
           plan.currentPath = candidate.path
-          if (plan.mode === TIMER_MODE) this._armAfter(plan, at)
-          else {
+          if (plan.mode === TIMER_MODE) {
+            this._armAfter(plan, at)
+          } else if (this._isStill(candidate)) {
+            // The playlist just landed on a still. It emits no ENDED, so the
+            // dwell is the only thing that keeps the rotation moving.
+            this._armDwell(plan, at)
+          } else {
             this._cancelTimer()
             this.nextDueAt = null
             this.timerKey = null
+            this.dwellKey = null
           }
           this._emit({
             event: 'applied',
@@ -438,6 +515,7 @@ class PlaylistScheduler {
     this._cancelTimer()
     this.nextDueAt = null
     this.timerKey = null
+    this.dwellKey = null
     this._log('playlist complete (one run)', plan.playlistName ?? plan.playlistId ?? '', `reason=${reason}`)
     this._emit({
       event: 'stopped',
