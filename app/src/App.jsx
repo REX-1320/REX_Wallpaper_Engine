@@ -5,6 +5,7 @@ import ResizeHandle from './components/ResizeHandle'
 import WallpaperGallery from './wallpapers/WallpaperGallery'
 import WallpaperInspector from './wallpapers/inspector/Inspector'
 import SettingsPage from './settings/SettingsPage'
+import AboutPage from './about/AboutPage'
 import { Toaster } from './components/ui/sonner'
 import { initLayoutState, setLayoutState, useLayoutState } from './state/layout'
 import { initLastAppliedState, initPlaylistState } from './wallpapers/store'
@@ -129,6 +130,11 @@ function App() {
         {tab === 'Settings' ? (
           <div className="tab-panel plain">
             <SettingsPage />
+          </div>
+        ) : null}
+        {tab === 'About' ? (
+          <div className="tab-panel plain">
+            <AboutPage />
           </div>
         ) : null}
       </motion.section>
