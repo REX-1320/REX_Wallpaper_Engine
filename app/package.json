@@ -69,7 +69,7 @@
       "target": [
         "portable"
       ],
-      "icon": "build/icon.ico"
+      "icon": "assets/paiint-app.ico"
     },
     "portable": {
       "artifactName": "Paiint.exe"

@@ -45,7 +45,7 @@ The script:
 
 1. reads the version from `app/package.json` unless `-Version` is passed,
 2. stages the payload into `out\stage`,
-3. generates the seven tile assets from `app\build\icon.ico`,
+3. generates the seven tile assets from `app\assets\paiint-app.ico`,
 4. expands `AppxManifest.xml` (`__VERSION__`, `__PUBLISHER__`),
 5. validates the XML and every asset/executable it references,
 6. packs with `makeappx`, prints the SHA-256.
@@ -103,7 +103,7 @@ did exactly that.
   Electron 43 supports.
 - `ProcessorArchitecture="x64"` only. An arm64 package needs its own native
   runtime build; do not ship the x64 payload as arm64.
-- The tile assets are generated from `app\build\icon.ico`, so replacing the
+- The tile assets are generated from `app\assets\paiint-app.ico`, so replacing the
   logo and re-running the script updates the package automatically.
 
 ## Troubleshooting

@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   Stages the electron-builder output (app\dist-exe\win-unpacked), generates the
-  tile assets from app\build\icon.ico, expands AppxManifest.xml, and packs the
+  tile assets from app\assets\paiint-app.ico, expands AppxManifest.xml, and packs the
   result with makeappx.exe.
 
   No certificate is needed for Store submission: Microsoft signs the package.
@@ -162,7 +162,7 @@ Copy-Item -Path (Join-Path $PayloadDir '*') -Destination $stage -Recurse -Force
 
 # ─── Tile assets ─────────────────────────────────────────────────────────────
 Add-Type -AssemblyName System.Drawing
-$iconPath = Join-Path $repoRoot 'app\build\icon.ico'
+$iconPath = Join-Path $repoRoot 'app\assets\paiint-app.ico'
 if (-not (Test-Path $iconPath)) { throw "Icon not found: '$iconPath'." }
 
 # The shipped .ico is PNG-compressed (see app\scripts\make-tray-icon.ps1), and

@@ -89,17 +89,11 @@
 }
 
 .settings-about-mark {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   flex: none;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--gold-bright);
-  background: var(--gold-subtle);
-  border: 1px solid var(--gold-border);
+  object-fit: contain;
+  /* The mark is transparent artwork: no tile, border or glow behind it. */
 }
 
 .settings-about-id {

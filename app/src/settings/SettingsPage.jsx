@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import PropertySection from '@/components/properties/PropertySection'
+import paiintMark from '../../assets/paiint-mark.png'
 import PropertyGroup from '@/components/properties/PropertyGroup'
 import PropertyRow from '@/components/properties/PropertyRow'
 import PropertyToggle from '@/components/properties/PropertyToggle'
@@ -183,9 +184,12 @@ function About({ version }) {
   return (
     <div className="settings-about">
       <div className="settings-about-head">
-        <div className="settings-about-mark" aria-hidden="true">
-          P
-        </div>
+        <img
+          className="settings-about-mark"
+          src={paiintMark}
+          alt=""
+          aria-hidden="true"
+        />
         <div className="settings-about-id">
           <span className="settings-about-name">Paiint</span>
           <span className="settings-about-tagline">Live wallpaper engine for Windows</span>
