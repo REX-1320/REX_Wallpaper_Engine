@@ -73,3 +73,104 @@
   overflow-wrap: anywhere;
   text-align: right;
 }
+
+/* About: identity block, privacy note and the legal-document viewer. */
+.settings-about {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 1px;
+}
+
+.settings-about-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-about-mark {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--gold-bright);
+  background: var(--gold-subtle);
+  border: 1px solid var(--gold-border);
+}
+
+.settings-about-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-about-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-about-tagline {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.settings-about-version {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--gold-border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--gold);
+}
+
+.settings-about-blurb,
+.settings-about-note,
+.settings-about-error {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.settings-about-note {
+  color: var(--text-tertiary);
+}
+
+.settings-about-error {
+  color: var(--gold-deep);
+}
+
+.settings-about-legal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.settings-legal-dialog {
+  max-width: 720px;
+}
+
+.settings-legal-text {
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--stroke-subtle);
+  background: var(--fill-hover);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

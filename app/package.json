@@ -26,6 +26,10 @@
     ],
     "extraResources": [
       {
+        "from": "../docs/legal",
+        "to": "legal"
+      },
+      {
         "from": "../rex-core/build/Release/paiint-wallpaper-runtime.exe",
         "to": "bin/paiint-wallpaper-runtime.exe"
       },

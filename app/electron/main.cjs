@@ -14,6 +14,7 @@ const { probeMediaFile } = require('./mediaInfo.cjs')
 const { PlaylistScheduler } = require('./playlist-scheduler.cjs')
 const { migrateUserData } = require('./userdata-migrate.cjs')
 const { cleanupLegacyLoginItem } = require('./login-item-migrate.cjs')
+const { legalDocPath } = require('./legal-docs.cjs')
 
 // ─── Identity ────────────────────────────────────────────────────────────────
 // Pin userData BEFORE any consumer (including the thumbnail worker below).
@@ -1097,6 +1098,26 @@ app.whenReady().then(() => {
       return { ok: true }
     } catch (err) {
       logLine('app:open-path ERROR', err.message)
+      return { ok: false, reason: err.message }
+    }
+  })
+
+  // Legal documents ship as resources/legal/*.md (extraResources) so the
+  // About page can show the exact text that came with the build; in dev they
+  // are read from the repo's docs/legal. Allowlisted by key — the renderer
+  // can never ask for an arbitrary file.
+  ipcMain.handle('app:read-legal', async (_event, { target } = {}) => {
+    const doc = legalDocPath(target, {
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      electronDir: __dirname,
+    })
+    if (!doc) return { ok: false, reason: 'unknown-target' }
+    try {
+      const text = await fs.promises.readFile(doc.path, 'utf8')
+      return { ok: true, title: doc.title, text }
+    } catch (err) {
+      logLine('app:read-legal ERROR', target, err.message)
       return { ok: false, reason: err.message }
     }
   })

@@ -2,6 +2,13 @@ import { useEffect, useState } from 'react'
 import { Monitor, Settings2, Info, FolderOpen, Rocket, Palette, Eraser } from 'lucide-react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import PropertySection from '@/components/properties/PropertySection'
 import PropertyGroup from '@/components/properties/PropertyGroup'
 import PropertyRow from '@/components/properties/PropertyRow'
@@ -156,6 +163,96 @@ function Files() {
   )
 }
 
+function About({ version }) {
+  const [doc, setDoc] = useState(null)
+  const [error, setError] = useState('')
+
+  // The text is read from the files that shipped with this build (see
+  // app:read-legal in main.cjs) — the page cannot drift from the package.
+  const openDoc = async (target) => {
+    setError('')
+    try {
+      const res = await window.paiintDesktop?.readLegal?.(target)
+      if (res?.ok) setDoc({ title: res.title, text: res.text })
+      else setError('That document could not be opened.')
+    } catch {
+      setError('That document could not be opened.')
+    }
+  }
+
+  return (
+    <div className="settings-about">
+      <div className="settings-about-head">
+        <div className="settings-about-mark" aria-hidden="true">
+          P
+        </div>
+        <div className="settings-about-id">
+          <span className="settings-about-name">Paiint</span>
+          <span className="settings-about-tagline">Live wallpaper engine for Windows</span>
+        </div>
+        <span className="settings-about-version">{version ? `v${version}` : '—'}</span>
+      </div>
+
+      <p className="settings-about-blurb">
+        Video, HDR and still wallpapers rendered on the desktop itself, behind your
+        icons. When you quit, the last frame stays on the desktop as a still.
+      </p>
+
+      <PropertyGroup>
+        <PropertyRow label="Publisher">
+          <span>MoiNeX</span>
+        </PropertyRow>
+        <PropertyRow label="Engine">
+          <span className="pl-mono">paiint-wallpaper-runtime</span>
+        </PropertyRow>
+        <PropertyRow label="Licence">
+          <span>Proprietary</span>
+        </PropertyRow>
+        <PropertyRow label="Copyright">
+          <span>© 2026 MoiNeX</span>
+        </PropertyRow>
+      </PropertyGroup>
+
+      <p className="settings-about-note">
+        <strong>Privacy:</strong> Paiint collects nothing and makes no network
+        requests. Wallpapers, playlists and settings stay on this PC.
+      </p>
+      <p className="settings-about-note">
+        Bundles FFmpeg (LGPL-2.1) and other open-source components. Every licence
+        text — including all bundled JavaScript packages — ships with the app.
+      </p>
+
+      <div className="settings-about-legal">
+        <Button variant="outline" size="sm" onClick={() => openDoc('eula')}>
+          Licence agreement
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => openDoc('privacy')}>
+          Privacy policy
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => openDoc('notices')}>
+          Third-party notices
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => openDoc('jsLicenses')}>
+          JavaScript licences
+        </Button>
+      </div>
+      {error ? <p className="settings-about-error">{error}</p> : null}
+
+      <Dialog open={!!doc} onOpenChange={(open) => { if (!open) setDoc(null) }}>
+        <DialogContent className="settings-legal-dialog">
+          <DialogHeader>
+            <DialogTitle>{doc?.title ?? ''}</DialogTitle>
+            <DialogDescription>
+              The exact text that shipped with this build.
+            </DialogDescription>
+          </DialogHeader>
+          <pre className="settings-legal-text">{doc?.text ?? ''}</pre>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 export default function SettingsPage() {
   const [rememberBounds, setRememberBounds] = useAppState('ui.rememberWindowBounds', true)
   const [closeToTray, setCloseToTray] = useAppState('tray.closeToTray', true)
@@ -293,14 +390,7 @@ export default function SettingsPage() {
           </PropertySection>
 
           <PropertySection title="About" icon={<Info size={15} />} defaultOpen={false}>
-            <PropertyGroup>
-              <PropertyRow label="Paiint">
-                <span className="pl-mono">{version || '—'}</span>
-              </PropertyRow>
-              <PropertyRow label="Engine">
-                <span className="pl-mono">paiint-wallpaper-runtime</span>
-              </PropertyRow>
-            </PropertyGroup>
+            <About version={version} />
           </PropertySection>
         </div>
       </div>

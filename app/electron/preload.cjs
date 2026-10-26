@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld('paiintDesktop', {
   loginItem: (enabled) => ipcRenderer.invoke('app:login-item', { enabled }),
   getPaths: () => ipcRenderer.invoke('app:paths'),
   openPath: (target) => ipcRenderer.invoke('app:open-path', { target }),
+  readLegal: (target) => ipcRenderer.invoke('app:read-legal', { target }),
   clearPosters: () => ipcRenderer.invoke('app:clear-posters'),
 
   // Persisted gallery library (WallpaperLibrary in main). add() is the

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paiint MSIX manifest template.
+
+  build-msix.ps1 replaces the __TOKENS__ below and writes the result into the
+  staged package. Do not edit the generated copy.
+
+  Publisher MUST match the "Package/Identity/Publisher" value shown in Partner
+  Center for this app (for example CN=1A2B3C4D-....). The default CN=MoiNeX is
+  only good for local sideload tests signed with a self-signed certificate.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="MoiNeX.Paiint"
+    Publisher="__PUBLISHER__"
+    Version="__VERSION__"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Paiint</DisplayName>
+    <PublisherDisplayName>MoiNeX</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Live wallpaper engine for Windows: video, HDR and still wallpapers rendered on the desktop.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.19041.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application
+      Id="Paiint"
+      Executable="Paiint.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Paiint"
+        Description="Live wallpaper engine for Windows."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png"
+          Square71x71Logo="Assets\SmallTile.png"
+          ShortName="Paiint" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Desktop-bridge app: required to run the Electron shell and the native
+         wallpaper runtime as a normal Win32 process with full trust. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

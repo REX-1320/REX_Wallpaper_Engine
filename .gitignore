@@ -41,3 +41,6 @@ Thumbs.db
 .DS_Store
 
 .opencode/ralph-loop.local.md
+
+# MSIX build output (packaging/msix/build-msix.ps1)
+packaging/msix/out/
