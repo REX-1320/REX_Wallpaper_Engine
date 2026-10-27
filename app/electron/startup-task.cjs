@@ -4,7 +4,8 @@
 // redirected into the package hive, so Windows never sees it. The manifest
 // declares a windows.startupTask instead, and only a process with package
 // identity can enable/disable it. `paiint-startup.exe` is that process (and
-// also the logon stub, because the extension cannot pass arguments).
+// also the logon stub, because the documented startupTask form takes no
+// arguments).
 //
 // The helper prints one state token; execFileSync throws on a non-zero exit,
 // so the token is read from err.stdout in that case.

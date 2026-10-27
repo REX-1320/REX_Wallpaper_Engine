@@ -74,7 +74,7 @@ let mainWindow = null
 let isQuitting = false
 let trayManager = null
 // Login launches: the portable Run key passes --background. The MSIX startup
-// task cannot pass arguments, so its stub passes --startup-task instead;
+// task launches with no arguments, so its stub passes --startup-task instead;
 // whether the window opens then depends on startup.startMinimized, which is
 // only readable after app-state loads.
 const startupTaskLaunch = process.argv.includes('--startup-task')
@@ -1426,8 +1426,8 @@ app.whenReady().then(() => {
 
   // Normal launch opens the UI; a login launch (--background from the Run key,
   // --startup-task from the MSIX stub) starts the tray + native services only
-  // and defers the window to the first tray open. The startup task cannot pass
-  // --background, so it honours the live "start minimised" preference here.
+  // and defers the window to the first tray open. The startup task launches
+  // without --background, so it honours the live "start minimised" preference.
   const startInBackground =
     process.argv.includes('--background') ||
     (startupTaskLaunch && appState.get('startup.startMinimized') !== false)

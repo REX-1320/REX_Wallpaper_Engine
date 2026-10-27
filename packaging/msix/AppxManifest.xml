@@ -61,12 +61,13 @@
       <Extensions>
         <!-- Launch at login. A packaged process cannot write the Run key that
              Windows honours, so the manifest declares a startup task instead.
-             The extension cannot pass arguments, hence the tiny stub: it
-             starts Paiint.exe with the startup-task flag (and is also the only
-             process with the package identity needed to enable/disable the
-             task from Settings). Enabled="false": the app requests it on first
-             run, the same default as the portable build. A user who turns it
-             off in Task Manager cannot be re-enabled programmatically. -->
+             The documented startupTask form launches its executable with no
+             arguments, hence the tiny stub: it starts Paiint.exe with the
+             startup-task flag (and is also the only process with the package
+             identity needed to enable/disable the task from Settings).
+             Enabled="false": the app requests it on first run, the same default
+             as the portable build. A user who turns it off in Task Manager
+             cannot be re-enabled programmatically. -->
         <desktop:Extension
           Category="windows.startupTask"
           Executable="resources\bin\paiint-startup.exe"

@@ -1,10 +1,12 @@
 // ─── Paiint startup stub ───────────────────────────────────────────────────
 //
-// Windows' `windows.startupTask` extension cannot pass command-line arguments
-// to the executable it launches. Paiint needs `--startup-task` so the main
-// process knows this is a logon launch (and can honour "start minimised").
-// This tiny packaged helper exists only for that: with no arguments it starts
-// Paiint.exe with the flag; with --status/--enable/--disable it drives the
+// The documented `windows.startupTask` form launches its executable with no
+// arguments (the schema's `uap10:Parameters` attribute exists, but is not
+// documented for startupTask and is used by only a couple of apps, so it is
+// not something to bet the logon path on). Paiint needs `--startup-task` so the
+// main process knows this is a logon launch and can honour "start minimised".
+// This tiny packaged helper exists for that: with no arguments it starts
+// Paiint.exe with the flag. With --status/--enable/--disable it drives the
 // package's Windows.ApplicationModel.StartupTask entry, because the Run key
 // Electron writes from a packaged app is virtualized and never seen by the OS.
 //
@@ -122,6 +124,9 @@ const char* StateName(winrt::Windows::ApplicationModel::StartupTaskState state) 
 
 int StartupTaskCommand(const std::wstring& verb) {
     if (!IsPackaged()) {
+        // Diagnostic for the packaged smoke test: if a child spawned from the
+        // app ever lands here, it did not inherit package identity.
+        LogLine(L"startup-task: unpackaged (no package identity)");
         WriteOut("unpackaged\n");
         return 2;
     }
@@ -141,8 +146,12 @@ int StartupTaskCommand(const std::wstring& verb) {
             const std::string line =
                 std::string(StateName(state)) + "\n";
             WriteOut(line.c_str());
+            // Policy can enable the task even when the request was denied;
+            // either state means the logon launch will happen.
             if (state == winrt::Windows::ApplicationModel::StartupTaskState::
-                             Enabled) {
+                             Enabled ||
+                state == winrt::Windows::ApplicationModel::StartupTaskState::
+                             EnabledByPolicy) {
                 LogLine(L"enable: enabled");
                 return 0;
             }
@@ -151,7 +160,19 @@ int StartupTaskCommand(const std::wstring& verb) {
         }
         if (verb == L"--disable") {
             task.Disable();
-            WriteOut("disabled\n");
+            // Disable() cannot win against policy, so report what the task
+            // actually is instead of claiming success unconditionally.
+            const auto state = task.State();
+            const std::string line =
+                std::string(StateName(state)) + "\n";
+            WriteOut(line.c_str());
+            if (state == winrt::Windows::ApplicationModel::StartupTaskState::
+                             Enabled ||
+                state == winrt::Windows::ApplicationModel::StartupTaskState::
+                             EnabledByPolicy) {
+                LogLine(L"disable: still enabled (policy owns the task)");
+                return 1;
+            }
             LogLine(L"disable: ok");
             return 0;
         }
