@@ -323,7 +323,7 @@ class Supervisor {
         this.healthy = true
         this.deps.setRuntimeAvailable?.(true)
         this.deps.logLine('runtime:recovery ok (attempt', attempt + ')')
-        this._notify({ event: 'recovery-ok', data: { attempt } })
+        this._notify({ event: 'recovery-ok', data: { attempt, path: curPath, kind: cur?.kind ?? null } })
       } else {
         this.deps.logLine('runtime:recovery reapply failed (attempt', attempt + ')')
         this.deps.setRuntimeAvailable?.(false)

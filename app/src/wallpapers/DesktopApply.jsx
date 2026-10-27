@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { seedWallpapers, useWallpaperStore, getSnapshot } from './store'
+import { adoptAppliedPath, seedWallpapers, useWallpaperStore, getSnapshot } from './store'
 import { applyWallpaperToDesktop, updateDesktopSettings } from './desktop'
 import { useWallpaperRuntimeStatus } from './runtimeEvents'
 import { playlistEngine } from './playlist/engine'
@@ -34,6 +34,16 @@ export default function DesktopApply() {
     } else if (runtimeStatus?.event) {
       console.info('[runtime]', runtimeStatus.event, runtimeStatus.data)
     }
+  }, [runtimeStatus])
+
+  // A verified crash recovery replayed the file main already had. Adopt it as
+  // "on desktop" WITHOUT a second LOAD (externallyApplied makes DesktopApply
+  // skip the apply) so the UI and the runtime agree again.
+  useEffect(() => {
+    if (runtimeStatus?.event !== 'recovery-ok') return
+    const path = runtimeStatus.data?.path
+    if (!path) return
+    adoptAppliedPath(path, { keepSelection: true }).catch(() => {})
   }, [runtimeStatus])
 
   // Only an explicitly applied wallpaper drives the desktop; selecting a

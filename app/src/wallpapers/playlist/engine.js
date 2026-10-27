@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import { detectFileType } from '../registry'
 import { adoptAppliedPath, applyWallpaper, arePlaylistsHydrated, createPlaylist, deletePlaylist as deleteStorePlaylist, ensureWallpaperForPath, getSnapshot, renamePlaylist as renameStorePlaylist, restorePlaylists, updateWallpaperProperty, duplicatePlaylist as duplicateStorePlaylist } from '../store'
 import { ENGINE_MODE_BY_MODE } from '../desktop'
+import { appliedWallpaper, memberKey, resolveDesktopPlaylist, wallpaperPath } from './scope'
 
 export const CHANGE_MODES = [
   'Manual',
@@ -388,75 +389,20 @@ function poolWallpapers() {
   return snapshot.wallpapers ?? []
 }
 
-// Membership is keyed by the file's absolute path (case-insensitive on
-// Windows) — the store's own ids are reassigned on every restart.
-function memberKey(value) {
-  if (!value) return null
-  return String(value).replace(/\//g, '\\').toLowerCase()
-}
-
-// The path of a wallpaper — the identity the playlist membership, the
-// gallery library and the runtime all speak.
-function wallpaperPath(w) {
-  return w?.filePath ?? w?.info?.filePath ?? w?.info?.source ?? null
-}
-
-// The wallpaper that is ON THE DESKTOP right now.
-//
-// The store knows it as appliedId - but at boot the store has not loaded the
-// file yet (the gallery restores its tiles lazily, and main re-applied the
-// last wallpaper before the renderer existed), so the path the runtime
-// reports as "last applied" is the fallback.
-function appliedWallpaper(snapshot) {
-  return snapshot.wallpapers.find((w) => w.id === snapshot.appliedId) ?? null
-}
-
 // The playlist that governs the wallpaper on the desktop.
 //
-// The engine reads the playlist by NAME (wallpaper.playlist.currentPlaylist),
-// which the user sets explicitly ("Set as active playlist"). That name is a
-// runtime property: it is gone after a restart, and the wallpaper the engine
-// itself switched to never had it. The playlist that HOLDS the file is
-// persisted (the membership is a list of paths), so it is the fallback that
-// keeps the rotation alive across restarts and across changes.
-//
-// 'None' is the value every wallpaper starts with, so it cannot by itself
-// mean "do not rotate": the membership fallback below is what keeps the
-// rotation alive after a restart (see above). Only a 'None' the user picked
-// in this session is an explicit opt-out - the store marks that choice with
-// playlist.explicit (updateWallpaperProperty), and it is runtime-only like
-// the name itself.
-const NO_PLAYLIST = { id: null, name: 'None', members: [] }
-
-function playlistFor(snapshot, wallpaper) {
-  if (!wallpaper) return null
-  const playlists = snapshot.playlists ?? []
-  const name = wallpaper.playlist?.currentPlaylist
-  if (name === 'None' && wallpaper.playlist?.explicit) return playlists.find((p) => p.name === 'None') ?? NO_PLAYLIST
-  if (name && name !== 'None') {
-    const byName = playlists.find((p) => p.name === name)
-    if (byName) return byName
-  }
-  const key = memberKey(wallpaperPath(wallpaper))
-  if (!key) return null
-  return playlists.find((p) => (p.members ?? []).some((m) => memberKey(m) === key)) ?? null
+// The store's applied record is authoritative; the path the runtime reported
+// at boot is only a fallback until that record exists. A gallery file that is
+// not a playlist member therefore stops the rotation instead of inheriting
+// the previous playlist's rules (see scope.js).
+function activePlaylist() {
+  return resolveDesktopPlaylist(getSnapshot(), state.lastAppliedPath)
 }
 
 // The wallpaper the engine rotates FROM: the one on the desktop, else the
 // selected one (a preview).
 function currentWallpaper(snapshot) {
   return appliedWallpaper(snapshot) ?? snapshot.wallpapers.find((w) => w.id === snapshot.selectedId) ?? null
-}
-
-function activePlaylist() {
-  const snapshot = getSnapshot()
-  const byWallpaper = playlistFor(snapshot, currentWallpaper(snapshot))
-  if (byWallpaper) return byWallpaper
-  // The wallpaper on the desktop is not in the store yet (boot): the
-  // playlist that holds its PATH still governs it.
-  const key = memberKey(state.lastAppliedPath)
-  if (!key) return null
-  return (snapshot.playlists ?? []).find((p) => (p.members ?? []).some((m) => memberKey(m) === key)) ?? null
 }
 
 function activePlaylistId() {
@@ -809,8 +755,9 @@ function buildRotationPlan() {
   const currentPath = wallpaperPath(current) ?? state.lastAppliedPath
   if (!currentPath) return undefined
   if (!arePlaylistsHydrated()) return undefined
-  const active = playlistFor(snapshot, current) ?? activePlaylist()
-  if (!active) return null
+  const active = resolveDesktopPlaylist(snapshot, state.lastAppliedPath)
+  // NO_PLAYLIST (an explicit 'None' pick) is a stop, not a playlist.
+  if (!active?.id) return null
   // Materialise this playlist's members (they are what the queue rotates
   // through). Preparation is keyed by the member list, so this is a no-op
   // once the store has them.
@@ -1017,7 +964,7 @@ function fireChange(settings, _reason) {
   // selection is not what is playing), and it is governed by the playlist
   // that holds it.
   const current = currentWallpaper(snapshot)
-  const active = playlistFor(snapshot, current) ?? activePlaylist()
+  const active = resolveDesktopPlaylist(snapshot, state.lastAppliedPath)
   const activeName = active?.name ?? null
   const pool = filterPool(settings, poolWallpapers(), active?.members)
   if (activeName && activeName !== 'None' && active) {
@@ -1408,6 +1355,46 @@ export const playlistEngine = {
     // Do NOT clear main's plan here: this stop is usually the window being
     // destroyed, and the rotation is supposed to continue in the tray.
     flushPersist()
+  },
+  // Stop the rotation that is running on the desktop and leave the last video
+  // frame behind as a still. The applied file keeps its identity (it is still
+  // the wallpaper the user chose) but it is explicitly opted out of rotation,
+  // so no Timer or scene-end rule can fire again this session.
+  async stopRotation() {
+    const snapshot = getSnapshot()
+    const applied = appliedWallpaper(snapshot)
+    const active = resolveDesktopPlaylist(snapshot, state.lastAppliedPath)
+    if (active?.id) {
+      const settings = getSettings(active.id)
+      const timerState = settings?.modeSettings?.timer
+      if (timerState) {
+        timerState.running = false
+        timerState.accumulatedMs = 0
+        timerState.pausedAt = null
+        timerState.startedAt = null
+      }
+    }
+    if (applied) updateWallpaperProperty(applied.id, ['playlist', 'currentPlaylist'], 'None')
+    // The still on the desktop is no longer a playlist member as far as the
+    // engine is concerned: drop the boot path so a reload before the store
+    // re-adopts cannot resurrect the old rotation from it.
+    state.lastAppliedPath = null
+    // Clear main's plan BEFORE the runtime tears down, so a Timer that is due
+    // during the snapshot capture cannot apply another file over the still.
+    lastPlanSignature = planSignature(null)
+    try {
+      await window.paiintDesktop?.syncPlaylistPlan?.(null)
+    } catch {
+      // Main did not clear it; let the next plan tick retry instead of
+      // treating the failed send as delivered.
+      lastPlanSignature = null
+    }
+    try {
+      await window.paiintDesktop?.stopWallpaper?.()
+    } catch {
+      // No runtime running: the desktop is already still.
+    }
+    bump()
   },
   getSettings,
   // The playlist the engine evaluates right now: the one named on the

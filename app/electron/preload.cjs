@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('paiintDesktop', {
   // Transport: pause/resume the applied wallpaper (tray + Inspector).
   pauseWallpaper: () => ipcRenderer.invoke('wallpaper:pause'),
   resumeWallpaper: () => ipcRenderer.invoke('wallpaper:resume'),
+  // Playlist "stop": end the rotation and leave the last video frame on the
+  // desktop as a still (the runtime captures + applies it before it exits).
+  stopWallpaper: () => ipcRenderer.invoke('wallpaper:stop'),
   // Scene main re-applied at boot (last-wallpaper.json); the inspector adopts
   // it as "on desktop" without reloading.
   getLastApplied: () => ipcRenderer.invoke('wallpaper:last-applied'),

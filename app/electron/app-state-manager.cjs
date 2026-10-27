@@ -36,6 +36,7 @@ class AppStateManager {
       recent: { wallpapers: [], wallpaperIndex: -1 },
       theme: { themeId: 'midnight-glass', colorTokens: {} },
       tray: { minimizeToTray: true, closeToTray: true },
+      engine: { maxFps: 0, hardwareAcceleration: true, snapshotOnQuit: true },
       wallpaperSettings: {}, // per-wallpaper settings keyed by normalized path (Phase 2)
       wallpaper: { assignments: {}, playback: { position: 0, volume: 1.0, paused: false } },
       playlistEngine: { playlists: [], rotation: null }, // UI playlists + the main-process rotation plan
@@ -173,6 +174,7 @@ class AppStateManager {
       recent: { ...def.recent, ...(saved.recent || {}) },
       theme: { ...def.theme, ...(saved.theme || {}) },
       tray: { ...def.tray, ...(saved.tray || {}) },
+      engine: { ...def.engine, ...(saved.engine || {}) },
       wallpaperSettings: { ...(saved.wallpaperSettings || {}) },
       wallpaper: {
         ...def.wallpaper,

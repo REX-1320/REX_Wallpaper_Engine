@@ -163,6 +163,7 @@ export default function SettingsPage() {
   const [restoreWallpaper, setRestoreWallpaper] = useAppState('startup.restoreWallpaper', true)
   const [maxFps, setMaxFps] = useAppState('engine.maxFps', 0)
   const [hwDecode, setHwDecode] = useAppState('engine.hardwareAcceleration', true)
+  const [snapshotOnQuit, setSnapshotOnQuit] = useAppState('engine.snapshotOnQuit', true)
   const [defaults, setDefaults] = useState(() => sanitizeDefaults(DEFAULT_DEFAULTS))
   const [launchAtLogin, setLaunchAtLogin] = useState(false)
 
@@ -243,6 +244,12 @@ export default function SettingsPage() {
                 description="Off uses the CPU. Applies when the wallpaper engine starts"
                 checked={hwDecode !== false}
                 onChange={(v) => setHwDecode(v)}
+              />
+              <PropertyToggle
+                label="Leave the last frame on exit"
+                description="When Paiint quits, save the final frame of a playing video as a still wallpaper so the desktop keeps a picture"
+                checked={snapshotOnQuit !== false}
+                onChange={(v) => setSnapshotOnQuit(v)}
               />
             </PropertyGroup>
             <PropertyGroup>

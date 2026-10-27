@@ -171,6 +171,17 @@
   opacity: 1;
 }
 
+/* "stop": kill the running rotation and leave the last video frame as a
+   still. Red because it ends what "applied" started. */
+.dock-config-stop {
+  color: var(--danger);
+}
+
+.dock-config-stop:hover:not(:disabled) {
+  background: var(--danger-muted);
+  color: var(--danger);
+}
+
 .dock-controls {
   margin-left: auto;
   display: flex;

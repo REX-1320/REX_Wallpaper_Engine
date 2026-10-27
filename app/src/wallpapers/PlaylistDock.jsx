@@ -230,6 +230,20 @@ export default function PlaylistDock({
               {isApplied ? 'applied' : 'apply'}
             </button>
 
+            {isApplied ? (
+              <button
+                type="button"
+                className="dock-config dock-config-stop"
+                aria-label="Stop playlist and keep the last frame"
+                title="Stop the rotation and leave the last frame on the desktop"
+                onClick={() => {
+                  playlistEngine.stopRotation()
+                }}
+              >
+                stop
+              </button>
+            ) : null}
+
             <div className="dock-controls">
               <button
                 type="button"

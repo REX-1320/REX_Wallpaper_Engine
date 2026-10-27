@@ -12,6 +12,7 @@ const { resolveWindowBounds } = require('./window-bounds.cjs')
 const { generatePoster } = require('./poster-worker.cjs')
 const { probeMediaFile } = require('./mediaInfo.cjs')
 const { PlaylistScheduler } = require('./playlist-scheduler.cjs')
+const { desktopLayerReady, mergeRecoveryEntry } = require('./recovery.cjs')
 const { migrateUserData } = require('./userdata-migrate.cjs')
 const { cleanupLegacyLoginItem } = require('./login-item-migrate.cjs')
 const { legalDocPath } = require('./legal-docs.cjs')
@@ -166,7 +167,15 @@ function getWallpaperCliPath() {
     ? path.join(process.resourcesPath, 'bin', 'paiint-wallpaper-runtime.exe')
     : null
   if (packaged && fs.existsSync(packaged)) return packaged
-  const devPath = path.join(__dirname, '..', '..', 'rex-core', '.build', 'Release', 'paiint-wallpaper-runtime.exe')
+  // Dev: the canonical CMake tree is rex-core/build (AGENTS.md build command).
+  // .build is a legacy tree; it held an older runtime without the quit
+  // snapshot, so a source launch silently tested yesterday's engine. Prefer
+  // build, fall back to .build only when it is the one that exists.
+  const devCandidates = [
+    path.join(__dirname, '..', '..', 'rex-core', 'build', 'Release', 'paiint-wallpaper-runtime.exe'),
+    path.join(__dirname, '..', '..', 'rex-core', '.build', 'Release', 'paiint-wallpaper-runtime.exe'),
+  ]
+  const devPath = devCandidates.find((candidate) => fs.existsSync(candidate)) ?? devCandidates[0]
   if (fs.existsSync(devPath)) return devPath
   logLine('wallpaper:runtime binary not found at', packaged || devPath)
   return packaged || devPath
@@ -239,43 +248,67 @@ function setRuntimeAvailable(available) {
   trayManager?.setRuntimeAvailable(available)
 }
 
-async function reapplyLastWallpaper() {
-  if (!lastApplied) return
-  const { kind, params } = lastApplied
+// Merge the gallery library's saved per-file settings (the inspector writes
+// them) over a persisted { kind, params } entry. The two files are written on
+// different debounces, so after a crash either can be newer; the library is
+// the durable per-file record and wins when it has an entry.
+function hydrateStoredEntry(entry) {
+  if (!entry?.params?.path) return entry
   try {
-    // Images are OS-drawn: INIT would build the 4K D3D12 engine for a
-    // wallpaper that never uses it (measured 84 MB private + ~103 MB VRAM).
-    // Only a video needs the engine — the native video LOAD rejects a null
-    // engine, while the image LOAD is explicitly engine-free.
-    if (kind === 'image') {
-      await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
-    } else {
-      const init = engineInitOptions()
-      await runtime.init(init.maxFps, init.hardwareAcceleration)
-      await runtime.send('LOAD', {
-        path: params.path,
-        type: 'video',
-        mode: params.mode ?? 'fill',
-        loop: params.loop ?? true,
-        muted: params.muted ?? true,
-        volume: params.volume ?? 1,
-        speed: params.speed ?? 1,
-      })
-      if (params.audioMode != null) {
-        try {
-          await runtime.send('SET_AUDIO_MODE', { value: params.audioMode })
-        } catch (err) {
-          logLine('runtime:recovery SET_AUDIO_MODE failed', err.message)
-        }
-      }
+    const stored = _galleryLib?.get?.(entry.params.path)
+    return mergeRecoveryEntry(entry, stored?.settings)
+  } catch {
+    return entry
+  }
+}
+
+// The desktop layer is verified, not assumed. The supervisor may only report a
+// successful recovery once the native engine actually owns the scene: images
+// are proven by the LOAD response itself (SetImageWallpaper succeeded), while
+// videos must report a running or paused scene with a decoded duration.
+async function verifyVideoDesktop(timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    try {
+      last = await runtime.send('GET_STATUS', {}, 1500)
+      if (desktopLayerReady(last)) return true
+    } catch (err) {
+      last = err.message
     }
-    capabilities = null
-    // Images have no engine scene: PLAY always failed with "No scene
-    // loaded" and would mark a successful recovery as failed.
-    if (kind !== 'image') {
-      await runtime.send('PLAY', {})
-    }
-    logLine('runtime:recovery reapplied last wallpaper', kind, params.path)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  logLine('runtime: desktop layer not verified', JSON.stringify(last))
+  return false
+}
+
+// Shared by the boot replay and crash recovery. Returns true only when the
+// wallpaper is actually back on the desktop.
+async function replayStoredEntry(entry, source, opts = {}) {
+  if (!entry || (entry.kind !== 'image' && entry.kind !== 'video')) return false
+  const hydrated = hydrateStoredEntry(entry)
+  if (hydrated.kind === 'image') {
+    await applyImageEntry(hydrated.params, source, opts)
+    return true
+  }
+  await applyVideoEntry(hydrated.params, source, opts)
+  return verifyVideoDesktop()
+}
+
+async function reapplyLastWallpaper() {
+  // Only what THIS session applied is recovered. A wallpaper restored at boot
+  // is already in lastApplied (applyImageEntry/applyVideoEntry set it), and a
+  // user who turned restore-at-launch off must not have an old file replayed
+  // by a crash.
+  if (!lastApplied) return true // nothing to do: not a failure
+  try {
+    const ok = await replayStoredEntry(lastApplied, 'runtime:recovery', { resetRecovery: false })
+    if (!ok) return false
+    const path = lastApplied.params?.path ?? null
+    // A plan that points at another file must not keep rotating over the
+    // scene we just verified.
+    if (path && playlistScheduler) playlistScheduler.reconcile(path)
+    logLine('runtime:recovery desktop layer verified', path)
     return true
   } catch (err) {
     logLine('runtime:recovery reapply ERROR', err.message)
@@ -301,6 +334,35 @@ function reclaimIdleRuntime(reason) {
   // replay the wallpaper (replaying would respawn the runtime).
   runtime.stop({ intentional: true })
   capabilities = null
+}
+
+// Where the native runtime writes the quit/stop still. Kept in sync with
+// LastFrameImagePath() in rex-core/src/wallpaper_cli_main.cpp.
+function lastFrameSnapshotPath() {
+  const local = process.env.LOCALAPPDATA
+  return local ? path.join(local, 'Paiint', 'last-frame.png') : null
+}
+
+// Playlist dock "stop": end the rotation and leave the last rendered frame on
+// the desktop as a still. The native SHUTDOWN path captures the frame, hands
+// it to the OS wallpaper API and only then tears WorkerW down, so the desktop
+// never flashes black. `intentional` keeps the supervisor out of recovery.
+function stopWallpaperForSnapshot() {
+  if (playlistScheduler) playlistScheduler.setPlan(null)
+  // Stop is session-scoped: the desktop now holds a still, not a scene the
+  // runtime can replay. Clearing the in-memory record keeps a recreated
+  // window (closed to tray, then reopened) from re-adopting the video and
+  // resuming the rotation; last-wallpaper.json is untouched, so a full app
+  // restart still restores the wallpaper.
+  lastApplied = null
+  if (!runtime.proc) {
+    logLine('wallpaper:stop: no runtime running')
+    return { ok: true, stopped: false, snapshot: lastFrameSnapshotPath() }
+  }
+  runtime.stop({ snapshot: true, intentional: true })
+  capabilities = null
+  logLine('wallpaper:stop: rotation stopped, last frame left on the desktop')
+  return { ok: true, stopped: true, snapshot: lastFrameSnapshotPath() }
 }
 
 // Live updates used to change only the running engine; a crash then
@@ -350,62 +412,17 @@ async function sendIfSupported(cmd, params, applied, skipped) {
 }
 
 // Re-applies a persisted { kind, params } entry (boot re-apply after login).
-// Same LOAD/PLAY sequence as the IPC handlers below; returns true on success.
+// Same LOAD/PLAY sequence as a user apply, hydrated from the library and
+// verified against the desktop layer before it counts as restored.
 async function applyStoredWallpaper(entry) {
   if (!entry || (entry.kind !== 'image' && entry.kind !== 'video')) return false
-  const { kind, params } = entry
   try {
-    if (kind === 'image') {
-      // No INIT: this is the OS wallpaper path, not an engine scene (see the
-      // native LOAD branch). The image is applied either way; skipping INIT
-      // keeps an image-only runtime at ~10 MB private and 0 MB VRAM instead
-      // of building a 4K D3D12 engine for it.
-      await runtime.send('LOAD', { path: params.path, type: 'image', mode: params.mode ?? 'fill' })
-    } else {
-      const init = engineInitOptions()
-      await runtime.init(init.maxFps, init.hardwareAcceleration)
-      await runtime.send('LOAD', {
-        path: params.path,
-        type: 'video',
-        mode: params.mode ?? 'fill',
-        loop: params.loop ?? true,
-        muted: params.muted ?? true,
-        volume: params.volume ?? 1,
-        speed: params.speed ?? 1,
-      })
-      if (params.audioMode != null) {
-        try {
-          await runtime.send('SET_AUDIO_MODE', { value: params.audioMode })
-        } catch (err) {
-          logLine('startup: re-apply SET_AUDIO_MODE failed', err.message)
-        }
-      }
-      // Colour adjustments are not part of LOAD either — the boot replay has
-      // to restore them or the wallpaper comes back at the engine's default.
-      const restored = []
-      for (const [cmd, value] of [['SET_BRIGHTNESS', params.brightness], ['SET_CONTRAST', params.contrast], ['SET_SATURATION', params.saturation]]) {
-        if (value == null) continue
-        try {
-          await runtime.send(cmd, { value })
-          restored.push(`${cmd}=${value}`)
-        } catch (err) {
-          logLine(`startup: re-apply ${cmd} failed`, err.message)
-        }
-      }
-      if (restored.length > 0) logLine('startup: re-applied', restored.join(' '))
+    const ok = await replayStoredEntry(entry, 'startup', { resetRecovery: true })
+    if (!ok) {
+      logLine('startup: re-apply desktop layer not verified')
+      return false
     }
-    capabilities = null // adapter changed — refresh on next query
-    // Images are applied through the OS wallpaper API (see the LOAD branch),
-    // not an engine scene. PLAY would always fail with "No scene loaded" and
-    // incorrectly mark a successful boot restore as failed.
-    if (kind !== 'image') {
-      await runtime.send('PLAY', {})
-    }
-    lastApplied = entry
-    startup.saveLastApplied(app.getPath('userData'), lastApplied)
-    if (supervisor) supervisor.resetRecovery()
-    setRuntimeAvailable(true)
-    logLine('startup: re-applied last wallpaper', kind, params.path)
+    logLine('startup: re-applied last wallpaper', entry.kind, entry.params.path)
     return true
   } catch (err) {
     logLine('startup: re-apply ERROR', err.message)
@@ -417,7 +434,7 @@ async function applyStoredWallpaper(entry) {
 // handler and the main-process playlist scheduler so a rotation uses exactly
 // the same LOAD sequence (and the same lastApplied/persistence bookkeeping) as
 // a user apply.
-async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set') {
+async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set', opts = {}) {
   if (typeof filePath !== 'string' || !IMAGE_EXT.test(filePath)) {
     throw new Error('unsupported file type')
   }
@@ -429,7 +446,7 @@ async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set
   capabilities = null // adapter changed - refresh on next query
   lastApplied = { kind: 'image', params: { path: filePath, mode: engineMode } }
   startup.saveLastApplied(app.getPath('userData'), lastApplied)
-  if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
+  if (opts.resetRecovery !== false && supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
   setRuntimeAvailable(true)
   // The image is on the desktop now: free the engine instead of leaving it
   // warm for a video that may never come.
@@ -441,7 +458,7 @@ async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set
 // Apply one video scene. Same contract as applyImageEntry; mirrors the
 // wallpaper:video handler (audio layout and colour are live SET_* commands,
 // not part of LOAD).
-async function applyVideoEntry(params, source = 'wallpaper:video') {
+async function applyVideoEntry(params, source = 'wallpaper:video', opts = {}) {
   const { path: filePath, mode, fps, loop, muted, volume, speed, audioMode, brightness, contrast, saturation } = params
   if (typeof filePath !== 'string' || !filePath) throw new Error('invalid video path')
   const init = engineInitOptions()
@@ -481,7 +498,7 @@ async function applyVideoEntry(params, source = 'wallpaper:video') {
     params: { path: filePath, mode, loop, muted, volume, speed, fps, audioMode, brightness, contrast, saturation },
   }
   startup.saveLastApplied(app.getPath('userData'), lastApplied)
-  if (supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
+  if (opts.resetRecovery !== false && supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
   setRuntimeAvailable(true)
   logLine(`${source}: video applied`, filePath)
   return { ok: true }
@@ -914,6 +931,11 @@ app.whenReady().then(() => {
   // Inspector now does, so expose the two existing commands.
   ipcMain.handle('wallpaper:pause', () => pauseWallpaper())
   ipcMain.handle('wallpaper:resume', () => resumeWallpaper())
+  // Playlist dock "stop": the renderer clears the rotation plan, then asks for
+  // the runtime to capture its last frame and apply it as a still before the
+  // process exits. The runtime is tagged intentional so the supervisor does
+  // not treat the exit as a crash and replay the video.
+  ipcMain.handle('wallpaper:stop', () => stopWallpaperForSnapshot())
 
   // The engine's own telemetry, for the Settings page. Never spawn a runtime
   // to answer a question: the panel must not start the engine (and its VRAM)
@@ -1411,7 +1433,9 @@ app.on('will-quit', () => {
   // The scheduler's last change may still sit in the app-state debounce.
   try { appState?.flush() } catch {}
   // Exit leaves the last video frame on the desktop as a still (the runtime
-  // captures it and applies it through the OS wallpaper API). Idle reclaims
-  // pass no snapshot, so switching to an image never gets overwritten.
-  runtime.stop({ snapshot: true })
+  // captures it and applies it through the OS wallpaper API) unless the user
+  // turned that off in Settings -> Engine. Idle reclaims pass no snapshot, so
+  // switching to an image never gets overwritten.
+  const snapshotOnQuit = appState?.get('engine.snapshotOnQuit') !== false
+  runtime.stop({ snapshot: snapshotOnQuit })
 })
