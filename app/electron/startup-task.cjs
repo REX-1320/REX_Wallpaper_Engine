@@ -19,6 +19,10 @@ const STATES = new Set([
   'enabled-by-policy',
 ])
 
+// The helper exists but never produced a state (blocked, timed out, crashed).
+// Distinct from null, which means "no package identity, use the Run key".
+const UNAVAILABLE = 'unavailable'
+
 function parseState(stdout) {
   const text = String(stdout ?? '').trim()
   // No output at all: the helper is missing or crashed, so there is no
@@ -34,15 +38,22 @@ function parseState(stdout) {
 function query(stubPath) {
   if (!stubPath) return null
   try {
-    return parseState(
-      execFileSync(stubPath, ['--status'], {
-        windowsHide: true,
-        timeout: 3000,
-        encoding: 'utf8',
-      }),
-    )
+    const raw = execFileSync(stubPath, ['--status'], {
+      windowsHide: true,
+      timeout: 3000,
+      encoding: 'utf8',
+    })
+    const state = parseState(raw)
+    if (state !== null) return state
+    // parseState only returns null for "unpackaged" or no output. The token is
+    // the legitimate portable answer; silence means the helper never ran.
+    return String(raw ?? '').trim() ? null : UNAVAILABLE
   } catch (err) {
-    return parseState(err?.stdout)
+    // A stub that is not on disk is the normal portable/dev case.
+    if (err?.code === 'ENOENT') return null
+    const state = parseState(err?.stdout)
+    if (state !== null) return state
+    return String(err?.stdout ?? '').trim() ? null : UNAVAILABLE
   }
 }
 
@@ -67,4 +78,4 @@ function isEnabled(state) {
   return state === 'enabled' || state === 'enabled-by-policy'
 }
 
-module.exports = { parseState, query, setEnabled, isEnabled }
+module.exports = { parseState, query, setEnabled, isEnabled, UNAVAILABLE }

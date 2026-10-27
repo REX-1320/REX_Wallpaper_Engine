@@ -111,8 +111,29 @@ function startupTaskStubPath() {
 
 // null = no package identity (portable): the caller must use the Run key.
 // Any string = the package's StartupTask state (enabled, disabled-by-user, ...).
+//
+// The helper is a child process, so the answer is cached: the tray rebuilds
+// its menu on every wallpaper state change and must not block on a spawn.
+// Every write below refreshes the cache, so a Settings toggle is visible at
+// once; Task Manager changes are picked up on the next refresh.
+let startupTaskCache = { at: 0, state: null }
 function startupTaskState() {
-  return startupTask.query(startupTaskStubPath())
+  const now = Date.now()
+  if (startupTaskCache.at && now - startupTaskCache.at < 10000) {
+    return startupTaskCache.state
+  }
+  const stub = startupTaskStubPath()
+  const state = startupTask.query(stub)
+  if (state === startupTask.UNAVAILABLE) {
+    // The stub is on disk but produced no state (blocked, timed out, crashed).
+    // Falling back keeps the app usable, but say so: in a package the Run key
+    // is virtualized and this fallback cannot work.
+    logLine('startup: task helper gave no state, falling back to the Run key')
+    startupTaskCache = { at: now, state: null }
+    return null
+  }
+  startupTaskCache = { at: now, state }
+  return state
 }
 
 function applyLoginItem(enabled) {
@@ -121,6 +142,7 @@ function applyLoginItem(enabled) {
   // redirects into the package hive (the P1 "launch at login is a no-op").
   if (startupTaskState() !== null) {
     const next = startupTask.setEnabled(startupTaskStubPath(), enabled)
+    startupTaskCache = { at: Date.now(), state: next }
     logLine('startup: task', enabled ? 'enable' : 'disable', '->', next)
     return
   }
@@ -388,7 +410,7 @@ function lastFrameSnapshotPath() {
 // the desktop as a still. The native SHUTDOWN path captures the frame, hands
 // it to the OS wallpaper API and only then tears WorkerW down, so the desktop
 // never flashes black. `intentional` keeps the supervisor out of recovery.
-function stopWallpaperForSnapshot() {
+async function stopWallpaperForSnapshot() {
   if (playlistScheduler) playlistScheduler.setPlan(null)
   // Stop is session-scoped: the desktop now holds a still, not a scene the
   // runtime can replay. Clearing the in-memory record keeps a recreated
@@ -400,8 +422,10 @@ function stopWallpaperForSnapshot() {
     logLine('wallpaper:stop: no runtime running')
     return { ok: true, stopped: false, snapshot: lastFrameSnapshotPath() }
   }
-  runtime.stop({ snapshot: true, intentional: true })
   capabilities = null
+  // Wait for the capture: the caller gets a snapshot path that already
+  // exists, and Stop has finished before the dock reports success.
+  await runtime.stop({ snapshot: true, intentional: true })
   logLine('wallpaper:stop: rotation stopped, last frame left on the desktop')
   return { ok: true, stopped: true, snapshot: lastFrameSnapshotPath() }
 }
@@ -1356,9 +1380,17 @@ app.whenReady().then(() => {
   // start, overriding "off" (audit 5.10 #8).
   try {
     if (!appState.get('settings.loginItemInitialized')) {
-      applyLoginItem(true)
       appState.set('settings.loginItemInitialized', true)
-      logLine('startup: registered for login (first run)')
+      // The task helper is a child process (query + request); keep it off the
+      // startup path so the window and the wallpaper are not delayed by it.
+      setImmediate(() => {
+        try {
+          applyLoginItem(true)
+          logLine('startup: registered for login (first run)')
+        } catch (err) {
+          logLine('startup: first-run login-item ERROR', err.message)
+        }
+      })
     } else {
       logLine('startup: login item left as configured (enabled=' + loginItemEnabled() + ')')
     }
@@ -1485,15 +1517,31 @@ app.whenReady().then(() => {
 // runtime running; only Exit Paiint (quitApp) terminates the process.
 app.on('window-all-closed', () => {})
 
-let quitDrained = false
+// The quit is drained exactly once. `will-quit` is re-entered by our own
+// app.quit() after the runtime has exited; `quitDrainFinished` is what lets
+// that second pass through.
+let quitDrainStarted = false
+let quitDrainFinished = false
 app.on('will-quit', (event) => {
-  if (quitDrained) return
+  // Second pass: the drain is done, let Electron finish the quit.
+  if (quitDrainFinished) return
+  // A drain is already in flight (a logoff can fire will-quit again): keep
+  // waiting rather than killing the runtime mid-capture.
   event.preventDefault()
-  quitDrained = true
-  if (supervisor) supervisor.stop() // quitting: exits must not trigger recovery
-  if (playlistScheduler) playlistScheduler.stop() // stop timers; plan is already persisted
-  // The scheduler's last change may still sit in the app-state debounce.
-  try { appState?.flush() } catch {}
+  if (quitDrainStarted) return
+  quitDrainStarted = true
+
+  try {
+    if (supervisor) supervisor.stop() // quitting: exits must not trigger recovery
+    if (playlistScheduler) playlistScheduler.stop() // stop timers; plan is already persisted
+    // The scheduler's last change may still sit in the app-state debounce.
+    try { appState?.flush() } catch {}
+  } catch (err) {
+    // Never leave the quit prevented with nothing scheduled: a throw here
+    // used to strand the app with no window and no tray.
+    logLine('app: quit cleanup ERROR', err.message)
+  }
+
   // Exit leaves the last video frame on the desktop as a still (the runtime
   // captures it and applies it through the OS wallpaper API) unless the user
   // turned that off in Settings -> Engine. Idle reclaims pass no snapshot, so
@@ -1504,10 +1552,22 @@ app.on('will-quit', (event) => {
   // immediately killed the runtime mid-capture, so the desktop never got the
   // still and the setting looked broken. The runtime wrapper bounds the wait
   // (15 s snapshot / 5 s plain) and resolves on exit or deadline.
-  Promise.resolve(runtime.stop({ snapshot: snapshotOnQuit }))
-    .catch(() => {})
-    .finally(() => {
-      logLine('app: runtime drained, quitting')
-      app.quit()
-    })
+  const finish = () => {
+    if (quitDrainFinished) return
+    quitDrainFinished = true
+    logLine('app: runtime drained, quitting')
+    // MUST be a macrotask. When no runtime is running (every still-image
+    // user) runtime.stop() resolves immediately, and a promise callback runs
+    // as a microtask INSIDE this will-quit emission - Electron's quit flag is
+    // still set there, so app.quit() would be dropped and the process would
+    // live on with no window and no tray.
+    setImmediate(() => app.quit())
+  }
+  let drain = null
+  try {
+    drain = runtime.stop({ snapshot: snapshotOnQuit })
+  } catch (err) {
+    logLine('app: quit drain ERROR', err.message)
+  }
+  Promise.resolve(drain).then(finish, finish)
 })

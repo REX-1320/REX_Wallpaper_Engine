@@ -163,7 +163,16 @@ static std::string LastFrameImagePath() {
     }
     if (dir.empty()) return {};
     dir += L"\\Paiint";
-    CreateDirectoryW(dir.c_str(), nullptr);  // ERROR_ALREADY_EXISTS ok
+    // ERROR_ALREADY_EXISTS is the normal case. Anything else means the folder
+    // is unusable (read-only/redirected Pictures, or a file with that name):
+    // report no path so the caller fails loudly instead of writing a snapshot
+    // nobody can apply.
+    if (!CreateDirectoryW(dir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        REX_LOG_WARN("Runtime", "cannot create snapshot directory: {}",
+                     WidenToUtf8(dir));
+        return {};
+    }
     return WidenToUtf8(dir + L"\\last-frame.png");
 }
 

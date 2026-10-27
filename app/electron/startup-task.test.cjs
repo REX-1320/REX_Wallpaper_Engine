@@ -1,6 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { parseState, isEnabled } = require('./startup-task.cjs')
+const path = require('node:path')
+const { parseState, query, isEnabled, UNAVAILABLE } = require('./startup-task.cjs')
 
 test('parseState: helper states', () => {
   assert.equal(parseState('enabled\n'), 'enabled')
@@ -19,6 +20,14 @@ test('parseState: unpackaged returns null so the caller falls back', () => {
 test('parseState: unknown output is an error, never a fake success', () => {
   assert.equal(parseState('error\n'), 'error')
   assert.equal(parseState('something else'), 'error')
+})
+
+test('query: missing stub is portable, a mute helper is unavailable', () => {
+  // No stub on disk: the portable/dev build must use the Run key.
+  assert.equal(query(path.join(__dirname, 'no-such-stub.exe')), null)
+  // A real executable that does not understand --status: it exists but never
+  // prints a state, which must not be mistaken for "unpackaged".
+  assert.equal(query(process.execPath), UNAVAILABLE)
 })
 
 test('isEnabled: only enabled states count', () => {
