@@ -19,6 +19,11 @@
   The CN= value from Partner Center. Default CN=MoiNeX is a placeholder that
   only works for local sideload tests.
 
+.PARAMETER IdentityName
+  The Package/Identity/Name from Partner Center. Default MoiNeX.Paiint; an
+  individual account often gets a numeric prefix (for example
+  12345MoiNeX.Paiint) and the upload is rejected unless it matches exactly.
+
 .PARAMETER OutDir
   Output directory. Default: packaging\msix\out (git-ignored).
 
@@ -44,6 +49,7 @@
 param(
     [string]$Version,
     [string]$Publisher = 'CN=MoiNeX',
+    [string]$IdentityName = 'MoiNeX.Paiint',
     [string]$OutDir,
     [string]$PayloadDir,
     [string]$MakeAppxPath,
@@ -259,6 +265,7 @@ $templatePath = Join-Path $PSScriptRoot 'AppxManifest.xml'
 $template = Get-Content $templatePath -Raw
 $manifest = $template.Replace('__VERSION__', $msixVersion)
 $manifest = $manifest.Replace('__PUBLISHER__', $Publisher)
+$manifest = $manifest.Replace('__IDENTITY_NAME__', $IdentityName)
 $manifestPath = Join-Path $stage 'AppxManifest.xml'
 [System.IO.File]::WriteAllText($manifestPath, $manifest, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -275,6 +282,7 @@ $identity = $xml.SelectSingleNode('/f:Package/f:Identity', $ns)
 if (-not $identity) { throw 'Manifest has no Identity element.' }
 if ($identity.Version -ne $msixVersion) { throw "Manifest version '$($identity.Version)' != '$msixVersion'." }
 if ($identity.Publisher -ne $Publisher) { throw "Manifest publisher '$($identity.Publisher)' != '$Publisher'." }
+if ($identity.Name -ne $IdentityName) { throw "Manifest identity name '$($identity.Name)' != '$IdentityName'." }
 
 $referenced = @()
 $referenced += $xml.SelectSingleNode('/f:Package/f:Properties/f:Logo', $ns).InnerText

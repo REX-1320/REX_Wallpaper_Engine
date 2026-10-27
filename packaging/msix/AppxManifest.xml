@@ -6,8 +6,9 @@
   staged package. Do not edit the generated copy.
 
   Publisher MUST match the "Package/Identity/Publisher" value shown in Partner
-  Center for this app (for example CN=1A2B3C4D-....). The default CN=MoiNeX is
-  only good for local sideload tests signed with a self-signed certificate.
+  Center for this app (for example CN=1A2B3C4D-....), and Name MUST match
+  "Package/Identity/Name". The defaults (CN=MoiNeX / MoiNeX.Paiint) are only
+  good for local sideload tests signed with a self-signed certificate.
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -17,7 +18,7 @@
   IgnorableNamespaces="uap desktop rescap">
 
   <Identity
-    Name="MoiNeX.Paiint"
+    Name="__IDENTITY_NAME__"
     Publisher="__PUBLISHER__"
     Version="__VERSION__"
     ProcessorArchitecture="x64" />

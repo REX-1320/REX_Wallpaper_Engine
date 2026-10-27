@@ -46,7 +46,8 @@ The script:
 1. reads the version from `app/package.json` unless `-Version` is passed,
 2. stages the payload into `out\stage`,
 3. generates the seven tile assets from `app\assets\paiint-app.ico`,
-4. expands `AppxManifest.xml` (`__VERSION__`, `__PUBLISHER__`),
+4. expands `AppxManifest.xml` (`__VERSION__`, `__PUBLISHER__`,
+   `__IDENTITY_NAME__`),
 5. validates the XML and every asset/executable it references,
 6. packs with `makeappx`, prints the SHA-256.
 
@@ -55,12 +56,17 @@ The script:
 1. **Publisher must match Partner Center.** Open the app in Partner Center →
    *Package/Identity/Publisher* and copy the exact `CN=...` value. The default
    `CN=MoiNeX` is a placeholder; a mismatch is rejected at upload.
-2. Bump the version for **every** submission. MSIX versions are
+2. **Identity name must match Partner Center too.** *Package/Identity/Name* is
+   shown next to the publisher. Individual accounts usually get a numeric
+   prefix (`12345MoiNeX.Paiint`), so pass it with `-IdentityName`; the default
+   `MoiNeX.Paiint` is only right if that is what Partner Center shows. A
+   mismatch is rejected at upload just like a publisher mismatch.
+3. Bump the version for **every** submission. MSIX versions are
    `Major.Minor.Build.Revision`; the Store requires **Revision = 0**.
    `0.1.0` → `0.1.0.0`; the next submission is `0.1.1.0` or `0.2.0.0`.
-3. Upload the `.msix` in Partner Center → *Packages*. Microsoft runs the
+4. Upload the `.msix` in Partner Center → *Packages*. Microsoft runs the
    certification tests and signs it.
-4. `runFullTrust` is declared in the manifest. The Store accepts it for
+5. `runFullTrust` is declared in the manifest. The Store accepts it for
    desktop-bridge apps but reviews it; the app needs it because the Electron
    shell and the native wallpaper runtime are ordinary Win32 processes.
 
