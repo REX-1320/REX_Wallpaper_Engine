@@ -15,6 +15,7 @@ const { PlaylistScheduler } = require('./playlist-scheduler.cjs')
 const { desktopLayerReady, mergeRecoveryEntry } = require('./recovery.cjs')
 const { migrateUserData } = require('./userdata-migrate.cjs')
 const { cleanupLegacyLoginItem } = require('./login-item-migrate.cjs')
+const startupTask = require('./startup-task.cjs')
 const { legalDocPath } = require('./legal-docs.cjs')
 
 // ─── Identity ────────────────────────────────────────────────────────────────
@@ -72,7 +73,11 @@ if (gotLock) {
 let mainWindow = null
 let isQuitting = false
 let trayManager = null
-const startInBackground = process.argv.includes('--background')
+// Login launches: the portable Run key passes --background. The MSIX startup
+// task cannot pass arguments, so its stub passes --startup-task instead;
+// whether the window opens then depends on startup.startMinimized, which is
+// only readable after app-state loads.
+const startupTaskLaunch = process.argv.includes('--startup-task')
 
 // Window lifecycle state. The BrowserWindow is destroyed on close and recreated
 // on demand; nothing may assume mainWindow exists.
@@ -93,7 +98,33 @@ let playlistScheduler = null
 // boots a default Electron window instead of Paiint.
 // "Start minimised" (the default) adds --background: the login item then
 // starts the tray and the wallpaper without opening the window.
+//
+// The packaged build uses the manifest's windows.startupTask instead: the
+// helper's path is where that stub ships. It reports "unpackaged" in the
+// portable build, where the Run-key path below is used.
+function startupTaskStubPath() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'bin', 'paiint-startup.exe')
+  }
+  return path.join(__dirname, '..', '..', 'rex-core', 'build', 'Release', 'paiint-startup.exe')
+}
+
+// null = no package identity (portable): the caller must use the Run key.
+// Any string = the package's StartupTask state (enabled, disabled-by-user, ...).
+function startupTaskState() {
+  return startupTask.query(startupTaskStubPath())
+}
+
 function applyLoginItem(enabled) {
+  // Packaged: the manifest's windows.startupTask is the only registration
+  // Windows honours. app.setLoginItemSettings writes HKCU Run, which MSIX
+  // redirects into the package hive (the P1 "launch at login is a no-op").
+  if (startupTaskState() !== null) {
+    const next = startupTask.setEnabled(startupTaskStubPath(), enabled)
+    logLine('startup: task', enabled ? 'enable' : 'disable', '->', next)
+    return
+  }
+
   const startMinimized = appState?.get('startup.startMinimized') !== false
   const settings = app.isPackaged
     ? startup.loginItemSettings(enabled, undefined, { startMinimized })
@@ -105,7 +136,11 @@ function applyLoginItem(enabled) {
 // tested): getLoginItemSettings().openAtLogin is unreliable on Windows - in a
 // dev build it reads FALSE even though the entry was written, because it is
 // derived from an identity-keyed registry entry. launchItems is the truth.
+// The packaged build asks the startup-task helper instead: Task Manager can
+// disable the task, and that state is invisible to the Run key.
 function loginItemEnabled() {
+  const taskState = startupTaskState()
+  if (taskState !== null) return startupTask.isEnabled(taskState)
   try {
     return startup.loginItemEnabled(app.getLoginItemSettings())
   } catch {
@@ -339,8 +374,14 @@ function reclaimIdleRuntime(reason) {
 // Where the native runtime writes the quit/stop still. Kept in sync with
 // LastFrameImagePath() in rex-core/src/wallpaper_cli_main.cpp.
 function lastFrameSnapshotPath() {
-  const local = process.env.LOCALAPPDATA
-  return local ? path.join(local, 'Paiint', 'last-frame.png') : null
+  // The real Pictures folder, not AppData: MSIX redirects AppData into the
+  // package's LocalCache, where Explorer cannot use it as a wallpaper.
+  try {
+    const pictures = app.getPath('pictures')
+    return pictures ? path.join(pictures, 'Paiint', 'last-frame.png') : null
+  } catch {
+    return null
+  }
 }
 
 // Playlist dock "stop": end the rotation and leave the last rendered frame on
@@ -1061,7 +1102,19 @@ app.whenReady().then(() => {
   ipcMain.handle('app-state:set', (event, keyPath, value) => {
     try {
       if (typeof keyPath !== 'string' || !appState) return null
-      return appState.set(keyPath, value) ?? null
+      const next = appState.set(keyPath, value) ?? null
+      // The portable Run key bakes --background into its command line, so a
+      // changed "start minimised" only reaches the next logon after the entry
+      // is rewritten. The MSIX startup task reads the preference at launch
+      // (and cannot take arguments), so only the Run-key path needs this.
+      if (keyPath === 'startup.startMinimized' && startupTaskState() === null) {
+        try {
+          if (startup.loginItemEnabled(app.getLoginItemSettings())) applyLoginItem(true)
+        } catch (err) {
+          logLine('app-state:set login-item refresh ERROR', err.message)
+        }
+      }
+      return next
     } catch (err) {
       logLine('app-state:set ERROR', err.message)
       return null
@@ -1307,11 +1360,7 @@ app.whenReady().then(() => {
       appState.set('settings.loginItemInitialized', true)
       logLine('startup: registered for login (first run)')
     } else {
-      let enabled = false
-      try {
-        enabled = app.getLoginItemSettings().openAtLogin
-      } catch {}
-      logLine('startup: login item left as configured (enabled=' + enabled + ')')
+      logLine('startup: login item left as configured (enabled=' + loginItemEnabled() + ')')
     }
   } catch (err) {
     logLine('startup: login-item setup ERROR', err.message)
@@ -1375,8 +1424,13 @@ app.whenReady().then(() => {
     playlistScheduler.start()
   })
 
-  // Normal launch opens the UI; --background (e.g. Windows startup) starts the
-  // tray + native services only and defers the window to the first tray open.
+  // Normal launch opens the UI; a login launch (--background from the Run key,
+  // --startup-task from the MSIX stub) starts the tray + native services only
+  // and defers the window to the first tray open. The startup task cannot pass
+  // --background, so it honours the live "start minimised" preference here.
+  const startInBackground =
+    process.argv.includes('--background') ||
+    (startupTaskLaunch && appState.get('startup.startMinimized') !== false)
   if (!startInBackground) {
     showMainWindow()
     logLine('window: shown (normal launch)')
@@ -1414,7 +1468,11 @@ app.whenReady().then(() => {
       }, 4000)
     }
   } else {
-    logLine('window: deferred (background launch)')
+    logLine(
+      startupTaskLaunch
+        ? 'window: deferred (startup task, start minimised)'
+        : 'window: deferred (background launch)',
+    )
   }
 
   app.on('activate', () => {
@@ -1427,7 +1485,11 @@ app.whenReady().then(() => {
 // runtime running; only Exit Paiint (quitApp) terminates the process.
 app.on('window-all-closed', () => {})
 
-app.on('will-quit', () => {
+let quitDrained = false
+app.on('will-quit', (event) => {
+  if (quitDrained) return
+  event.preventDefault()
+  quitDrained = true
   if (supervisor) supervisor.stop() // quitting: exits must not trigger recovery
   if (playlistScheduler) playlistScheduler.stop() // stop timers; plan is already persisted
   // The scheduler's last change may still sit in the app-state debounce.
@@ -1437,5 +1499,15 @@ app.on('will-quit', () => {
   // turned that off in Settings -> Engine. Idle reclaims pass no snapshot, so
   // switching to an image never gets overwritten.
   const snapshotOnQuit = appState?.get('engine.snapshotOnQuit') !== false
-  runtime.stop({ snapshot: snapshotOnQuit })
+  // Wait for the native SHUTDOWN to finish before Electron exits. A snapshot
+  // quit takes seconds (capture + PNG encode + shell apply); quitting
+  // immediately killed the runtime mid-capture, so the desktop never got the
+  // still and the setting looked broken. The runtime wrapper bounds the wait
+  // (15 s snapshot / 5 s plain) and resolves on exit or deadline.
+  Promise.resolve(runtime.stop({ snapshot: snapshotOnQuit }))
+    .catch(() => {})
+    .finally(() => {
+      logLine('app: runtime drained, quitting')
+      app.quit()
+    })
 })

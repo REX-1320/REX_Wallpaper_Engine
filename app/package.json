@@ -60,6 +60,10 @@
       {
         "from": "../rex-core/build/Release/paiint-minidump.exe",
         "to": "bin/paiint-minidump.exe"
+      },
+      {
+        "from": "../rex-core/build/Release/paiint-startup.exe",
+        "to": "bin/paiint-startup.exe"
       }
     ],
     "directories": {

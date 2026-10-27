@@ -257,6 +257,7 @@ target_link_libraries(rex-core
         wtsapi32
         powrprof
         shcore
+        shell32
         mmdevapi
         ole32
         uuid
@@ -736,6 +737,14 @@ set_target_properties(rex-wallpaper-runtime PROPERTIES OUTPUT_NAME "paiint-wallp
 add_executable(rex-gen-media tools/GenTestMedia.cpp)
 target_include_directories(rex-gen-media PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_libraries(rex-gen-media PRIVATE ${FFMPEG_LIBRARIES})
+
+# ─── Logon stub for the MSIX startupTask extension ─────────────────────────
+# The windows.startupTask extension cannot pass command-line arguments, and
+# StartupTask enable/disable requires package identity. Shipped as
+# resources/bin/paiint-startup.exe; the portable build never runs it.
+add_executable(paiint-startup WIN32 tools/StartupStub.cpp)
+target_link_libraries(paiint-startup PRIVATE windowsapp shell32)
+target_compile_features(paiint-startup PRIVATE cxx_std_17)
 
 # ─── Install ───────────────────────────────────────────────────────────────
 install(TARGETS rex-core RUNTIME DESTINATION bin)

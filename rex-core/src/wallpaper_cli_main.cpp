@@ -1,5 +1,12 @@
 #include <windows.h>
 
+// IDesktopWallpaper (shell COM) and Known Folder paths. Both are used by the
+// static-image path: MSIX virtualizes HKCU and AppData, but the shell API and
+// the real Pictures folder are outside the package's private view.
+#include <appmodel.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+
 #include <rex/wallpaper/IWallpaperEngine.hpp>
 #include <rex/wallpaper/IRendererAdapter.hpp>
 #include <shared/Logger.hpp>
@@ -134,16 +141,30 @@ static std::string RuntimeSettingsPath() {
 
 // Quit-time still: the last rendered video frame, handed to the OS as the
 // desktop wallpaper so the desktop keeps a picture after the engine exits.
-// %LOCALAPPDATA% rather than %TEMP%: Windows stores the wallpaper PATH and
-// re-reads it at sign-in, so a cleaned temp directory would leave a black
-// desktop. One file, overwritten on every quit.
+// Pictures, not %LOCALAPPDATA%: an MSIX package's AppData writes are
+// redirected into %LOCALAPPDATA%\Packages\<PFN>\LocalCache, which Explorer
+// cannot read as the desktop wallpaper and uninstall deletes. Windows also
+// re-reads the wallpaper PATH at sign-in, so the file must outlive the
+// package's private data. One file, overwritten on every quit.
 static std::string LastFrameImagePath() {
-    if (const char* local = std::getenv("LOCALAPPDATA")) {
-        const std::string dir = std::string(local) + "\\Paiint";
-        CreateDirectoryA(dir.c_str(), nullptr);  // ERROR_ALREADY_EXISTS ok
-        return dir + "\\last-frame.png";
+    std::wstring dir;
+    PWSTR raw = nullptr;
+    // KF_FLAG_CREATE also creates a missing Pictures folder.
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, KF_FLAG_CREATE,
+                                       nullptr, &raw)) &&
+        raw) {
+        dir = raw;
     }
-    return {};
+    if (raw) CoTaskMemFree(raw);
+    if (dir.empty()) {
+        if (const wchar_t* profile = _wgetenv(L"USERPROFILE")) {
+            dir = std::wstring(profile) + L"\\Pictures";
+        }
+    }
+    if (dir.empty()) return {};
+    dir += L"\\Paiint";
+    CreateDirectoryW(dir.c_str(), nullptr);  // ERROR_ALREADY_EXISTS ok
+    return WidenToUtf8(dir + L"\\last-frame.png");
 }
 
 static std::shared_ptr<rex::settings::ISettingsService> CreateSettingsService() {
@@ -511,7 +532,21 @@ static void HangWatchdog(std::atomic<bool>& stop,
     }
 }
 
-static int SetImageWallpaper(const std::wstring& file, FillMode fillMode) {
+// True when this process runs from an MSIX package. Used to keep the legacy
+// registry + SystemParametersInfo path from reporting a false success: in a
+// package the HKCU write is redirected to the package hive and the shell never
+// sees the wallpaper change.
+static bool IsPackagedProcess() {
+    UINT32 length = 0;
+    return GetCurrentPackageFullName(&length, nullptr) !=
+           APPMODEL_ERROR_NO_PACKAGE;
+}
+
+// Legacy apply (portable build). Writes the shell's wallpaper registry values
+// and broadcasts the change; kept as a fallback for machines where the shell
+// COM server is unavailable.
+static int SetImageWallpaperLegacy(const std::wstring& file,
+                                   FillMode fillMode) {
     const wchar_t* subKey = L"Control Panel\\Desktop";
 
     int style = 10;
@@ -539,7 +574,59 @@ static int SetImageWallpaper(const std::wstring& file, FillMode fillMode) {
         std::cerr << "REX: SystemParametersInfoW failed: " << GetLastError() << "\n";
         return 1;
     }
+    REX_LOG_INFO("Runtime", "wallpaper applied via SystemParametersInfo: {}",
+                 WidenToUtf8(file));
     return 0;
+}
+
+static int SetImageWallpaper(const std::wstring& file, FillMode fillMode) {
+    // IDesktopWallpaper is Explorer's own wallpaper API. Unlike the registry
+    // path it crosses the MSIX boundary (the shell applies the change, not the
+    // packaged process), so it is the only apply that works when the app ships
+    // from the Store. NULL monitor id = every monitor.
+    DESKTOP_WALLPAPER_POSITION position = DWPOS_FILL;
+    switch (fillMode) {
+        case FillMode::Center: position = DWPOS_CENTER; break;
+        case FillMode::Tile: position = DWPOS_TILE; break;
+        case FillMode::Stretch: position = DWPOS_STRETCH; break;
+        case FillMode::Fit: position = DWPOS_FIT; break;
+        case FillMode::Fill:
+        default: position = DWPOS_FILL; break;
+    }
+
+    const HRESULT coHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool coInitialized = SUCCEEDED(coHr);
+    HRESULT hr = E_FAIL;
+    Microsoft::WRL::ComPtr<IDesktopWallpaper> desktop;
+    if (coInitialized || coHr == RPC_E_CHANGED_MODE) {
+        hr = CoCreateInstance(CLSID_DesktopWallpaper, nullptr, CLSCTX_ALL,
+                              IID_PPV_ARGS(&desktop));
+    }
+    if (SUCCEEDED(hr) && desktop) {
+        hr = desktop->SetWallpaper(nullptr, file.c_str());
+        if (SUCCEEDED(hr)) hr = desktop->SetPosition(position);
+        desktop.Reset();
+        if (SUCCEEDED(hr)) {
+            if (coInitialized) CoUninitialize();
+            REX_LOG_INFO("Runtime", "wallpaper applied via IDesktopWallpaper: {}",
+                         WidenToUtf8(file));
+            return 0;
+        }
+        REX_LOG_WARN("Runtime",
+                     "IDesktopWallpaper apply failed (0x{:08x})",
+                     static_cast<unsigned>(hr));
+    } else {
+        REX_LOG_WARN("Runtime",
+                     "IDesktopWallpaper unavailable (CoCreate 0x{:08x})",
+                     static_cast<unsigned>(hr));
+    }
+    if (coInitialized) CoUninitialize();
+
+    // A packaged process must fail loudly instead of falling back to a path
+    // whose registry write is virtualized (it would return success while the
+    // desktop keeps the old image).
+    if (IsPackagedProcess()) return 1;
+    return SetImageWallpaperLegacy(file, fillMode);
 }
 
 // â”€â”€â”€ Runtime frame protocol â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

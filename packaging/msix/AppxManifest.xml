@@ -12,8 +12,9 @@
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  IgnorableNamespaces="uap desktop rescap">
 
   <Identity
     Name="MoiNeX.Paiint"
@@ -57,6 +58,25 @@
           ShortName="Paiint" />
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
       </uap:VisualElements>
+      <Extensions>
+        <!-- Launch at login. A packaged process cannot write the Run key that
+             Windows honours, so the manifest declares a startup task instead.
+             The extension cannot pass arguments, hence the tiny stub: it
+             starts Paiint.exe with the startup-task flag (and is also the only
+             process with the package identity needed to enable/disable the
+             task from Settings). Enabled="false": the app requests it on first
+             run, the same default as the portable build. A user who turns it
+             off in Task Manager cannot be re-enabled programmatically. -->
+        <desktop:Extension
+          Category="windows.startupTask"
+          Executable="resources\bin\paiint-startup.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask
+            TaskId="PaiintStartup"
+            Enabled="false"
+            DisplayName="Paiint" />
+        </desktop:Extension>
+      </Extensions>
     </Application>
   </Applications>
 

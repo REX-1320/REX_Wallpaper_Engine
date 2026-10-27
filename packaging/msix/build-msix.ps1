@@ -149,6 +149,10 @@ $runtimeExe = Join-Path $PayloadDir 'resources\bin\paiint-wallpaper-runtime.exe'
 if (-not (Test-Path $runtimeExe)) {
     throw "Payload is missing the native runtime: '$runtimeExe'. Build rex-core first (cmake --build rex-core/build --config Release)."
 }
+$startupStub = Join-Path $PayloadDir 'resources\bin\paiint-startup.exe'
+if (-not (Test-Path $startupStub)) {
+    throw "Payload is missing the startup-task stub: '$startupStub'. Build rex-core first (cmake --build rex-core/build --config Release)."
+}
 
 # ─── Stage ───────────────────────────────────────────────────────────────────
 if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot 'out' }
@@ -265,6 +269,7 @@ $xml.Load($manifestPath)
 $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
 $ns.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
 $ns.AddNamespace('uap', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
+$ns.AddNamespace('desktop', 'http://schemas.microsoft.com/appx/manifest/desktop/windows10')
 
 $identity = $xml.SelectSingleNode('/f:Package/f:Identity', $ns)
 if (-not $identity) { throw 'Manifest has no Identity element.' }
@@ -286,6 +291,13 @@ if ($missing.Count -gt 0) { throw ("Manifest references missing assets: " + ($mi
 
 $executable = $xml.SelectSingleNode('/f:Package/f:Applications/f:Application/@Executable', $ns).Value
 if (-not (Test-Path (Join-Path $stage $executable))) { throw "Manifest executable '$executable' is not in the package." }
+
+# Extension executables are separate processes Windows launches (the startup
+# stub at logon). A missing one is a silent no-op, so fail the build instead.
+foreach ($node in $xml.SelectNodes('//f:Application/f:Extensions/desktop:Extension/@Executable', $ns)) {
+    $extExe = $node.Value
+    if (-not (Test-Path (Join-Path $stage $extExe))) { throw "Extension executable '$extExe' is not in the package." }
+}
 
 Write-Host 'Manifest and assets validated.'
 

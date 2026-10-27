@@ -218,11 +218,16 @@ class WallpaperRuntime extends EventEmitter {
     return this.initPromise
   }
 
+  // Returns a promise that resolves when the native process has actually
+  // exited (or the kill deadline fired). Quit must await this: Electron tears
+  // its child processes down when the app exits, and a snapshot capture takes
+  // seconds, so a fire-and-forget stop truncated the PNG encode and left the
+  // desktop unchanged. Other callers may ignore the promise.
   stop(opts = {}) {
     const proc = this.proc
     this.proc = null
     this.inited = false
-    if (!proc) return
+    if (!proc) return Promise.resolve(null)
 
     // Tag the process for the 'exit' handler. A deliberate stop is an idle
     // reclaim (static image applied), not a crash: the supervisor must not
@@ -266,16 +271,28 @@ class WallpaperRuntime extends EventEmitter {
     // the snapshot path gets a wider deadline — still a guard against a
     // genuinely wedged runtime, never the normal exit path.
     const deadlineMs = opts.snapshot === true ? 15000 : 5000
-    const killTimer = setTimeout(() => {
-      try {
-        this.logLine('wallpaper-runtime: no SHUTDOWN response, terminating process')
-        proc.kill()
-      } catch {
-        // already gone
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (code) => {
+        if (settled) return
+        settled = true
+        clearTimeout(killTimer)
+        resolve(code)
       }
-    }, deadlineMs)
-    if (killTimer.unref) killTimer.unref()
-    proc.once('exit', () => clearTimeout(killTimer))
+      const killTimer = setTimeout(() => {
+        try {
+          this.logLine('wallpaper-runtime: no SHUTDOWN response, terminating process')
+          proc.kill()
+        } catch {
+          // already gone
+        }
+        // Never hang the quit on a process that ignores kill().
+        finish(null)
+      }, deadlineMs)
+      if (killTimer.unref) killTimer.unref()
+      proc.once('exit', (code) => finish(code))
+      if (proc.exitCode !== null) finish(proc.exitCode)
+    })
   }
 }
 
