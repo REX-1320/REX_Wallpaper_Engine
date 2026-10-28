@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { detectFileType } from '../registry'
-import { adoptAppliedPath, applyWallpaper, arePlaylistsHydrated, createPlaylist, deletePlaylist as deleteStorePlaylist, ensureWallpaperForPath, getSnapshot, renamePlaylist as renameStorePlaylist, restorePlaylists, updateWallpaperProperty, duplicatePlaylist as duplicateStorePlaylist } from '../store'
+import { adoptAppliedPath, applyWallpaper, arePlaylistsHydrated, createPlaylist, deletePlaylist as deleteStorePlaylist, ensureWallpaperForPath, getSnapshot, renamePlaylist as renameStorePlaylist, restorePlaylists, subscribeWallpaperApplied, updateWallpaperProperty, duplicatePlaylist as duplicateStorePlaylist } from '../store'
 import { ENGINE_MODE_BY_MODE } from '../desktop'
 import { appliedWallpaper, memberKey, resolveDesktopPlaylist, wallpaperPath } from './scope'
 
@@ -623,6 +623,15 @@ let planSyncQueued = false
 let planSyncTimer = null
 let schedulerStatePending = false
 let unsubscribePlaylistApplied = null
+let unsubscribeWallpaperApplied = null
+// While a main-process rotation is being adopted, the store still describes
+// the PREVIOUS file. Building a plan in that window would mirror the old path
+// (and an already-expired timer) back to main, which would rotate a second
+// time. No plan is sent until adoption (and the playlist tag) is done.
+let schedulerApplyPending = 0
+// Every plan/stop send takes a sequence number: an older in-flight invoke must
+// not mark its signature as current after a newer stop/plan has been sent.
+let planSendSeq = 0
 
 function playlistPoolKey(playlist) {
   if (!playlist) return null
@@ -752,7 +761,10 @@ function memberApplyPayload(w) {
 function buildRotationPlan() {
   const snapshot = getSnapshot()
   const current = appliedWallpaper(snapshot)
-  const currentPath = wallpaperPath(current) ?? state.lastAppliedPath
+  // The runtime path is updated synchronously by every apply (and by main's
+  // applied event); the store record can lag behind an async adopt. Prefer the
+  // path so a plan built in that window cannot describe the previous file.
+  const currentPath = state.lastAppliedPath ?? wallpaperPath(current)
   if (!currentPath) return undefined
   if (!arePlaylistsHydrated()) return undefined
   const active = resolveDesktopPlaylist(snapshot, state.lastAppliedPath)
@@ -841,7 +853,7 @@ function schedulePlanSync(delay = 150) {
 }
 
 function syncPlan() {
-  if (!started || planSyncPending || schedulerStatePending) return
+  if (!started || planSyncPending || schedulerStatePending || schedulerApplyPending > 0) return
   const bridge = window.paiintDesktop?.syncPlaylistPlan
   if (typeof bridge !== 'function') return
   const plan = buildRotationPlan()
@@ -849,14 +861,18 @@ function syncPlan() {
   const signature = planSignature(plan)
   if (signature === lastPlanSignature) return
   planSyncPending = true
+  const seq = ++planSendSeq
   Promise.resolve(bridge(plan))
     .then((schedulerState) => {
-      lastPlanSignature = signature
+      // A newer stop/plan was sent while this invoke was in flight; its
+      // signature owns `lastPlanSignature`, not this older response.
+      if (seq === planSendSeq) lastPlanSignature = signature
       applySchedulerState(schedulerState)
     })
     .catch(() => {
       // Main is not ready / app is quitting. Keep the signature unsent so the
       // next tick retries.
+      if (seq === planSendSeq) lastPlanSignature = null
     })
     .finally(() => {
       planSyncPending = false
@@ -891,6 +907,54 @@ function applySchedulerState(schedulerState) {
   bump()
 }
 
+// A user apply is an explicit start: the playlist's interval begins NOW, not
+// at the timestamp it happened to carry from a previous session. Without this,
+// an overdue Timer fires the member AFTER the one the user just applied as
+// soon as main receives the plan ("apply playlist -> it immediately jumps
+// again").
+function restartPlaylistTimer(name) {
+  const playlist = (getSnapshot().playlists ?? []).find((p) => p.name === name)
+  if (!playlist) return
+  const settings = getSettings(playlist.id)
+  const timer = settings.modeSettings.timer
+  timer.accumulatedMs = 0
+  timer.pausedAt = null
+  timer.startedAt = Date.now()
+  if (settings.mode === 'Timer') timer.running = true
+  settings.lastChangeAt = timer.startedAt
+  // Applying a one-run playlist starts a new run.
+  settings._playedOnce = []
+}
+
+// Stop the rotation main is running RIGHT NOW. An apply must cancel the old
+// plan before the debounced plan sync mirrors the new one: otherwise the
+// previous playlist's Timer can fire in that window (or while the new
+// playlist's members are still loading) and put its own file on the desktop.
+function stopMainRotation() {
+  if (!started) return
+  const bridge = window.paiintDesktop?.syncPlaylistPlan
+  if (typeof bridge !== 'function') return
+  const seq = ++planSendSeq
+  Promise.resolve(bridge(null))
+    .then((schedulerState) => {
+      if (seq === planSendSeq) lastPlanSignature = planSignature(null)
+      applySchedulerState(schedulerState)
+    })
+    .catch(() => {
+      if (seq === planSendSeq) lastPlanSignature = null
+    })
+}
+
+// The store announced an apply before React re-rendered. Keep the engine's
+// notion of the desktop path synchronous, restart the target playlist's timer,
+// and cancel the plan of whatever was rotating before.
+function handleWallpaperApplied({ path, source, playlist }) {
+  state.lastAppliedPath = path ?? null
+  if (source === 'playlist' && playlist) restartPlaylistTimer(playlist)
+  if (source === 'playlist' || source === 'gallery') stopMainRotation()
+  schedulePlanSync(0)
+}
+
 // A rotation main performed (Timer or a native scene end). Adopt the file in
 // the store without asking DesktopApply to LOAD it again, and reset the local
 // countdown so the dialog shows the new interval immediately.
@@ -907,12 +971,26 @@ function handlePlaylistApplied(event) {
     timerState.pausedAt = null
     settings.lastChangeAt = timerState.startedAt
   }
+  schedulerApplyPending += 1
   adoptAppliedPath(event.path, { keepSelection: true, silent: true })
     .then((wallpaperId) => {
-      if (wallpaperId) recordExternalPlay(wallpaperId)
+      if (!wallpaperId) return
+      // A rotation is a playlist apply: the file now belongs to the playlist
+      // that is rotating it. Without this tag an old explicit 'None' on the
+      // record (from a gallery apply in a previous session) made the engine
+      // resolve NO_PLAYLIST right after the first rotation and clear main's
+      // plan - the dock then showed "Apply playlist" again.
+      if (event.playlistName && event.playlistName !== 'None') {
+        updateWallpaperProperty(wallpaperId, ['playlist', 'currentPlaylist'], event.playlistName)
+      }
+      recordExternalPlay(wallpaperId)
     })
     .catch(() => {})
-    .finally(() => bump())
+    .finally(() => {
+      schedulerApplyPending = Math.max(0, schedulerApplyPending - 1)
+      bump()
+      schedulePlanSync(0)
+    })
 }
 
 function recordExternalPlay(id) {
@@ -978,7 +1056,7 @@ function fireChange(settings, _reason) {
       const transition = transitionName(settings, next)
       recordPlay(next, transition)
       settings.lastChangeAt = Date.now()
-      applyWallpaper(next.id)
+      applyWallpaper(next.id, { source: 'engine' })
       // The wallpaper changed: the path is what the desktop shows from now on.
       state.lastAppliedPath = wallpaperPath(next)
       return true
@@ -1008,7 +1086,7 @@ function timerRemainingMs(settings) {
   const t = settings.modeSettings.timer
   const total = timerTotalMs(settings)
   if (total <= 0) return 0
-  const elapsed = t.accumulatedMs + (t.running ? state.now - t.startedAt : 0)
+  const elapsed = t.accumulatedMs + (t.running ? Math.max(0, state.now - t.startedAt) : 0)
   return Math.max(0, total - elapsed)
 }
 
@@ -1189,10 +1267,16 @@ function tick() {
   }
   let changed = false
   const id = activePlaylistId()
-  if (id && id !== state.currentPlaylistId) {
+  // A gallery apply (or a desktop file outside every playlist) resolves to
+  // null. Clear the cached id instead of keeping the previous playlist's
+  // settings alive: otherwise a stale Random Interval / schedule kept
+  // evaluating against a desktop it no longer governs.
+  if (id !== state.currentPlaylistId) {
     state.currentPlaylistId = id
-    const settings = getSettings(id)
-    if (settings.startup.randomOnStartup) fireChange(settings, 'Startup')
+    if (id) {
+      const settings = getSettings(id)
+      if (settings.startup.randomOnStartup) fireChange(settings, 'Startup')
+    }
     changed = true
   }
   // The playlist's files have to be in the store before the engine can
@@ -1293,6 +1377,9 @@ export const playlistEngine = {
     // Rotations main performs come back as events so an open window adopts
     // the new file (and its countdown) without re-applying it.
     unsubscribePlaylistApplied = window.paiintDesktop?.onPlaylistApplied?.(handlePlaylistApplied) ?? null
+    // Applies are announced by the store before React re-renders: the old
+    // rotation has to stop at the click, not one plan-sync later.
+    unsubscribeWallpaperApplied = subscribeWallpaperApplied(handleWallpaperApplied)
     // The wallpaper that is on the desktop right now. Main re-applied it at
     // boot before the store knew about it, so the engine asks the runtime
     // which file is playing: that path names the playlist that governs it.
@@ -1337,6 +1424,13 @@ export const playlistEngine = {
       } catch {}
     }
     unsubscribePlaylistApplied = null
+    if (typeof unsubscribeWallpaperApplied === 'function') {
+      try {
+        unsubscribeWallpaperApplied()
+      } catch {}
+    }
+    unsubscribeWallpaperApplied = null
+    schedulerApplyPending = 0
     if (planSyncTimer) {
       clearTimeout(planSyncTimer)
       planSyncTimer = null

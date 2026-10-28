@@ -268,13 +268,18 @@
   box-shadow: 0 0 0 2px var(--gold-border);
 }
 
-/* The file that is on the desktop right now. A solid gold ring, so it is
-   still readable while a drag is in progress (the drop target is a
-   transient state on the cube under the pointer). */
+/* The file that is on the desktop right now. The SAME ring the gallery's
+   selected tile draws - a 1px champagne border plus an opaque 2px --gold
+   outline - not the translucent one the drop target uses. This is a lasting
+   state, so it must read at a glance over a bright poster; the old rule
+   reused the drop target's 55 %-alpha shadow (despite the "solid gold ring"
+   comment), which washed out against the thumbnail. The border stays 1px so
+   the poster does not shift when the state turns on. */
 .dock-chip.playing {
-  border-color: var(--gold-border-strong);
-  border-width: 2px;
-  box-shadow: 0 0 0 2px var(--gold-border);
+  border-color: var(--gold-border);
+  box-shadow:
+    0 0 0 2px var(--gold),
+    0 0 16px var(--gold-muted);
 }
 
 /* The per-cube remove action. It is a span, not a button: a real <button>

@@ -323,3 +323,178 @@ test('the image dwell is configurable and never applies to the Timer', async () 
   h.scheduler.setPlan(makePlan({ mode: 'Timer', currentPath: C.path, updatedAt: h.now() + 1 }))
   assert.deepEqual(h.dueIn(), [60_000], 'the Timer owns the clock, image or not')
 })
+
+// Regression (live 2026-10-28): clicking "Apply playlist" while that
+// playlist's persisted Timer was already overdue made main advance to the
+// member AFTER the one just applied. The plan's remainingMs belonged to a
+// previous session; a new playlist intent must start its own interval.
+test('a different playlist starts a fresh interval even with an overdue timer', async () => {
+  const h = harness()
+
+  h.scheduler.setPlan(makePlan({ playlistId: 'pl-1', currentPath: A.path }))
+
+  h.scheduler.setPlan(makePlan({
+    playlistId: 'pl-2',
+    playlistName: 'Nature',
+    currentPath: C.path,
+    queue: [C, B],
+    updatedAt: h.now() + 1,
+    timer: {
+      ...makePlan().timer,
+      remainingMs: 0,
+      startedAt: h.now() - 600_000,
+      syncedAt: h.now() - 600_000,
+    },
+  }))
+
+  assert.deepEqual(h.dueIn(), [60_000], 'the first member gets its full interval')
+  assert.equal(h.applied.length, 0)
+
+  h.advance(60_000)
+  await h.runDue()
+  assert.equal(h.applied[0].path, B.path)
+})
+
+// The same rule for a user applying another member of the playlist that is
+// already running: the interval restarts at the apply, it does not inherit the
+// deadline that was about to fire.
+test('a user apply inside the same playlist restarts the timer', async () => {
+  const h = harness()
+
+  h.scheduler.setPlan(makePlan({ currentPath: A.path }))
+  h.advance(50_000)
+
+  h.scheduler.setPlan(makePlan({
+    currentPath: B.path,
+    updatedAt: h.now() + 1,
+    timer: { ...makePlan().timer, remainingMs: 10_000, syncedAt: h.now() },
+  }))
+
+  assert.deepEqual(h.dueIn(), [60_000])
+})
+
+// Regression (live 2026-10-28): the renderer's 500 ms tick built a plan a few
+// ms after main applied the next member, but before the applied event was
+// adopted. That plan still named the PREVIOUS file; re-anchoring to it made
+// the cursor jump backwards and the timer fire a second time.
+test('a stale post-apply plan does not drag the cursor back to the previous file', async () => {
+  const h = harness()
+
+  h.scheduler.setPlan(makePlan({ currentPath: A.path }))
+  h.advance(60_000)
+  await h.runDue()
+
+  assert.equal(h.applied.length, 1)
+  assert.equal(h.scheduler.state().currentPath, B.path)
+
+  h.advance(1)
+  h.scheduler.setPlan(makePlan({
+    currentPath: A.path,
+    updatedAt: h.now(),
+    timer: { ...makePlan().timer, remainingMs: 0, syncedAt: h.now() },
+  }))
+
+  assert.equal(h.scheduler.state().currentPath, B.path, 'the applied file stays the cursor')
+  assert.deepEqual(h.dueIn(), [59_999])
+
+  h.advance(59_999)
+  await h.runDue()
+  assert.deepEqual(h.applied.map((entry) => entry.path), [B.path, C.path])
+})
+
+// A gallery apply mirrors a null plan. That is a stop, not "keep the old
+// rotation until the next plan arrives": an overdue Timer must not fire over
+// the file the user just put on the desktop.
+test('clearing the plan stops a running timer immediately', async () => {
+  const h = harness()
+
+  h.scheduler.setPlan(makePlan())
+  h.scheduler.setPlan(null)
+
+  assert.equal(h.scheduler.state().active, false)
+  assert.equal(h.scheduler.state().playlistId, null)
+  assert.deepEqual(h.dueIn(), [])
+
+  h.advance(120_000)
+  await h.runDue()
+  assert.equal(h.applied.length, 0)
+})
+
+// A plan with no queue cannot govern anything; it must never schedule a
+// phantom apply.
+test('a plan with no queue is inert', async () => {
+  const h = harness()
+
+  h.scheduler.setPlan(makePlan({ queue: [] }))
+  assert.equal(h.scheduler.state().active, false)
+  assert.deepEqual(h.dueIn(), [])
+
+  h.advance(120_000)
+  await h.runDue()
+  assert.equal(h.applied.length, 0)
+})
+
+// Regression (live 2026-10-28 15:55:48): the Timer started a native apply and
+// the user applied another file while it was still loading. The old apply
+// finished afterwards and re-armed its own timer / overwrote the cursor of the
+// plan that had replaced it. The native call cannot be cancelled, but its
+// result must be discarded.
+test('a plan replaced mid-apply discards the stale result', async () => {
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const h = harness({
+    apply: async (entry) => {
+      if (entry.path === B.path) await gate
+      return { ok: true }
+    },
+  })
+
+  h.scheduler.setPlan(makePlan({ currentPath: A.path }))
+  h.advance(60_000)
+  const running = h.runDue()
+
+  // The user applies a gallery file while the Timer's native apply is loading.
+  h.scheduler.setPlan(null)
+  release()
+  await running
+
+  assert.equal(h.applied.length, 1, 'the native apply happened')
+  assert.equal(h.events.length, 0, 'no rotation is reported for the replaced plan')
+  assert.equal(h.scheduler.state().active, false)
+  assert.equal(h.scheduler.state().playlistId, null)
+  assert.equal(h.scheduler.state().currentPath, null)
+  assert.deepEqual(h.dueIn(), [])
+})
+
+// Same race inside one playlist: the user applies C from the strip while the
+// Timer is still loading B. C must stay the cursor and get the full interval.
+test('a user apply during a timer apply wins over the in-flight member', async () => {
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const h = harness({
+    apply: async (entry) => {
+      if (entry.path === B.path) await gate
+      return { ok: true }
+    },
+  })
+
+  h.scheduler.setPlan(makePlan({ currentPath: A.path }))
+  h.advance(60_000)
+  const running = h.runDue()
+
+  h.scheduler.setPlan(makePlan({
+    currentPath: C.path,
+    updatedAt: h.now() + 1,
+    timer: { ...makePlan().timer, remainingMs: 60_000, startedAt: h.now(), syncedAt: h.now() },
+  }))
+  release()
+  await running
+
+  assert.equal(h.scheduler.state().currentPath, C.path)
+  assert.equal(h.events.length, 0)
+  assert.deepEqual(h.dueIn(), [60_000])
+})

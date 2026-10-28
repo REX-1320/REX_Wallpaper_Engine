@@ -25,6 +25,9 @@
 const SCENE_END_MODES = new Set(['After Current Ends', 'Video Ends', 'Audio Ends'])
 const TIMER_MODE = 'Timer'
 const MAX_TIMER_DELAY = 2_147_483_647 // setTimeout's 32-bit limit (~24.8 days)
+// How long after our own apply a plan that still carries the PREVIOUS file is
+// treated as the renderer not having processed the applied event yet.
+const SETTLE_AFTER_APPLY_MS = 2_500
 // How long a still image stays on the desktop in a scene-end mode before the
 // playlist moves on. A still never emits ENDED, so without this the rotation
 // stops dead the first time it reaches one.
@@ -61,6 +64,13 @@ class PlaylistScheduler {
     this.exhausted = false
     this.exhaustedIdentity = null
     this.lastApplyAt = 0
+    // The file we rotated AWAY from on our last apply. A plan that still
+    // carries it is stale even if it was built a few ms after the apply.
+    this.lastAppliedFrom = null
+    // Bumped whenever the user's intent changes (new playlist, another file,
+    // or a stop). An async native apply that started before the bump must not
+    // write its result over the newer intent.
+    this.intentGeneration = 0
     this.lastPersisted = null
     this.started = false
   }
@@ -79,6 +89,8 @@ class PlaylistScheduler {
       this.dwellKey = null
       this.exhausted = false
       this.exhaustedIdentity = null
+      this.lastAppliedFrom = null
+      this.intentGeneration += 1
       this._persist()
       return this.state()
     }
@@ -103,23 +115,37 @@ class PlaylistScheduler {
       queue,
       updatedAt,
     }
+    const playlistChanged = Boolean(this.plan && this.plan.playlistId !== normalized.playlistId)
 
     // The renderer is authoritative about what is on the desktop, but a plan
     // can arrive while an apply is still settling. Within that window the
     // scheduler's own path wins (it just applied it).
     const incoming = pathKey(normalized.currentPath)
     const current = pathKey(this.currentPath)
+    let externalPathChange = false
     if (incoming && incoming !== current) {
       // Plans built before the apply are already rejected above. A plan from
       // the same millisecond as the apply is the one still in flight; the
       // scheduler's own path wins. Anything newer is the renderer reporting a
       // real change (e.g. the user applied another tile).
-      const inFlight = this.lastApplyAt > 0 && updatedAt === this.lastApplyAt && at - this.lastApplyAt < 2_500
-      if (!inFlight) this.currentPath = normalized.currentPath
+      const beforeApply = this.lastApplyAt > 0 && updatedAt <= this.lastApplyAt
+      // The renderer builds plans every 500 ms. One built a few ms AFTER our
+      // apply but before the applied event was processed still carries the
+      // file we rotated away from - not a user apply.
+      const settlingStale = this.lastApplyAt > 0
+        && at - this.lastApplyAt < SETTLE_AFTER_APPLY_MS
+        && incoming === pathKey(this.lastAppliedFrom)
+      if (!beforeApply && !settlingStale) {
+        this.currentPath = normalized.currentPath
+        externalPathChange = true
+      } else {
+        this._log('ignoring plan that predates the last apply', normalized.currentPath)
+      }
     } else if (!this.currentPath && incoming) {
       this.currentPath = normalized.currentPath
     }
     normalized.currentPath = this.currentPath ?? null
+    if (playlistChanged || externalPathChange) this.intentGeneration += 1
 
     // A change to the queue/mode/timer is a new intent: let a one-run playlist
     // rotate again after the user edits it.
@@ -132,7 +158,11 @@ class PlaylistScheduler {
     this.plan = normalized
 
     if (mode === TIMER_MODE) {
-      this._applyTimerPlan(normalized, opts, at)
+      // A different playlist (or a file applied outside this scheduler) is a
+      // fresh start: the interval begins now, even if the renderer's mirrored
+      // timer was already overdue. Inheriting that deadline rotated a second
+      // member immediately after the user's apply.
+      this._applyTimerPlan(normalized, { ...opts, restart: playlistChanged || externalPathChange }, at)
     } else {
       // Scene-end is event-driven, except for still images (no ENDED); every
       // other mode is the renderer's job.
@@ -227,6 +257,8 @@ class PlaylistScheduler {
     this.dwellKey = null
     this.exhausted = false
     this.exhaustedIdentity = null
+    this.lastAppliedFrom = null
+    this.intentGeneration += 1
     this._persist()
     return this.state()
   }
@@ -272,6 +304,14 @@ class PlaylistScheduler {
     ].join('|')
   }
 
+  // What must stay the same for an in-flight native apply to still describe
+  // the rotation the user wants. The timer fields are deliberately excluded:
+  // the renderer rebroadcasts them, and a rebroadcast is not a new intent.
+  _planToken(plan) {
+    if (!plan) return 'none'
+    return [plan.playlistId ?? '', plan.mode ?? '', this._queueKey(plan)].join('|')
+  }
+
   _queueKey(plan) {
     return (plan.queue ?? []).map((entry) => pathKey(entry.path)).join('>')
   }
@@ -303,6 +343,13 @@ class PlaylistScheduler {
     if (opts.restoredDueAt != null) {
       this.timerKey = key
       this.nextDueAt = Number(opts.restoredDueAt)
+    } else if (opts.restart) {
+      // A new playlist / a file applied outside this scheduler starts its own
+      // interval. The mirrored remainingMs belongs to the previous intent and
+      // may already be 0, which would advance past the member the user just
+      // applied.
+      this.timerKey = key
+      this.nextDueAt = at + total
     } else if (key !== this.timerKey || this.nextDueAt == null) {
       this.timerKey = key
       const syncedAt = Number(timer.syncedAt) || at
@@ -410,7 +457,14 @@ class PlaylistScheduler {
 
     const queue = plan.queue
     const index = this._indexOf(this.currentPath ?? plan.currentPath)
+    const fromPath = this.currentPath
     const start = index < 0 ? 0 : index + 1
+    // The plan can be replaced while the native apply is in flight (the user
+    // applies another playlist exactly when the Timer fires). The apply cannot
+    // be cancelled, but its result must not update the cursor, arm the old
+    // timer or emit a rotation for a plan that no longer exists.
+    const token = this._planToken(plan)
+    const intent = this.intentGeneration
     const candidates = []
     if (plan.loop) {
       for (let i = 0; i < queue.length; i += 1) candidates.push(queue[(start + i) % queue.length])
@@ -433,6 +487,10 @@ class PlaylistScheduler {
     this.applying = true
     try {
       for (const candidate of candidates) {
+        if (this._planToken(this.plan) !== token || this.intentGeneration !== intent) {
+          this._log('plan changed before apply, aborting', `reason=${reason}`)
+          return false
+        }
         if (!this.exists(candidate)) {
           this._log('skipping unavailable member', candidate.path)
           continue
@@ -442,16 +500,22 @@ class PlaylistScheduler {
           if (result && result.ok === false) {
             throw new Error(result.error ?? 'apply failed')
           }
+          if (this._planToken(this.plan) !== token || this.intentGeneration !== intent) {
+            this._log('plan changed during apply, discarding result', candidate.path)
+            return false
+          }
+          const activePlan = this.plan
           const at = this.now()
           this.currentPath = candidate.path
+          this.lastAppliedFrom = fromPath
           this.lastApplyAt = at
-          plan.currentPath = candidate.path
-          if (plan.mode === TIMER_MODE) {
-            this._armAfter(plan, at)
+          activePlan.currentPath = candidate.path
+          if (activePlan.mode === TIMER_MODE) {
+            this._armAfter(activePlan, at)
           } else if (this._isStill(candidate)) {
             // The playlist just landed on a still. It emits no ENDED, so the
             // dwell is the only thing that keeps the rotation moving.
-            this._armDwell(plan, at)
+            this._armDwell(activePlan, at)
           } else {
             this._cancelTimer()
             this.nextDueAt = null
@@ -463,9 +527,9 @@ class PlaylistScheduler {
             path: candidate.path,
             reason,
             at,
-            playlistId: plan.playlistId,
-            playlistName: plan.playlistName,
-            mode: plan.mode,
+            playlistId: activePlan.playlistId,
+            playlistName: activePlan.playlistName,
+            mode: activePlan.mode,
             nextDueAt: this.nextDueAt,
           })
           this._log('applied', candidate.path, `reason=${reason}`)
@@ -478,6 +542,10 @@ class PlaylistScheduler {
 
       // Nothing in this cycle could be applied. Keep the playlist alive with
       // a retry instead of silently freezing on the current file.
+      if (this._planToken(this.plan) !== token || this.intentGeneration !== intent) {
+        this._log('plan changed while applying, not retrying the old plan', `reason=${reason}`)
+        return false
+      }
       this._log('no member could be applied', `reason=${reason}`)
       this._retry(plan, reason)
       this._persist()

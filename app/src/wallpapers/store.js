@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import { createWallpaperFromType, detectFileType, isSupportedWallpaperType, PLAYLISTS, PLAYLIST_ICON_DEFAULTS, TYPE_META } from './registry'
 import { applySettings, isLiveProperty, pickLiveSettings } from './wallpaperSettings'
 import { applyDefaults, sanitizeDefaults } from '../settings/defaults'
+import { playlistScopeForApply } from './playlist/scope'
 
 // The defaults the Settings page owns, read once per import. A missing or
 // corrupt entry falls back to the built-in baseline.
@@ -35,6 +36,12 @@ let appliedId = null
 let externallyApplied = false
 let lastAppliedPath = null
 const listeners = new Set()
+// Applies are announced synchronously, before React re-renders. The playlist
+// engine needs that: it must stop main's previous rotation (and restart the
+// new playlist's timer) at the click, not 150 ms later when the mirrored plan
+// happens to be rebuilt. The store cannot import the engine (the engine
+// imports the store), so this is the one-way hook.
+const appliedListeners = new Set()
 let snapshot = null
 let seeded = false
 let cloneCounter = 0
@@ -43,6 +50,23 @@ let fileCounter = 0
 function bump() {
   snapshot = null
   for (const listener of listeners) listener()
+}
+
+function notifyWallpaperApplied(payload) {
+  for (const listener of appliedListeners) {
+    try {
+      listener(payload)
+    } catch {
+      // An engine listener must never break the apply itself.
+    }
+  }
+}
+
+// Registers the one listener that mirrors "what is on the desktop" into the
+// playlist engine. Returns an unsubscribe function.
+export function subscribeWallpaperApplied(listener) {
+  appliedListeners.add(listener)
+  return () => appliedListeners.delete(listener)
 }
 
 // ─── Per-wallpaper live settings persistence ───────────────────────────────
@@ -122,12 +146,35 @@ export function selectWallpaper(id) {
 
 // Applies to the desktop. Unlike selectWallpaper (single click / preview),
 // this is the only selection change that triggers DesktopApply.
-export function applyWallpaper(id) {
+//
+// `source` decides whether the desktop is governed by a playlist (see
+// playlistScopeForApply): a gallery apply opts out explicitly even when the
+// file is a playlist member, a playlist apply names its playlist, and an
+// engine rotation leaves the tag alone.
+export function applyWallpaper(id, { source = 'gallery', playlist = null } = {}) {
   if (id !== null && !wallpapers.has(id)) return
+  if (id !== null) {
+    const scope = playlistScopeForApply(source, playlist)
+    if (scope) {
+      const clone = structuredClone(wallpapers.get(id))
+      clone.playlist = { ...clone.playlist, ...scope }
+      wallpapers.set(id, clone)
+    }
+  }
   selectedId = id
   appliedId = id
   externallyApplied = false
+  const applied = id !== null ? wallpapers.get(id) : null
+  // Announce AFTER bump(): bump schedules the debounced plan sync (150 ms),
+  // the listener immediately schedules a 0 ms one. Doing it the other way
+  // round let the debounce replace the immediate sync.
   bump()
+  notifyWallpaperApplied({
+    id,
+    path: applied ? applied.filePath ?? applied.info?.filePath ?? applied.info?.source ?? null : null,
+    source,
+    playlist,
+  })
 }
 
 export function updateWallpaperProperty(id, path, value) {
@@ -438,6 +485,9 @@ export async function adoptAppliedPath(path, opts = {}) {
   appliedId = id
   externallyApplied = true
   if (!opts.silent) bump()
+  // Same ordering as applyWallpaper: the 0 ms plan sync must win over the
+  // debounced one a non-silent bump schedules.
+  notifyWallpaperApplied({ id, path: target, source: 'external', playlist: null })
   return id
 }
 

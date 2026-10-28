@@ -38,6 +38,32 @@ export function appliedWallpaper(snapshot) {
   return snapshot?.wallpapers?.find((w) => w.id === snapshot.appliedId) ?? null
 }
 
+// The membership key of the wallpaper that is on the desktop - the cube the
+// playlist strip outlines as "playing". The strip used to carry its own copy
+// of these path rules; sharing them means the cube and the engine can never
+// disagree about which file is running.
+export function appliedMemberKey(snapshot) {
+  return memberKey(wallpaperPath(appliedWallpaper(snapshot)))
+}
+
+// The playlist tag an apply writes onto the record. The SOURCE of the apply
+// decides who governs the desktop - membership must never do it on its own:
+//
+//   gallery  -> an explicit 'None', so applying a playlist member from the
+//               gallery stops the rotation instead of resurrecting its list
+//   playlist -> that playlist's name
+//   engine   -> null: a rotation keeps the tag the record already carries
+//
+// A playlist apply without a name cannot tag anything (returns null); the
+// caller is expected to pass one.
+export function playlistScopeForApply(source, playlistName = null) {
+  if (source === 'gallery') return { currentPlaylist: 'None', explicit: true }
+  if (source === 'playlist' && playlistName) {
+    return { currentPlaylist: playlistName, explicit: true }
+  }
+  return null
+}
+
 // The playlist that governs a specific wallpaper record.
 export function playlistFor(snapshot, wallpaper) {
   if (!wallpaper) return null

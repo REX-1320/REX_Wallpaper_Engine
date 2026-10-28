@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { FileImage, FolderOpen, ListMusic, MonitorPlay, Trash2, X } from 'lucide-react'
 import { getThumb, subscribeThumbs } from './thumbCache'
 import { toFileUrl } from './thumbnail'
+import { appliedMemberKey, memberKey } from './playlist/scope'
 import {
   applyWallpaper,
   addPlaylistMembers,
@@ -15,11 +16,6 @@ import {
 
 const DND_MIME = 'application/x-paiint-wallpaper-paths'
 const REORDER_MIME = 'application/x-paiint-playlist-reorder'
-
-function memberKey(path) {
-  if (!path) return null
-  return String(path).replace(/\//g, '\\').toLowerCase()
-}
 
 function baseName(path) {
   if (!path) return ''
@@ -36,14 +32,12 @@ export default function PlaylistStrip({ playlistId }) {
   const playlist = playlists.find((p) => p.id === playlistId) ?? null
   const members = useMemo(() => playlist?.members ?? [], [playlist])
   // The file that is on the desktop RIGHT NOW (appliedId), so its cube can
-  // be outlined. The path is keyed the same way as the membership, so the
-  // match survives the case/slash differences between the library and the
-  // playlist.
-  const appliedKey = useMemo(() => {
-    const applied = (wallpapers ?? []).find((w) => w.id === appliedId)
-    if (!applied) return null
-    return memberKey(applied.filePath ?? applied.info?.filePath ?? applied.info?.source)
-  }, [wallpapers, appliedId])
+  // be outlined. The key is the shared membership rule (case/slash
+  // insensitive), so it matches the playlist's own members.
+  const appliedKey = useMemo(
+    () => appliedMemberKey({ wallpapers, appliedId }),
+    [wallpapers, appliedId],
+  )
   const [library, setLibrary] = useState({})
   const [dragOver, setDragOver] = useState(false)
   const [dragIndex, setDragIndex] = useState(null)
@@ -87,7 +81,7 @@ export default function PlaylistStrip({ playlistId }) {
 
   const onApply = async (member) => {
     const id = await ensureWallpaperForPath(member)
-    if (id) applyWallpaper(id)
+    if (id) applyWallpaper(id, { source: 'playlist', playlist: playlist?.name })
   }
 
   // The playlist whose engine rules govern this file. The engine reads the

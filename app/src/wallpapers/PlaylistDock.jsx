@@ -17,7 +17,7 @@ import PlaylistStrip from './PlaylistStrip'
 import PlaylistEngineDialog from './playlist/PlaylistEngineDialog'
 import { playlistEngine } from './playlist/engine'
 import { PLAYLIST_ICON_CHOICES, PLAYLIST_ICONS } from './registry'
-import { createPlaylist, deletePlaylist, renamePlaylist, setPlaylistIcon, useWallpaperStore, applyWallpaper, ensureWallpaperForPath, updateWallpaperProperty } from './store'
+import { createPlaylist, deletePlaylist, renamePlaylist, setPlaylistIcon, useWallpaperStore, applyWallpaper, ensureWallpaperForPath } from './store'
 import { setLayoutState, useLayoutState } from '../state/layout'
 import './PlaylistDock.css'
 
@@ -105,8 +105,7 @@ export default function PlaylistDock({
     if (!current || current.members.length === 0) return
     const id = await ensureWallpaperForPath(current.members[0])
     if (!id) return
-    updateWallpaperProperty(id, ['playlist', 'currentPlaylist'], current.name)
-    applyWallpaper(id)
+    applyWallpaper(id, { source: 'playlist', playlist: current.name })
   }
 
   const dockHeight = !open ? 0 : maximized ? '100%' : minimized ? 36 : height

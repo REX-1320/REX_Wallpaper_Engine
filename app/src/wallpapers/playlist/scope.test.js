@@ -1,7 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { NO_PLAYLIST, memberKey, playlistFor, resolveDesktopPlaylist } from './scope.js'
+import {
+  NO_PLAYLIST,
+  appliedMemberKey,
+  memberKey,
+  playlistFor,
+  playlistScopeForApply,
+  resolveDesktopPlaylist,
+} from './scope.js'
 
 function makeSnapshot(overrides = {}) {
   return {
@@ -22,6 +29,38 @@ const PLAYLIST = {
 test('memberKey normalises Windows separators and case', () => {
   assert.equal(memberKey('C:/Wallpapers/Rain.MP4'), 'c:\\wallpapers\\rain.mp4')
   assert.equal(memberKey(null), null)
+})
+
+// The playlist strip outlines the cube whose membership key equals the key of
+// the applied record. The class expression is driven by this one value, so a
+// drift in the path rules silently removes the gold ring from the playing cube.
+test('appliedMemberKey keys the playing cube like the playlist membership', () => {
+  const snapshot = makeSnapshot({
+    appliedId: 'file-1',
+    wallpapers: [{ id: 'file-1', filePath: 'C:/Wallpapers/Rain.MP4' }],
+  })
+
+  assert.equal(appliedMemberKey(snapshot), memberKey(PLAYLIST.members[0]))
+})
+
+test('appliedMemberKey is null until a wallpaper is applied', () => {
+  assert.equal(appliedMemberKey(makeSnapshot()), null)
+
+  // A single-click preview is not "playing": only an apply may outline a cube.
+  const preview = makeSnapshot({
+    selectedId: 'file-1',
+    wallpapers: [{ id: 'file-1', filePath: 'C:\\Wallpapers\\rain.mp4' }],
+  })
+  assert.equal(appliedMemberKey(preview), null)
+})
+
+test('appliedMemberKey falls back to info.filePath for a record without a root path', () => {
+  const snapshot = makeSnapshot({
+    appliedId: 'file-1',
+    wallpapers: [{ id: 'file-1', info: { filePath: 'C:\\Wallpapers\\storm.mp4' } }],
+  })
+
+  assert.equal(appliedMemberKey(snapshot), memberKey(PLAYLIST.members[1]))
 })
 
 test('an applied playlist member resolves to its playlist', () => {
@@ -118,4 +157,53 @@ test('an explicit playlist name wins over membership', () => {
   })
 
   assert.equal(playlistFor(snapshot, wallpaper)?.id, 'pl-3')
+})
+
+// Regression: applying a playlist MEMBER from the gallery used to leave the
+// record's default 'None', and playlistFor's membership fallback then handed
+// the engine the playlist - so the desktop kept rotating under a playlist the
+// user never applied. The apply's SOURCE must decide the governance.
+test('a gallery apply opts a playlist member out of its playlist', () => {
+  const wallpaper = {
+    id: 'file-1',
+    filePath: 'C:\\Wallpapers\\rain.mp4',
+    playlist: { currentPlaylist: 'Rain', explicit: true },
+  }
+  Object.assign(wallpaper.playlist, playlistScopeForApply('gallery'))
+
+  assert.deepEqual(wallpaper.playlist, { currentPlaylist: 'None', explicit: true })
+
+  const snapshot = makeSnapshot({
+    appliedId: 'file-1',
+    wallpapers: [wallpaper],
+    playlists: [PLAYLIST],
+  })
+  assert.equal(playlistFor(snapshot, wallpaper), NO_PLAYLIST)
+  assert.equal(resolveDesktopPlaylist(snapshot, wallpaper.filePath), NO_PLAYLIST)
+  assert.equal(resolveDesktopPlaylist(snapshot, wallpaper.filePath)?.id, null)
+})
+
+test('a playlist apply tags the member with that playlist', () => {
+  const wallpaper = {
+    id: 'file-1',
+    filePath: 'C:\\Wallpapers\\rain.mp4',
+    playlist: { currentPlaylist: 'None' },
+  }
+  Object.assign(wallpaper.playlist, playlistScopeForApply('playlist', 'Rain'))
+
+  assert.deepEqual(wallpaper.playlist, { currentPlaylist: 'Rain', explicit: true })
+
+  const snapshot = makeSnapshot({
+    appliedId: 'file-1',
+    wallpapers: [wallpaper],
+    playlists: [PLAYLIST],
+  })
+  assert.equal(playlistFor(snapshot, wallpaper)?.id, 'pl-2')
+})
+
+test('an engine rotation keeps the record tag it already has', () => {
+  assert.equal(playlistScopeForApply('engine'), null)
+  // A playlist apply with no name cannot tag anything; the caller must not
+  // silently turn the desktop into a gallery apply either.
+  assert.equal(playlistScopeForApply('playlist', null), null)
 })
