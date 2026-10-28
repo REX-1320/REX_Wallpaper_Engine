@@ -145,18 +145,23 @@
 
 .sidebar-heading {
   position: absolute;
-  top: 12px;
-  left: 24px;
+  top: 10px;
+  left: 20px;
   margin: 0;
-  font-size: 90px;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-  color: var(--text-primary);
   z-index: 20;
-  /* The wordmark is the app's signature: brushed champagne, lit from the
-     left, with a soft metallic bloom. */
+}
 
+/* The mark is the app's signature. The artwork is already transparent and
+   carries its own champagne shading, so the only addition is a soft bloom
+   that keeps it legible over a bright wallpaper. */
+.sidebar-logo {
+  display: block;
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.38));
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .sidebar{

@@ -400,7 +400,7 @@ function lastFrameSnapshotPath() {
   // package's LocalCache, where Explorer cannot use it as a wallpaper.
   try {
     const pictures = app.getPath('pictures')
-    return pictures ? path.join(pictures, 'Paiint', 'last-frame.png') : null
+    return pictures ? path.join(pictures, 'Paiint', 'last-frame.jpg') : null
   } catch {
     return null
   }
@@ -671,8 +671,9 @@ function createWindow() {
   // its Timer/scene-end scheduler is in main (playlist-scheduler.cjs), so the
   // rotation continues in the tray.
   //
-  // "Quit Paiint on close" is the user's choice (tray.closeToTray === false);
-  // the default keeps the app alive in the tray.
+  // Closing quits by default (tray.closeToTray === false), so the runtime
+  // stops and leaves the last frame as a still. Turning the Settings option
+  // off keeps the app alive in the tray and the wallpaper playing.
   win.on('close', (event) => {
     if (isQuitting) return
     event.preventDefault()

@@ -24,7 +24,7 @@ All of it is local, and all of it is yours:
 |---|---|---|
 | Wallpaper library, playlists, presets and app settings | `%APPDATA%\Paiint` | Remember what you imported and how you configured it |
 | Thumbnail cache | `%APPDATA%\Paiint\thumbnails` | Show gallery posters without re-decoding every file |
-| Last frame left on the desktop at quit | `%USERPROFILE%\Pictures\Paiint\last-frame.png` | Keep the final video frame as a still wallpaper |
+| Last frame left on the desktop at quit | `%USERPROFILE%\Pictures\Paiint\last-frame.jpg` | Keep the final video frame as a still wallpaper |
 | Runtime logs and crash reports | `%TEMP%\Paiint` | Let you (or us, if you send them) diagnose a problem |
 
 Deleting the app does not delete these folders; you can remove them at any

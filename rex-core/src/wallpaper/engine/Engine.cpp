@@ -1365,7 +1365,7 @@ bool Engine::CaptureFrame(const std::string& pathUtf8) {
     std::unique_lock<std::mutex> lock(m_captureMutex);
     // The render loop services this at the top of its next iteration, so a
     // paced frame (~250 ms worst case) plus one SDR re-render, readback and
-    // PNG encode. The bound only exists so a wedged GPU can never turn a
+    // JPEG encode. The bound only exists so a wedged GPU can never turn a
     // quit into a hang; the app's own SHUTDOWN watchdog is the backstop.
     const bool done = m_captureCv.wait_for(
         lock, std::chrono::seconds(10), [this] { return m_captureDone; });
@@ -2015,7 +2015,7 @@ void Engine::RenderLoop() {
         if (m_captureRequested.exchange(false, std::memory_order_acq_rel)) {
             bool ok = false;
             if (m_renderer && m_renderer->IsInitialized()) {
-                ok = m_renderer->CaptureFrameToPng(m_capturePath);
+                ok = m_renderer->CaptureFrameToJpeg(m_capturePath);
             }
             {
                 std::lock_guard<std::mutex> lock(m_captureMutex);

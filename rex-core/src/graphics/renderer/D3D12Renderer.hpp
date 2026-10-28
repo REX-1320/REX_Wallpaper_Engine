@@ -79,7 +79,7 @@ public:
     /// when the GPU readback failed, or when the encode failed. Blocks for
     /// at most a few frames; MUST NOT be called between BeginFrame and
     /// EndFrame.
-    bool CaptureFrameToPng(std::string_view pathUtf8);
+    bool CaptureFrameToJpeg(std::string_view pathUtf8);
 
     // ─── Texture Loading ────────────────────────────────────────────────
     shared::Result<void> LoadTexture(std::string_view path);
@@ -229,9 +229,9 @@ private:
     bool BeginFrameLocked();
     bool EndFrameLocked();
 
-    /// Writes 32-bit BGRA pixels as a PNG through WIC.
-    static bool WriteBgraPng(const std::wstring& path, const uint8_t* bgra,
-                             UINT width, UINT height, UINT rowPitch);
+    /// Writes 32-bit BGRA pixels as a JPEG (quality 95) through WIC.
+    static bool WriteBgraJpeg(const std::wstring& path, const uint8_t* bgra,
+                              UINT width, UINT height, UINT rowPitch);
 
     /// Rebuilds m_transformMatrix from rotation/flip (row-major, matches
     /// the vertex shader's row-vector mul(v, M)). Caller holds m_renderMutex.

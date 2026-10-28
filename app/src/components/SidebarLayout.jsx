@@ -3,7 +3,7 @@ import { motion } from 'motion/react'
 import './SidebarLayout.css'
 import { ChevronLeft, ChevronRight, Minus, Square, X, Search, Image, Settings, Info, User } from 'lucide-react'
 import Glass_effect from './Glass_effect'
-import ShinyText from './ShinyText'
+import paiintMark from '../assets/paiint-mark.png'
 import DesktopApply from '../wallpapers/DesktopApply'
 import PlaylistDock from '../wallpapers/PlaylistDock'
 import { setLayoutState, useLayoutState } from '../state/layout'
@@ -165,7 +165,7 @@ function SidebarLayout({ active, onSelect, children }) {
       </motion.div>
 
       <h3 className="sidebar-heading">
-        <ShinyText text="Y0!" color="var(--gold-classic)" shineColor="var(--gold-bright)" speed={3} />
+        <img className="sidebar-logo" src={paiintMark} alt="Paiint" draggable={false} />
       </h3>
 
       <motion.aside

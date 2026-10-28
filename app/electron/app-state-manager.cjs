@@ -35,7 +35,9 @@ class AppStateManager {
       },
       recent: { wallpapers: [], wallpaperIndex: -1 },
       theme: { themeId: 'midnight-glass', colorTokens: {} },
-      tray: { minimizeToTray: true, closeToTray: true },
+      // Closing the window quits Paiint by default (the desktop keeps the
+      // last frame as a still). Opt in to the tray with Settings > Window.
+      tray: { minimizeToTray: true, closeToTray: false },
       engine: { maxFps: 0, hardwareAcceleration: true, snapshotOnQuit: true },
       wallpaperSettings: {}, // per-wallpaper settings keyed by normalized path (Phase 2)
       wallpaper: { assignments: {}, playback: { position: 0, volume: 1.0, paused: false } },

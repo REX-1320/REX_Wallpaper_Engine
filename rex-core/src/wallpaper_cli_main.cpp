@@ -173,7 +173,7 @@ static std::string LastFrameImagePath() {
                      WidenToUtf8(dir));
         return {};
     }
-    return WidenToUtf8(dir + L"\\last-frame.png");
+    return WidenToUtf8(dir + L"\\last-frame.jpg");
 }
 
 static std::shared_ptr<rex::settings::ISettingsService> CreateSettingsService() {
@@ -1100,7 +1100,7 @@ static int RunRuntime(int maxFps, bool hardwareAcceleration, bool forceSdr) {
             // path). CaptureFrame reports false when no scene is on screen,
             // so an idle reclaim after an image apply never overwrites the
             // image the user just chose. Order matters: capture, then hand
-            // the PNG to the OS as the wallpaper, then tear the WorkerW
+            // the JPEG to the OS as the wallpaper, then tear the WorkerW
             // down — the desktop never flashes black in between.
             if (params["snapshot"].AsBool(false) && engine) {
                 const std::string snapshotPath = LastFrameImagePath();

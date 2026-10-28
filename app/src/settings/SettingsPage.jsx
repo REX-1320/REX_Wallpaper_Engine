@@ -25,11 +25,6 @@ import './settings.css'
 //   engine.maxFps             -> the runtime's INIT (applies at engine start)
 //   engine.hardwareAcceleration -> the runtime's INIT (applies at engine start)
 
-const CLOSE_OPTIONS = [
-  { value: 'tray', label: 'Keep in tray' },
-  { value: 'quit', label: 'Quit Paiint' },
-]
-
 const FIT_OPTIONS = FIT_MODES.map((mode) => ({
   value: mode,
   label: { Cover: 'Fill', Contain: 'Fit', Stretch: 'Stretch', Center: 'Center', Tile: 'Tile' }[mode] ?? mode,
@@ -158,7 +153,7 @@ function Files() {
 
 export default function SettingsPage() {
   const [rememberBounds, setRememberBounds] = useAppState('ui.rememberWindowBounds', true)
-  const [closeToTray, setCloseToTray] = useAppState('tray.closeToTray', true)
+  const [closeToTray, setCloseToTray] = useAppState('tray.closeToTray', false)
   const [startMinimized, setStartMinimized] = useAppState('startup.startMinimized', true)
   const [restoreWallpaper, setRestoreWallpaper] = useAppState('startup.restoreWallpaper', true)
   const [maxFps, setMaxFps] = useAppState('engine.maxFps', 0)
@@ -220,12 +215,11 @@ export default function SettingsPage() {
                 checked={rememberBounds !== false}
                 onChange={(v) => setRememberBounds(v)}
               />
-              <PropertyDropdown
-                label="On close"
-                description="What happens when you close the window"
-                value={closeToTray === false ? 'quit' : 'tray'}
-                options={CLOSE_OPTIONS}
-                onChange={(v) => setCloseToTray(v === 'tray')}
+              <PropertyToggle
+                label="Quit Paiint when the window closes"
+                description="Stops the wallpaper and leaves the last frame on the desktop. Turn this off to keep Paiint running in the tray."
+                checked={closeToTray === false}
+                onChange={(v) => setCloseToTray(!v)}
               />
             </PropertyGroup>
           </PropertySection>
