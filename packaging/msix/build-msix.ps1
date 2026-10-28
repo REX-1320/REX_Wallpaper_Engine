@@ -24,6 +24,10 @@
   individual account often gets a numeric prefix (for example
   12345MoiNeX.Paiint) and the upload is rejected unless it matches exactly.
 
+.PARAMETER PublisherDisplayName
+  Partner Center's "Publisher display name" (the account/company name shown in
+  the Store, not the in-app author string). Default MoiNeX.
+
 .PARAMETER OutDir
   Output directory. Default: packaging\msix\out (git-ignored).
 
@@ -50,6 +54,7 @@ param(
     [string]$Version,
     [string]$Publisher = 'CN=MoiNeX',
     [string]$IdentityName = 'MoiNeX.Paiint',
+    [string]$PublisherDisplayName = 'MoiNeX',
     [string]$OutDir,
     [string]$PayloadDir,
     [string]$MakeAppxPath,
@@ -266,6 +271,7 @@ $template = Get-Content $templatePath -Raw
 $manifest = $template.Replace('__VERSION__', $msixVersion)
 $manifest = $manifest.Replace('__PUBLISHER__', $Publisher)
 $manifest = $manifest.Replace('__IDENTITY_NAME__', $IdentityName)
+$manifest = $manifest.Replace('__PUBLISHER_DISPLAY_NAME__', $PublisherDisplayName)
 $manifestPath = Join-Path $stage 'AppxManifest.xml'
 [System.IO.File]::WriteAllText($manifestPath, $manifest, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -283,6 +289,11 @@ if (-not $identity) { throw 'Manifest has no Identity element.' }
 if ($identity.Version -ne $msixVersion) { throw "Manifest version '$($identity.Version)' != '$msixVersion'." }
 if ($identity.Publisher -ne $Publisher) { throw "Manifest publisher '$($identity.Publisher)' != '$Publisher'." }
 if ($identity.Name -ne $IdentityName) { throw "Manifest identity name '$($identity.Name)' != '$IdentityName'." }
+$publisherDisplay = $xml.SelectSingleNode('/f:Package/f:Properties/f:PublisherDisplayName', $ns)
+if (-not $publisherDisplay) { throw 'Manifest has no PublisherDisplayName.' }
+if ($publisherDisplay.InnerText -ne $PublisherDisplayName) {
+    throw "Manifest publisher display name '$($publisherDisplay.InnerText)' != '$PublisherDisplayName'."
+}
 
 $referenced = @()
 $referenced += $xml.SelectSingleNode('/f:Package/f:Properties/f:Logo', $ns).InnerText

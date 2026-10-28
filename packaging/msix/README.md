@@ -30,13 +30,26 @@ Use `-MakeAppxPath` to override.
 
 ```powershell
 # full: rebuild the UI + portable exe, then pack
-powershell -File packaging\msix\build-msix.ps1 -Publisher "CN=<Partner Center publisher>"
+powershell -File packaging\msix\build-msix.ps1 `
+  -Publisher "CN=<Partner Center publisher>" `
+  -IdentityName "<Package/Identity/Name>" `
+  -PublisherDisplayName "<Publisher display name>"
 
 # reuse the existing app\dist-exe\win-unpacked
-powershell -File packaging\msix\build-msix.ps1 -SkipBuild -Publisher "CN=<...>"
+powershell -File packaging\msix\build-msix.ps1 -SkipBuild `
+  -Publisher "CN=<...>" -IdentityName "<...>" -PublisherDisplayName "<...>"
 
 # stage + validate only (no makeappx)
 powershell -File packaging\msix\build-msix.ps1 -SkipBuild -SkipPack
+```
+
+For the current Paiint reservation the command is:
+
+```powershell
+powershell -File packaging\msix\build-msix.ps1 -SkipBuild `
+  -Publisher "CN=9D8DC345-5B4D-4571-831E-2EBC542FFA47" `
+  -IdentityName "Moinu.Paiint" `
+  -PublisherDisplayName "Moinu"
 ```
 
 Output: `packaging\msix\out\Paiint-<version>-x64.msix` (git-ignored).
@@ -47,7 +60,7 @@ The script:
 2. stages the payload into `out\stage`,
 3. generates the seven tile assets from `app\assets\paiint-app.ico`,
 4. expands `AppxManifest.xml` (`__VERSION__`, `__PUBLISHER__`,
-   `__IDENTITY_NAME__`),
+   `__IDENTITY_NAME__`, `__PUBLISHER_DISPLAY_NAME__`),
 5. validates the XML and every asset/executable it references,
 6. packs with `makeappx`, prints the SHA-256.
 
@@ -61,14 +74,33 @@ The script:
    prefix (`12345MoiNeX.Paiint`), so pass it with `-IdentityName`; the default
    `MoiNeX.Paiint` is only right if that is what Partner Center shows. A
    mismatch is rejected at upload just like a publisher mismatch.
-3. Bump the version for **every** submission. MSIX versions are
+3. **Publisher display name must match too.** It is the account name from
+   *Package/Identity/Publisher display name* (`Moinu` for this account), not
+   the in-app author string (`MoiNeX`). Pass it with `-PublisherDisplayName`.
+4. Bump the version for **every** submission. MSIX versions are
    `Major.Minor.Build.Revision`; the Store requires **Revision = 0**.
    `0.1.0` → `0.1.0.0`; the next submission is `0.1.1.0` or `0.2.0.0`.
-4. Upload the `.msix` in Partner Center → *Packages*. Microsoft runs the
+5. Upload the `.msix` in Partner Center → *Packages*. Microsoft runs the
    certification tests and signs it.
-5. `runFullTrust` is declared in the manifest. The Store accepts it for
+6. `runFullTrust` is declared in the manifest. The Store accepts it for
    desktop-bridge apps but reviews it; the app needs it because the Electron
    shell and the native wallpaper runtime are ordinary Win32 processes.
+
+### Paiint's reserved identity (2026-10-28)
+
+| Field | Value |
+|---|---|
+| Store ID | `9NL7PTMCT80P` |
+| Package/Identity/Name | `Moinu.Paiint` |
+| Package/Identity/Publisher | `CN=9D8DC345-5B4D-4571-831E-2EBC542FFA47` |
+| Publisher display name | `Moinu` |
+| Package family name | `Moinu.Paiint_fpxd1s8mkvdac` |
+| Package SID | `S-1-15-2-2387456432-3796061459-1486249958-3864149153-2268779567-2861953507-3498204113` |
+
+The Store package is built with those three identity values (see the command
+above). A package built with the placeholder `CN=MoiNeX` cannot be uploaded to
+this reservation, and the Store-signed package cannot be sideloaded locally
+without a matching certificate — keep placeholder builds for local tests.
 
 ## Local sideload (testing only)
 

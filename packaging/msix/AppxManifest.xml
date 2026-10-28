@@ -7,8 +7,10 @@
 
   Publisher MUST match the "Package/Identity/Publisher" value shown in Partner
   Center for this app (for example CN=1A2B3C4D-....), and Name MUST match
-  "Package/Identity/Name". The defaults (CN=MoiNeX / MoiNeX.Paiint) are only
-  good for local sideload tests signed with a self-signed certificate.
+  "Package/Identity/Name". PublisherDisplayName must match Partner Center's
+  "Publisher display name" (the account name, not the in-app author string).
+  The defaults (CN=MoiNeX / MoiNeX.Paiint / MoiNeX) are only good for local
+  sideload tests signed with a self-signed certificate.
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -25,7 +27,7 @@
 
   <Properties>
     <DisplayName>Paiint</DisplayName>
-    <PublisherDisplayName>MoiNeX</PublisherDisplayName>
+    <PublisherDisplayName>__PUBLISHER_DISPLAY_NAME__</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>Live wallpaper engine for Windows: video, HDR and still wallpapers rendered on the desktop.</Description>
   </Properties>
