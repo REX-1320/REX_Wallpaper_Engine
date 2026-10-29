@@ -145,6 +145,39 @@ TEST(DecoderPoolFormatTest, UnhandledSurfaceFallsBackToFlagChoice) {
               DXGI_FORMAT_P010);
 }
 
+// ── Pool generation reuse (2026-10-28 VRAM growth) ────────────────────────
+//
+// Every format switch used to destroy the pool and build a fresh NT-handle
+// generation. The D3D12 renderer has to import each new handle, and the AMD
+// driver charges a permanent dedicated-VRAM footprint per imported generation
+// (released only at process exit — measured 2026-10-28: +264 MB per SDR<->HDR
+// switch, +2.1 GB after 16 switches). The fix is to hand back a generation the
+// cache already built for the same geometry + format instead of rebuilding.
+// These pin the lookup the cache is built on.
+TEST(DecoderPoolCacheTest, FindsMatchingGenerationAndLruVictim) {
+    using Key = FfmpegVideoDecoder::PoolGenerationKey;
+    const Key keys[2] = {{3840, 2160, DXGI_FORMAT_NV12},
+                         {3840, 2176, DXGI_FORMAT_P010}};
+
+    EXPECT_EQ(FfmpegVideoDecoder::FindPoolGeneration(
+                  keys, 2, Key{3840, 2160, DXGI_FORMAT_NV12}), 0u);
+    EXPECT_EQ(FfmpegVideoDecoder::FindPoolGeneration(
+                  keys, 2, Key{3840, 2176, DXGI_FORMAT_P010}), 1u);
+    // A geometry the cache never built is a miss (== count).
+    EXPECT_EQ(FfmpegVideoDecoder::FindPoolGeneration(
+                  keys, 2, Key{1920, 1080, DXGI_FORMAT_NV12}), 2u);
+    // Format is part of the key: same geometry, other format is a miss.
+    EXPECT_EQ(FfmpegVideoDecoder::FindPoolGeneration(
+                  keys, 2, Key{3840, 2160, DXGI_FORMAT_P010}), 2u);
+    EXPECT_EQ(FfmpegVideoDecoder::FindPoolGeneration(keys, 0, Key{}), 0u);
+
+    // LRU victim = smallest usage tick.
+    const uint64_t ticks[3] = {7, 3, 5};
+    EXPECT_EQ(FfmpegVideoDecoder::PickLruPoolGeneration(ticks, 3), 1u);
+    EXPECT_EQ(FfmpegVideoDecoder::PickLruPoolGeneration(ticks, 1), 0u);
+    EXPECT_EQ(FfmpegVideoDecoder::PickLruPoolGeneration(nullptr, 0), 0u);
+}
+
 namespace {
 
 // In-repo SDR fixture (deterministic); override via REX_TEST_VIDEO_SDR.

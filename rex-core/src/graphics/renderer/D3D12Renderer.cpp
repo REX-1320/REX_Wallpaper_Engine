@@ -801,9 +801,9 @@ bool D3D12Renderer::CreateToneStatsPipeline() {
     D3D12_HEAP_PROPERTIES readbackHeap = {};
     readbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
 
-    // The UAV descriptors live in the shared CBV_SRV_UAV heap, past the
-    // static texture (slot 0) and the 8 video slots (slots 1..16).
-    const UINT uavBase = 20;
+    // The UAV descriptors live in the shared CBV_SRV_UAV heap, in their own
+    // half past the static texture (slot 0) and the video slots (1..kMaxVideoSlots*2).
+    const UINT uavBase = kToneStatsUavBase;
     const UINT inc = dev->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_CPU_DESCRIPTOR_HANDLE cpuBase = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -1032,9 +1032,9 @@ shared::Result<void> D3D12Renderer::InitializeCore(HWND targetWindow, int width,
         return scResult;
     }
 
-    // ── SRV heap (shader-visible, 64 slots) ───────────────────────────
+    // ── SRV heap (shader-visible, 128 slots) ──────────────────────────
     m_srvHeap = m_device.CreateDescriptorHeap(
-        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 64,
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvHeapSize,
         D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
     if (!m_srvHeap) {
         return shared::Result<void>(shared::ErrorCode::OutOfMemory,
@@ -1146,6 +1146,7 @@ void D3D12Renderer::Shutdown() {
     }
     m_videoSlotCount = 0;
     m_activeVideoHandle = nullptr;
+    m_activePoolGeneration = 0;
     m_hasVideoFrame = false;
 
     // Unmap audio spectrum CB (removed with the CB itself — audit 5.6 #11)
@@ -1277,9 +1278,16 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
     // change) retires all 8 inside one video open — so the cache tracks
     // usage and retires the least-recently-drawn slot instead of failing
     // at kMaxVideoSlots (audit 2026-10-17, §5.2 #3 / F1).
+    //
+    // The cache holds several pool generations at once (the decoder keeps
+    // retired generations alive so a format switch back reuses them). An
+    // import therefore identifies itself by (handle, pool generation): the
+    // kernel recycles NT handle values once closed, and matching the handle
+    // alone would alias an import from a destroyed generation.
     UINT idx = kMaxVideoSlots;
     for (UINT i = 0; i < m_videoSlotCount; ++i) {
-        if (m_videoSlots[i].sharedHandle == frame.sharedHandle) {
+        if (m_videoSlots[i].sharedHandle == frame.sharedHandle &&
+            m_videoSlots[i].poolGeneration == frame.poolGeneration) {
             idx = i;
             break;
         }
@@ -1316,6 +1324,7 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
                          "(stale pool generation)", victim);
             m_videoSlots[victim].resource.Reset();
             m_videoSlots[victim].sharedHandle = nullptr;
+            m_videoSlots[victim].poolGeneration = 0;
             m_videoSlots[victim].srvGpu = {};
             m_videoSlots[victim].texWidth = 0;
             m_videoSlots[victim].texHeight = 0;
@@ -1331,6 +1340,7 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
                                         "OpenSharedHandle failed");
         }
         m_videoSlots[idx].sharedHandle = frame.sharedHandle;
+        m_videoSlots[idx].poolGeneration = frame.poolGeneration;
         m_videoSlots[idx].lastUsedTick = ++m_slotUseCounter;
 
         const DXGI_FORMAT fmt = m_videoSlots[idx].resource->GetDesc().Format;
@@ -1351,15 +1361,8 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
                          static_cast<unsigned>(resDesc.Flags));
         }
 
-        // Set shader input format constant for the current frame.
-        // 0 = NV12, 1 = RGBA16, 2 = P010
-        if (fmt == DXGI_FORMAT_P010) {
-            m_inputFormat = 2.0f;
-        } else if (fmt == DXGI_FORMAT_NV12) {
-            m_inputFormat = 0.0f;
-        } else {
-            m_inputFormat = 1.0f;  // BGRA / RGBA16F
-        }
+        // (Shader input format is set once, after this branch, from the bound
+        // slot's actual format — a cache hit never re-enters this block.)
 
         const UINT inc = dev->GetDescriptorHandleIncrementSize(
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -1370,9 +1373,9 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
 
         if (fmt == DXGI_FORMAT_NV12 || fmt == DXGI_FORMAT_P010) {
             // NV12/P010: create two SRVs — t0 = Y plane, t1 = UV plane.
-            // Descriptor layout: Y at (1 + idx*2), UV at (1 + idx*2 + 1).
+            // Descriptor layout: Y at (kVideoSrvBase + idx*2), UV one past.
             const bool is10bit = (fmt == DXGI_FORMAT_P010);
-            const UINT base = 1 + idx * 2;
+            const UINT base = kVideoSrvBase + idx * kVideoSrvPerSlot;
 
             D3D12_SHADER_RESOURCE_VIEW_DESC srvY = {};
             srvY.Format = is10bit ? DXGI_FORMAT_R16_UNORM
@@ -1405,7 +1408,7 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
             // BGRA / RGBA16F: t0 = main SRV, t1 = dummy (shader samples texUV
             // only in NV12 mode; for RGBA16F the second descriptor must still
             // be valid to satisfy the root signature's 2-descriptor range).
-            const UINT base = 1 + idx * 2;
+            const UINT base = kVideoSrvBase + idx * kVideoSrvPerSlot;
 
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc =
                 MakeVideoSlotSrvDescriptor(fmt);
@@ -1432,6 +1435,18 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
         if (idx >= m_videoSlotCount) m_videoSlotCount = idx + 1;
     }
 
+    // Shader input format for the bound slot (0 = NV12, 1 = RGBA16/other,
+    // 2 = P010), taken from the resource actually bound. This must run on
+    // BOTH paths: a cache hit (pool generation reused after a format switch)
+    // would otherwise keep the previous content's format constant and shade
+    // NV12 planes as P010 (or vice versa).
+    {
+        const DXGI_FORMAT slotFmt = m_videoSlots[idx].resource->GetDesc().Format;
+        m_inputFormat = (slotFmt == DXGI_FORMAT_P010) ? 2.0f
+                      : (slotFmt == DXGI_FORMAT_NV12) ? 0.0f
+                                                      : 1.0f;
+    }
+
     // GPU ordering: the D3D11 video engine blts into this pool slot and
     // signals the shared fence; the D3D12 queue must wait on that signal
     // before the draw in RenderFrame() samples the slot.
@@ -1440,6 +1455,7 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
     }
 
     m_activeVideoHandle = frame.sharedHandle;
+    m_activePoolGeneration = frame.poolGeneration;
     m_hasVideoFrame = true;
     m_videoWidth  = frame.width;
     m_videoHeight = frame.height;
@@ -1462,6 +1478,7 @@ shared::Result<void> D3D12Renderer::DrawVideoFrame(const VideoFrame& frame,
     m_videoUvScaleY = 1.0f;
     for (UINT i = 0; i < m_videoSlotCount; ++i) {
         if (m_videoSlots[i].sharedHandle == frame.sharedHandle &&
+            m_videoSlots[i].poolGeneration == frame.poolGeneration &&
             m_videoSlots[i].texWidth > 0 && m_videoSlots[i].texHeight > 0 &&
             frame.width > 0 && frame.height > 0) {
             if (static_cast<UINT>(frame.width) == m_videoSlots[i].texWidth) {
@@ -1502,6 +1519,7 @@ void D3D12Renderer::ClearVideoFrame() {
     // retired by the LRU path when a different pool generation arrives.
     // Nothing is released here, so no GPU drain is needed.
     m_activeVideoHandle = nullptr;
+    m_activePoolGeneration = 0;
     m_hasVideoFrame = false;
     m_videoWidth  = 0;
     m_videoHeight = 0;
@@ -1868,7 +1886,8 @@ void D3D12Renderer::RenderFrame() {
     bool videoActive = false;
     if (m_hasVideoFrame && m_activeVideoHandle) {
         for (UINT i = 0; i < m_videoSlotCount; ++i) {
-            if (m_videoSlots[i].sharedHandle == m_activeVideoHandle) {
+            if (m_videoSlots[i].sharedHandle == m_activeVideoHandle &&
+                m_videoSlots[i].poolGeneration == m_activePoolGeneration) {
                 texToDraw = m_videoSlots[i].resource.Get();
                 srvToDraw = m_videoSlots[i].srvGpu;
                 videoActive = true;

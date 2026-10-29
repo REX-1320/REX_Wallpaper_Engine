@@ -371,6 +371,12 @@ private:
     // slot, laid out in the SRV heap after the static texture (slots 1..8).
     struct VideoSlotResource {
         HANDLE sharedHandle = nullptr;
+        // Identity of the pool generation that produced `sharedHandle`.
+        // NT handle values are recycled once closed, so the handle alone
+        // cannot identify an import: after a pool generation is retired a
+        // fresh texture may reuse the same numeric handle value and would
+        // otherwise alias this stale import.
+        uint64_t poolGeneration = 0;
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         D3D12_GPU_DESCRIPTOR_HANDLE srvGpu{};
         // Decoder pool textures are driver-aligned (e.g. 1920x1152 for a
@@ -383,12 +389,41 @@ private:
         // evict old-generation slots instead of failing at 8.
         UINT64 lastUsedTick = 0;
     };
-    static constexpr UINT kMaxVideoSlots = 8;
+    static constexpr UINT kMaxVideoSlots =
+        FfmpegVideoDecoder::kPoolSize *
+        static_cast<UINT>(FfmpegVideoDecoder::kMaxLivePoolGenerations);
+
+    // ─── Shader-visible CBV/SRV/UAV heap layout ────────────────────────
+    //   kStaticTextureSrvSlot          static texture SRV
+    //   kVideoSrvBase + slot*2 (+ 1)   video slot SRVs (Y/UV for NV12/P010)
+    //   kToneStatsUavBase + i          peak-detection UAVs (i < contexts)
+    //
+    // The tone-stats UAVs used to start at 20, which was safe only while the
+    // slot cache held one pool generation (8 slots -> descriptors 1..16).
+    // With three generations the SRV range reaches 49, so the UAVs are parked
+    // in their own half of a 128-descriptor heap: writing an SRV for a slot can
+    // never clobber a UAV (that collision faults the GPU and removes the
+    // device). Never carve a new range with a literal base — the video range
+    // grows with the pool-generation cache.
+    static constexpr UINT kSrvHeapSize = 128;
+    static constexpr UINT kStaticTextureSrvSlot = 0;
+    static constexpr UINT kVideoSrvBase = 1;
+    static constexpr UINT kVideoSrvPerSlot = 2;  // Y + UV (or RGB + dummy)
+    static constexpr UINT kToneStatsUavBase = 64;
+    static_assert(kVideoSrvBase + kMaxVideoSlots * kVideoSrvPerSlot <=
+                      kToneStatsUavBase,
+                  "video slot SRVs would overlap the tone-stats UAVs");
+    static_assert(kToneStatsUavBase + 8 <= kSrvHeapSize,
+                  "tone-stats UAVs would overflow the SRV heap");
+
     std::array<VideoSlotResource, kMaxVideoSlots> m_videoSlots;
     UINT   m_videoSlotCount = 0;
     // Monotonic stamp feeding lastUsedTick.
     UINT64 m_slotUseCounter = 0;
     HANDLE m_activeVideoHandle = nullptr;
+    // Generation of the pool that produced `m_activeVideoHandle`; NT handle
+    // values are recycled, so the render lookup must match both fields.
+    uint64_t m_activePoolGeneration = 0;
     bool   m_hasVideoFrame = false;
     int    m_videoWidth  = 0;
     int    m_videoHeight = 0;

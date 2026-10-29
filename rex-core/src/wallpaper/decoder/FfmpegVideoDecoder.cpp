@@ -562,7 +562,134 @@ void FfmpegVideoDecoder::ReleasePool() {
     m_poolW = 0;
     m_poolH = 0;
     m_poolFormat = DXGI_FORMAT_UNKNOWN;
+    m_poolGeneration = 0;
     for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
+
+    // Retired generations hold shareable textures exactly like the active one;
+    // they must be destroyed here or their NT handles (and VRAM) outlive the
+    // decoder.
+    for (auto& gen : m_poolCache) {
+        for (HANDLE h : gen.handles) {
+            if (h) CloseHandle(h);
+        }
+    }
+    m_poolCache.clear();
+}
+
+// ─── Pool generation cache ───────────────────────────────────────────────
+// See the CachedPool comment: rebuilding the pool hands the D3D12 renderer a
+// fresh NT-handle generation, and the AMD driver never returns the VRAM it
+// charges for those imports. Reuse by (geometry, format) turns the per-switch
+// growth into a plateau.
+
+size_t FfmpegVideoDecoder::FindPoolGeneration(const PoolGenerationKey* keys,
+                                              size_t count,
+                                              const PoolGenerationKey& key) {
+    for (size_t i = 0; i < count; ++i) {
+        if (keys[i].width == key.width && keys[i].height == key.height &&
+            keys[i].format == key.format) {
+            return i;
+        }
+    }
+    return count;
+}
+
+size_t FfmpegVideoDecoder::PickLruPoolGeneration(const uint64_t* useTicks,
+                                                 size_t count) {
+    if (count == 0) return 0;
+    size_t victim = 0;
+    for (size_t i = 1; i < count; ++i) {
+        if (useTicks[i] < useTicks[victim]) victim = i;
+    }
+    return victim;
+}
+
+void FfmpegVideoDecoder::RetireActivePool() {
+    if (m_poolTex.empty() && m_poolHandles.empty()) return;
+
+    CachedPool gen;
+    gen.tex = std::move(m_poolTex);
+    gen.handles = std::move(m_poolHandles);
+    gen.vpEnum = std::move(m_enum);
+    gen.vpProcessor = std::move(m_processor);
+    gen.staging = std::move(m_staging);
+    gen.device = std::move(m_poolDevice);
+    gen.width = m_poolW;
+    gen.height = m_poolH;
+    gen.format = m_poolFormat;
+    gen.generation = m_poolGeneration;
+    gen.useTick = ++m_poolUseCounter;
+    m_poolCache.push_back(std::move(gen));
+
+    m_poolTex.clear();
+    m_poolHandles.clear();
+    m_enum.Reset();
+    m_processor.Reset();
+    m_staging.Reset();
+    m_poolDevice.Reset();
+    m_poolW = 0;
+    m_poolH = 0;
+    m_poolFormat = DXGI_FORMAT_UNKNOWN;
+    m_poolGeneration = 0;
+}
+
+void FfmpegVideoDecoder::TrimPoolCache(size_t keep) {
+    while (m_poolCache.size() > keep) {
+        std::vector<uint64_t> ticks;
+        ticks.reserve(m_poolCache.size());
+        for (const auto& gen : m_poolCache) ticks.push_back(gen.useTick);
+        const size_t victim = PickLruPoolGeneration(ticks.data(), ticks.size());
+        for (HANDLE h : m_poolCache[victim].handles) {
+            if (h) CloseHandle(h);
+        }
+        REX_LOG_INFO(kModule,
+                     "pool generation retired: {}x{} fmt={} gen={} "
+                     "(cache over {} live generations)",
+                     m_poolCache[victim].width, m_poolCache[victim].height,
+                     static_cast<int>(m_poolCache[victim].format),
+                     m_poolCache[victim].generation, keep + 1);
+        m_poolCache.erase(m_poolCache.begin() + victim);
+    }
+}
+
+bool FfmpegVideoDecoder::ReuseCachedPool(UINT width, UINT height,
+                                         DXGI_FORMAT format) {
+    if (m_poolCache.empty()) return false;
+
+    std::vector<PoolGenerationKey> keys;
+    keys.reserve(m_poolCache.size());
+    for (const auto& gen : m_poolCache) {
+        keys.push_back({gen.width, gen.height, gen.format});
+    }
+    const size_t hit = FindPoolGeneration(
+        keys.data(), keys.size(), PoolGenerationKey{width, height, format});
+    if (hit == keys.size()) return false;
+    // A re-created D3D11 device invalidates every texture from the old one.
+    if (m_poolCache[hit].device.Get() != m_device11.Get()) return false;
+
+    // Park the active generation first (index-stable: push_back appends).
+    RetireActivePool();
+
+    CachedPool& gen = m_poolCache[hit];
+    m_poolTex = std::move(gen.tex);
+    m_poolHandles = std::move(gen.handles);
+    m_enum = std::move(gen.vpEnum);
+    m_processor = std::move(gen.vpProcessor);
+    m_staging = std::move(gen.staging);
+    m_poolDevice = std::move(gen.device);
+    m_poolW = gen.width;
+    m_poolH = gen.height;
+    m_poolFormat = gen.format;
+    m_poolGeneration = gen.generation;
+    for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
+
+    REX_LOG_INFO(kModule,
+                 "pool generation reused: {}x{} fmt={} gen={} "
+                 "(cached, renderer imports stay valid)",
+                 m_poolW, m_poolH, static_cast<int>(m_poolFormat),
+                 m_poolGeneration);
+    m_poolCache.erase(m_poolCache.begin() + hit);
+    return true;
 }
 
 bool FfmpegVideoDecoder::Seek(double seconds) {
@@ -1302,6 +1429,26 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
         return true;
     }
 
+    // Drop retired generations built on a previous D3D11 device: they cannot
+    // serve this session and would pin their VRAM until process exit.
+    for (auto it = m_poolCache.begin(); it != m_poolCache.end();) {
+        if (it->device.Get() != m_device11.Get()) {
+            for (HANDLE h : it->handles) {
+                if (h) CloseHandle(h);
+            }
+            it = m_poolCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Reuse a generation this decoder already built for the same key. The
+    // renderer's imports for it are still valid, so no new handle generation
+    // reaches ID3D12Device::OpenSharedHandle (see CachedPool).
+    if (ReuseCachedPool(width, height, format)) {
+        return true;
+    }
+
     // Audit 2026-10-17, §5.2 #2: build the whole pool generation into
     // temporaries and commit only when every texture, NT handle, video
     // processor and staging texture exists. The old order published
@@ -1409,22 +1556,31 @@ bool FfmpegVideoDecoder::EnsurePool(UINT width, UINT height,
 
     // ── Commit point (audit §5.2 #2): every resource exists; only now
     // invalidate the old generation and publish the new one.
-    for (HANDLE h : m_poolHandles) {
-        if (h) CloseHandle(h);
-    }
+    //
+    // The outgoing generation is retired, not destroyed: its textures and NT
+    // handles stay alive in the cache so switching back to this geometry/
+    // format reuses them instead of charging the driver another permanent
+    // import footprint (see CachedPool).
+    RetireActivePool();
+
     m_poolTex = std::move(tex);
     m_poolHandles = std::move(handles);
     m_poolW = width;
     m_poolH = height;
     m_poolFormat = format;
     m_poolDevice = m_device11;
+    m_poolGeneration = ++m_nextPoolGeneration;
     for (UINT i = 0; i < kPoolSize; ++i) m_slotFrameIndex[i] = 0;
     m_enum = std::move(vpEnum);
     m_processor = std::move(vpProcessor);
     m_staging = std::move(staging);
 
-    REX_LOG_INFO(kModule, "pool rebuilt: {} slots, {}x{}, {} (bounded)",
-                 kPoolSize, width, height, fmtName);
+    // Active + retired must stay within kMaxLivePoolGenerations.
+    TrimPoolCache(kMaxLivePoolGenerations - 1);
+
+    REX_LOG_INFO(kModule,
+                 "pool rebuilt: {} slots, {}x{}, {} gen={} (bounded)",
+                 kPoolSize, width, height, fmtName, m_poolGeneration);
     return true;
 }
 
@@ -1500,6 +1656,7 @@ bool FfmpegVideoDecoder::ConvertAndSignal(VideoFrame& outFrame) {
     outFrame.sharedHandle = m_poolHandles[slot];
     outFrame.slot = slot;
     outFrame.fenceValue = fenceValue;
+    outFrame.poolGeneration = m_poolGeneration;
     outFrame.pts = m_frame->best_effort_timestamp != AV_NOPTS_VALUE
                        ? static_cast<double>(av_rescale_q(m_frame->best_effort_timestamp,
                                                           m_stream->time_base,
@@ -1737,6 +1894,7 @@ bool FfmpegVideoDecoder::ConvertSoftware(VideoFrame& outFrame) {
     outFrame.sharedHandle = m_poolHandles[slot];
     outFrame.slot = slot;
     outFrame.fenceValue = fenceValue;
+    outFrame.poolGeneration = m_poolGeneration;
     outFrame.pts = m_frame->best_effort_timestamp != AV_NOPTS_VALUE
                        ? static_cast<double>(av_rescale_q(m_frame->best_effort_timestamp,
                                                           m_stream->time_base,

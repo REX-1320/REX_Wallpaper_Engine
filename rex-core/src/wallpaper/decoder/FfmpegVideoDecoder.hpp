@@ -67,6 +67,11 @@ struct VideoFrame {
     HANDLE   sharedHandle = nullptr;  // NT handle of the pool slot (stable per Open)
     UINT     slot       = 0;      // pool slot index (stable for process lifetime)
     UINT64   fenceValue = 0;      // fence value signaled after the blt into slot
+    // Identity of the pool generation that owns `sharedHandle`. NT handle
+    // values are recycled by the kernel once closed, so a consumer that caches
+    // imported views MUST key them on (handle, generation); matching the
+    // handle alone can alias an old import after a pool generation is retired.
+    uint64_t poolGeneration = 0;
     double   pts        = 0.0;    // presentation timestamp in seconds
     uint64_t frameIndex = 0;      // monotonically increasing decode order
     UINT     width      = 0;
@@ -552,6 +557,31 @@ class FfmpegVideoDecoder {
                                    int64_t consumed, int64_t margin,
                                    bool haveConsumed);
 
+    /// Pool generation key: exact surface geometry + texture format. The pool
+    /// is a ring of shared-handle textures, so a new key means new NT handles,
+    /// which means a new import generation for the D3D12 renderer.
+    struct PoolGenerationKey {
+        UINT width = 0;
+        UINT height = 0;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    };
+
+    /// Index of a cached generation matching `key`, or `count` on a miss.
+    /// Pure lookup, public so the cache tests pin this exact function instead
+    /// of a drift-prone mirror (same convention as PickSlotOldestSafe).
+    static size_t FindPoolGeneration(const PoolGenerationKey* keys,
+                                     size_t count,
+                                     const PoolGenerationKey& key);
+
+    /// Index of the least-recently-used generation (smallest usage tick), or
+    /// `count` when there is nothing to evict.
+    static size_t PickLruPoolGeneration(const uint64_t* useTicks, size_t count);
+
+    /// Live pool generations kept at once: one active plus two retired. Sized
+    /// so the common SDR<->HDR (NV12/P010) toggle never rebuilds; a third
+    /// distinct geometry/format evicts the oldest retired generation.
+    static constexpr size_t kMaxLivePoolGenerations = 3;
+
     /// Shareable pool slot count, public for the P1 resource envelope
     /// (ResourcePolicy.hpp mirrors it; MediaBudgetMirrorTest pins equality).
     static constexpr UINT kPoolSize = 8;
@@ -748,6 +778,40 @@ private:
     // OpenSharedHandle cycle, freed only at process exit). ReleasePool() is
     // the explicit teardown, called by the destructor.
     void ReleasePool();
+
+    // ─── Retired pool generations ───────────────────────────────────────
+    // A retired generation keeps its textures and NT handles alive so a later
+    // switch back to the same geometry/format reuses them instead of forcing
+    // the renderer to import a brand-new handle generation. That matters on
+    // AMD, whose driver charges a permanent dedicated-VRAM footprint per
+    // imported generation (measured 2026-10-28: +264 MB per SDR<->HDR switch,
+    // never returned; see ReleasePool). The cache is bounded to
+    // kMaxLivePoolGenerations - 1 entries; the oldest is destroyed on overflow.
+    struct CachedPool {
+        std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> tex;
+        std::vector<HANDLE> handles;
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> vpEnum;
+        Microsoft::WRL::ComPtr<ID3D11VideoProcessor> vpProcessor;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+        Microsoft::WRL::ComPtr<ID3D11Device> device;
+        UINT width = 0;
+        UINT height = 0;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        uint64_t generation = 0;
+        uint64_t useTick = 0;
+    };
+    /// Activates a cached generation for this key (if any) and returns true.
+    bool ReuseCachedPool(UINT width, UINT height, DXGI_FORMAT format);
+    /// Moves the active generation into the cache without destroying it.
+    void RetireActivePool();
+    /// Destroys the least-recently-used retired generations beyond `keep`,
+    /// closing their NT handles.
+    void TrimPoolCache(size_t keep);
+    std::vector<CachedPool> m_poolCache;
+    uint64_t m_poolUseCounter = 0;
+    uint64_t m_poolGeneration = 0;      ///< identity of the active generation
+    uint64_t m_nextPoolGeneration = 0;
+
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> m_poolTex;
     std::vector<HANDLE> m_poolHandles;
     // Device the current pool generation was created on (identity guard:
