@@ -859,6 +859,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     title: 'Paiint',
+    icon: path.join(__dirname, '..', 'assets', 'paiint-app.ico'),
     // NOT transparent. A transparent window is not snap-assist aware
     // (electron#37888) and cannot be maximized by double-click (PR #28207), so
     // it can never behave like a normal Windows app. Instead the glass comes
