@@ -18,6 +18,7 @@ const DEFAULTS = {
 }
 
 const MAX_LAST_EVENTS = 20
+const RECOVERED_PREFIX = 'recovered-'
 
 function noop() {}
 
@@ -134,6 +135,7 @@ class DiagnosticsRecorder {
       this.sampleNow().catch((err) => {
         this._log('diagnostics: initial sample failed', this._message(err))
       })
+      this._pruneSessions()
       return this.status()
     } catch (err) {
       this._log('diagnostics: start failed', this._message(err))
@@ -462,7 +464,7 @@ class DiagnosticsRecorder {
       const stat = this.fs.statSync(this.currentFile)
       if (!stat.isFile() || stat.size === 0) return true
 
-      const name = this._uniqueDirName(`recovered-${this._sessionName()}`)
+      const name = this._uniqueDirName(`${RECOVERED_PREFIX}${this._sessionName()}`)
       const dir = this.path.join(this.sessionsDir, name)
       this.fs.mkdirSync(dir, { recursive: true })
 
@@ -534,14 +536,29 @@ class DiagnosticsRecorder {
   _pruneSessions() {
     try {
       if (!this._exists(this.sessionsDir)) return
-      const dirs = this.fs
+      const names = this.fs
         .readdirSync(this.sessionsDir, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name)
-        .sort()
-        .reverse()
 
-      for (const name of dirs.slice(Math.max(0, this.keepSessions))) {
+      // The live session is never pruned; it counts against keepSessions.
+      const current =
+        this.sessionName && names.includes(this.sessionName) ? this.sessionName : null
+      const others = names
+        .filter((name) => name !== current)
+        .sort((a, b) => {
+          const keyA = this._pruneKey(a)
+          const keyB = this._pruneKey(b)
+          if (keyA === keyB) return a < b ? 1 : a > b ? -1 : 0
+          return keyA < keyB ? 1 : -1
+        })
+
+      const keepOthers = Math.max(0, this.keepSessions - (current ? 1 : 0))
+      const keep = new Set(others.slice(0, keepOthers))
+      if (current) keep.add(current)
+
+      for (const name of names) {
+        if (keep.has(name)) continue
         try {
           this.fs.rmSync(this.path.join(this.sessionsDir, name), {
             recursive: true,
@@ -554,6 +571,10 @@ class DiagnosticsRecorder {
     } catch (err) {
       this._log('diagnostics: prune scan failed', this._message(err))
     }
+  }
+
+  _pruneKey(name) {
+    return name.startsWith(RECOVERED_PREFIX) ? name.slice(RECOVERED_PREFIX.length) : name
   }
 
   // ─── filesystem helpers ────────────────────────────────────────────────────

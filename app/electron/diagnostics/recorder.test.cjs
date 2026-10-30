@@ -341,6 +341,37 @@ test('archive prunes session directories to keepSessions', (t) => {
   assert.equal(fs.existsSync(path.join(sessions, names[1])), false)
 })
 
+test('start and archive never prune the current session when recovered dirs exist', (t) => {
+  const root = tempRoot(t)
+  const sessions = path.join(root, 'sessions')
+  fs.mkdirSync(sessions, { recursive: true })
+
+  // Newer than the fixed current session time, so a pure recency sort would
+  // drop the current session unless it is explicitly protected.
+  const recovered = []
+  for (let i = 0; i < 10; i += 1) {
+    const name = `recovered-2026-10-30T13-00-${String(i).padStart(2, '0')}-000Z`
+    recovered.push(name)
+    fs.mkdirSync(path.join(sessions, name), { recursive: true })
+    fs.writeFileSync(path.join(sessions, name, 'session.jsonl'), '{}\n')
+  }
+
+  const recorder = startRecorder(t, root, { keepSessions: 10 })
+  const currentDir = recorder.status().sessionDir
+
+  // start() prunes immediately; the current session is protected and counts
+  // against keepSessions.
+  assert.ok(fs.existsSync(currentDir))
+  assert.ok(fs.readdirSync(sessions).length <= 10)
+  assert.equal(fs.existsSync(path.join(sessions, recovered[0])), false)
+
+  recorder.archive('test')
+
+  assert.ok(fs.existsSync(currentDir))
+  assert.ok(fs.existsSync(path.join(currentDir, 'session.jsonl')))
+  assert.ok(fs.readdirSync(sessions).length <= 10)
+})
+
 // ─── cap + crash recovery ────────────────────────────────────────────────────
 
 test('maxBytes writes one cap-reached event and stops appending', async (t) => {
