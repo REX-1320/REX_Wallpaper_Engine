@@ -30,6 +30,8 @@ All of it is local, and all of it is yours:
 
 Test-mode recordings are ordinary files on your PC. Paiint has no code that
 uploads them; you choose whether to share them.
+
+Deleting the app does not delete these folders; you can remove them at any
 time. The Settings page shows the exact paths and can clear the thumbnail
 cache.
 

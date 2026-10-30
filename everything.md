@@ -570,7 +570,7 @@ Live evidence: silent file -> "This file has no audio track." with only Speed/Lo
 
 - **Test-mode diagnostics (local only).** Settings → Advanced → "Test mode diagnostics" (`diagnostics.enabled`, default off) runs a crash-safe recorder that writes `Downloads\Paiint Diagnostics\current.jsonl` (4 Hz for 15 s after each apply, then 1 Hz), `current-summary.json` (every 5 s), `device.json` (monitor/GPU/OS identity, no serial), and archives `sessions\<timestamp>\{session.jsonl, summary.json, device.json, runtime.log, app.log, crash.log, crashes\}` on quit; `--diagnostics` forces one instrumented session without persisting the setting. Pure modules `app/electron/diagnostics/device-info.cjs` and `app/electron/diagnostics/recorder.cjs`; device info collected via WMI/PowerShell without serials. Privacy disclosure in `docs/legal/PRIVACY.md`.
 - **Window-aware wallpaper audio.** Settings → Engine → "Play audio only when Paiint is closed" (`engine.audioOnlyWhenWindowClosed`, default false) mutes the wallpaper while a Paiint window is open and unmutes on minimize/close-to-tray. The override only adds mute; it never unmutes a user-muted wallpaper (per-wallpaper `playback.mute` remains the intent). Pure module `app/electron/audio-visibility.cjs`.
-- Tests: recorder 41/41, audio-visibility 8/8, device-info 18/18; lint 0; typecheck 0. Live GUI verification pending.
+- Tests: recorder 15/15, audio-visibility 8/8, device-info 18/18; lint 0; typecheck 0. Live GUI verification pending.
 
 ### Global settings - shipped (2026-10-21)
 
