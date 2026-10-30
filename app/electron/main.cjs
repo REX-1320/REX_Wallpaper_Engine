@@ -17,6 +17,7 @@ const { migrateUserData } = require('./userdata-migrate.cjs')
 const { cleanupLegacyLoginItem } = require('./login-item-migrate.cjs')
 const startupTask = require('./startup-task.cjs')
 const { legalDocPath } = require('./legal-docs.cjs')
+const { isWindowOpen, effectiveMute } = require('./audio-visibility.cjs')
 
 // ─── Identity ────────────────────────────────────────────────────────────────
 // Pin userData BEFORE any consumer (including the thumbnail worker below).
@@ -393,6 +394,45 @@ function reclaimIdleRuntime(reason) {
   capabilities = null
 }
 
+// ─── Window-aware wallpaper audio ───────────────────────────────────────────
+// The per-wallpaper `muted` value is the user's intent. The Settings override
+// can only add mute while a Paiint window is on screen; it never changes what
+// the user chose. lastApplied.params.muted therefore always stores intent.
+function audioOnlyWhenClosed() {
+  return appState?.get('engine.audioOnlyWhenWindowClosed') === true
+}
+
+function videoIntentMuted() {
+  if (lastApplied?.kind !== 'video') return null
+  // Older persisted entries predate the field; the engine default is muted.
+  return lastApplied.params?.muted !== false
+}
+
+function effectiveVideoMute(intentMuted) {
+  return effectiveMute({
+    // Callers pass a boolean (videoIntentMuted() normalises old entries to
+    // true); an accidental null must not read as "muted".
+    intentMuted: intentMuted === true,
+    onlyWhenClosed: audioOnlyWhenClosed(),
+    windowOpen: isWindowOpen(mainWindow),
+  })
+}
+
+async function applyEffectiveMute(source) {
+  if (lastApplied?.kind !== 'video') return { ok: true, skipped: 'no-video' }
+  const intentMuted = videoIntentMuted()
+  const muted = effectiveVideoMute(intentMuted)
+  if (!runtime.proc) return { ok: true, skipped: 'runtime-stopped', muted }
+  try {
+    await runtime.send('SET_MUTE', { value: muted })
+    logLine('audio: effective mute', source, muted ? 'muted' : 'audible')
+    return { ok: true, muted }
+  } catch (err) {
+    logLine('audio: SET_MUTE failed', source, err.message)
+    return { ok: false, error: err.message }
+  }
+}
+
 // Where the native runtime writes the quit/stop still. Kept in sync with
 // LastFrameImagePath() in rex-core/src/wallpaper_cli_main.cpp.
 function lastFrameSnapshotPath() {
@@ -526,14 +566,19 @@ async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set
 async function applyVideoEntry(params, source = 'wallpaper:video', opts = {}) {
   const { path: filePath, mode, fps, loop, muted, volume, speed, audioMode, brightness, contrast, saturation } = params
   if (typeof filePath !== 'string' || !filePath) throw new Error('invalid video path')
+  const intentMuted = muted ?? true
   const init = engineInitOptions()
   await runtime.init(init.maxFps, init.hardwareAcceleration)
+  // Read the window state as late as possible: INIT can take ~0.7 s, and on a
+  // boot restore the window may appear while it runs. A value captured before
+  // INIT would send "audible" even though the window is already on screen.
+  const effectiveMuted = effectiveVideoMute(intentMuted)
   await runtime.send('LOAD', {
     path: filePath,
     type: 'video',
     mode: mode ?? 'fill',
     loop: loop ?? true,
-    muted: muted ?? true,
+    muted: effectiveMuted,
     volume: volume ?? 1,
     speed: speed ?? 1,
   })
@@ -560,7 +605,7 @@ async function applyVideoEntry(params, source = 'wallpaper:video', opts = {}) {
   await runtime.send('PLAY', {})
   lastApplied = {
     kind: 'video',
-    params: { path: filePath, mode, loop, muted, volume, speed, fps, audioMode, brightness, contrast, saturation },
+    params: { path: filePath, mode, loop, muted: intentMuted, volume, speed, fps, audioMode, brightness, contrast, saturation },
   }
   startup.saveLastApplied(app.getPath('userData'), lastApplied)
   if (opts.resetRecovery !== false && supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
@@ -662,6 +707,14 @@ function createWindow() {
     win.webContents.send('window:maximized', false)
   })
 
+  // Wallpaper audio follows whether a Paiint window is actually on screen.
+  // hide (close-to-tray), minimize and closed all mean "not open".
+  for (const eventName of ['show', 'hide', 'minimize', 'restore']) {
+    win.on(eventName, () => {
+      applyEffectiveMute(`window-${eventName}`).catch(() => {})
+    })
+  }
+
   // Close → tear the renderer down. Paiint lives in the tray, and the native
   // runtime is a separate process that keeps the wallpaper playing. Destroying
   // (rather than hiding) is what actually releases the renderer and its GPU
@@ -696,6 +749,7 @@ function createWindow() {
     // A newer window may already have replaced this one (e.g. second-instance
     // during teardown). Only clear state that still belongs to this window.
     if (mainWindow !== win) return
+    applyEffectiveMute('window-closed').catch(() => {})
     mainWindow = null
     navigateReady = false
     pendingNavigate = null
@@ -943,7 +997,11 @@ app.whenReady().then(() => {
     if (loop != null) await sendIfSupported('SET_LOOP', { value: !!loop }, applied, skipped)
     if (speed != null) await sendIfSupported('SET_SPEED', { value: speed }, applied, skipped)
     if (volume != null) await sendIfSupported('SET_VOLUME', { value: volume }, applied, skipped)
-    if (muted != null) await sendIfSupported('SET_MUTE', { value: !!muted }, applied, skipped)
+    if (muted != null) {
+      // Send the visibility-aware value; mergeLiveUpdate below still persists the
+      // user's intent (`muted`), never the temporary override.
+      await sendIfSupported('SET_MUTE', { value: effectiveVideoMute(!!muted) }, applied, skipped)
+    }
     if (audioMode != null) await sendIfSupported('SET_AUDIO_MODE', { value: audioMode }, applied, skipped)
     // Colour adjustments: live, per frame, 0..2 with 1.0 = unchanged.
     if (brightness != null) await sendIfSupported('SET_BRIGHTNESS', { value: brightness }, applied, skipped)
@@ -1128,6 +1186,9 @@ app.whenReady().then(() => {
     try {
       if (typeof keyPath !== 'string' || !appState) return null
       const next = appState.set(keyPath, value) ?? null
+      if (keyPath === 'engine.audioOnlyWhenWindowClosed') {
+        applyEffectiveMute('setting').catch(() => {})
+      }
       // The portable Run key bakes --background into its command line, so a
       // changed "start minimised" only reaches the next logon after the entry
       // is rewritten. The MSIX startup task reads the preference at launch
