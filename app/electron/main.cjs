@@ -457,6 +457,11 @@ function diagnosticsRoot() {
   const preferred = diagnosticsPreferredDir()
   try {
     fs.mkdirSync(preferred, { recursive: true })
+    // mkdir succeeds on an existing folder even when it rejects writes, so
+    // prove a write before the recorder commits its session there.
+    const probe = path.join(preferred, '.write-probe')
+    fs.writeFileSync(probe, '')
+    fs.rmSync(probe, { force: true })
     return { dir: preferred, fallback: false }
   } catch (err) {
     const fallback = path.join(app.getPath('userData'), 'diagnostics')
@@ -558,9 +563,9 @@ async function startDiagnostics(reason) {
     const root = diagnosticsRoot()
     diagnosticsRootInfo = root
     const tempDir = app.getPath('temp')
-    const recorder = new DiagnosticsRecorder({
-      rootDir: root.dir,
-      fallback: root.fallback,
+    const makeRecorder = (target) => new DiagnosticsRecorder({
+      rootDir: target.dir,
+      fallback: target.fallback,
       appVersion: app.getVersion(),
       forced: diagnosticsForced,
       log: logLine,
@@ -583,9 +588,32 @@ async function startDiagnostics(reason) {
       ],
       crashDir: path.join(tempDir, 'Paiint', 'crashes'),
     })
-    recorder.start()
+
+    let recorder = makeRecorder(root)
+    let started = recorder.start()
+    if (!started?.enabled && !root.fallback) {
+      // The recorder catches its own start failure. A folder can exist yet
+      // reject writes, so retry once under userData before giving up.
+      logLine('diagnostics: preferred root failed, retrying fallback', root.dir)
+      const fallback = { dir: path.join(app.getPath('userData'), 'diagnostics'), fallback: true }
+      try {
+        fs.mkdirSync(fallback.dir, { recursive: true })
+        diagnosticsRootInfo = fallback
+        recorder = makeRecorder(fallback)
+        started = recorder.start()
+      } catch (err) {
+        logLine('diagnostics: fallback root failed', err.message)
+        started = null
+      }
+    }
+    if (!started?.enabled) {
+      // Leave diagnostics null so a later toggle can retry instead of
+      // short-circuiting on a dead recorder.
+      logLine('diagnostics: recorder could not start')
+      return diagnosticsStatus()
+    }
     diagnostics = recorder
-    logLine('diagnostics: recorder started', root.dir, reason)
+    logLine('diagnostics: recorder started', diagnosticsRootInfo.dir, reason)
     try {
       recorder.setDeviceInfo(await collectDeviceInfo({ app, screen }))
     } catch (err) {
@@ -598,7 +626,21 @@ async function startDiagnostics(reason) {
   return diagnosticsStart
 }
 
-function stopDiagnostics(reason) {
+function waitForDiagnosticsStart(ms) {
+  if (!diagnosticsStart) return Promise.resolve()
+  return Promise.race([
+    diagnosticsStart.catch(() => {}),
+    new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      timer.unref?.()
+    }),
+  ])
+}
+
+async function stopDiagnostics(reason) {
+  // Let a just-started recorder finish writing device.json before the session
+  // is archived. Bounded: a slow WMI/GPU probe must not block the stop.
+  await waitForDiagnosticsStart(2500)
   if (!diagnostics) return diagnosticsStatus()
   try {
     diagnostics.archive(reason)
@@ -1384,7 +1426,7 @@ app.whenReady().then(() => {
         if (value === true) {
           startDiagnostics('setting').catch((err) => logLine('diagnostics: start ERROR', err.message))
         } else {
-          stopDiagnostics('setting')
+          stopDiagnostics('setting').catch((err) => logLine('diagnostics: stop ERROR', err.message))
         }
       }
       // The portable Run key bakes --background into its command line, so a
@@ -1465,12 +1507,14 @@ app.whenReady().then(() => {
   // so it must never create the folder (see diagnosticsPreferredDir).
   ipcMain.handle('diagnostics:status', () => diagnosticsStatus())
   ipcMain.handle('diagnostics:open-folder', async () => {
-    const root = diagnosticsRootInfo ?? diagnosticsRoot()
-    diagnosticsRootInfo = root
-    const { dir } = root
+    let dir = diagnosticsRootInfo?.dir ?? diagnosticsPreferredDir()
     try {
+      const root = diagnosticsRootInfo ?? diagnosticsRoot()
+      diagnosticsRootInfo = root
+      dir = root.dir
       fs.mkdirSync(dir, { recursive: true })
-      await shell.openPath(dir)
+      const openError = await shell.openPath(dir)
+      if (openError) return { ok: false, dir, error: openError }
       return { ok: true, dir }
     } catch (err) {
       logLine('diagnostics: open-folder ERROR', err.message)
@@ -1584,6 +1628,8 @@ app.whenReady().then(() => {
   diagnosticsForced = process.argv.includes('--diagnostics')
   if (diagnosticsForced || appState.get('diagnostics.enabled') === true) {
     setImmediate(() => {
+      // The setting may have been turned off before this tick.
+      if (!diagnosticsForced && appState.get('diagnostics.enabled') !== true) return
       startDiagnostics(diagnosticsForced ? 'flag' : 'setting')
         .catch((err) => logLine('diagnostics: start ERROR', err.message))
     })
@@ -1841,21 +1887,27 @@ app.on('will-quit', (event) => {
   // (15 s snapshot / 5 s plain) and resolves on exit or deadline.
   const finish = () => {
     if (quitDrainFinished) return
-    quitDrainFinished = true
     logLine('app: runtime drained, quitting')
-    // Runs after runtime.stop() resolved, so runtime.log is complete before
-    // the session folder is archived.
-    try {
-      diagnostics?.archive('quit')
-    } catch (err) {
-      logLine('diagnostics: quit archive failed', err.message)
+    // A start still collecting device info would otherwise be archived without
+    // device.json. Bounded so a slow WMI/GPU probe cannot stall the quit.
+    const archive = () => {
+      if (quitDrainFinished) return
+      quitDrainFinished = true
+      // Runs after runtime.stop() resolved, so runtime.log is complete before
+      // the session folder is archived.
+      try {
+        diagnostics?.archive('quit')
+      } catch (err) {
+        logLine('diagnostics: quit archive failed', err.message)
+      }
+      // MUST be a macrotask. When no runtime is running (every still-image
+      // user) runtime.stop() resolves immediately, and a promise callback runs
+      // as a microtask INSIDE this will-quit emission - Electron's quit flag is
+      // still set there, so app.quit() would be dropped and the process would
+      // live on with no window and no tray.
+      setImmediate(() => app.quit())
     }
-    // MUST be a macrotask. When no runtime is running (every still-image
-    // user) runtime.stop() resolves immediately, and a promise callback runs
-    // as a microtask INSIDE this will-quit emission - Electron's quit flag is
-    // still set there, so app.quit() would be dropped and the process would
-    // live on with no window and no tray.
-    setImmediate(() => app.quit())
+    waitForDiagnosticsStart(2500).then(archive, archive)
   }
   let drain = null
   try {
