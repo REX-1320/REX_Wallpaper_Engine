@@ -48,6 +48,13 @@ contextBridge.exposeInMainWorld('paiintDesktop', {
     set: (keyPath, value) => ipcRenderer.invoke('app-state:set', keyPath, value),
   },
 
+  // Local-only test-mode recorder. status() is safe to poll; openFolder() only
+  // opens the folder main reports.
+  diagnostics: {
+    status: () => ipcRenderer.invoke('diagnostics:status'),
+    openFolder: () => ipcRenderer.invoke('diagnostics:open-folder'),
+  },
+
   // App-level settings (the Settings page).
   loginItem: (enabled) => ipcRenderer.invoke('app:login-item', { enabled }),
   getPaths: () => ipcRenderer.invoke('app:paths'),

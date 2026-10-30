@@ -46,6 +46,9 @@ class AppStateManager {
         // playback.mute remains the user's intent; this is a visibility override.
         audioOnlyWhenWindowClosed: false,
       },
+      // Local-only test-mode recorder. Off by default; --diagnostics forces it on
+      // for one session without changing this value.
+      diagnostics: { enabled: false },
       wallpaperSettings: {}, // per-wallpaper settings keyed by normalized path (Phase 2)
       wallpaper: { assignments: {}, playback: { position: 0, volume: 1.0, paused: false } },
       playlistEngine: { playlists: [], rotation: null }, // UI playlists + the main-process rotation plan
@@ -184,6 +187,7 @@ class AppStateManager {
       theme: { ...def.theme, ...(saved.theme || {}) },
       tray: { ...def.tray, ...(saved.tray || {}) },
       engine: { ...def.engine, ...(saved.engine || {}) },
+      diagnostics: { ...def.diagnostics, ...(saved.diagnostics || {}) },
       wallpaperSettings: { ...(saved.wallpaperSettings || {}) },
       wallpaper: {
         ...def.wallpaper,

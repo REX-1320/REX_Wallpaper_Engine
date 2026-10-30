@@ -1,6 +1,7 @@
-const { app, BrowserWindow, shell, ipcMain, screen } = require('electron')
+const { app, BrowserWindow, shell, ipcMain, screen, powerMonitor } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const os = require('node:os')
 const { WallpaperRuntime } = require('./wallpaperRuntime.cjs')
 const { TrayManager } = require('./tray-manager.cjs')
 const { Supervisor } = require('./supervisor/supervisor.cjs')
@@ -18,6 +19,8 @@ const { cleanupLegacyLoginItem } = require('./login-item-migrate.cjs')
 const startupTask = require('./startup-task.cjs')
 const { legalDocPath } = require('./legal-docs.cjs')
 const { isWindowOpen, effectiveMute } = require('./audio-visibility.cjs')
+const { DiagnosticsRecorder } = require('./diagnostics/recorder.cjs')
+const { collectDeviceInfo } = require('./diagnostics/device-info.cjs')
 
 // ─── Identity ────────────────────────────────────────────────────────────────
 // Pin userData BEFORE any consumer (including the thumbnail worker below).
@@ -302,6 +305,14 @@ let capabilities = null
 
 let lastApplied = null // { kind: 'image'|'video', params }
 
+// Local-only test-mode recorder (Settings > Advanced, or --diagnostics).
+let diagnostics = null
+let diagnosticsStart = null
+let diagnosticsForced = false
+// Last root actually resolved. Kept after stop so the status row and Open
+// button still point at the folder the archived session went to.
+let diagnosticsRootInfo = null
+
 function setRuntimeAvailable(available) {
   trayManager?.setRuntimeAvailable(available)
 }
@@ -434,6 +445,171 @@ async function applyEffectiveMute(source) {
   }
 }
 
+// ─── Local-only test mode diagnostics ───────────────────────────────────────
+// A poll must not create the folder: `status()` is called whenever Settings
+// opens, and an empty "Paiint Diagnostics" folder would appear even while the
+// recorder is off. Only starting or pressing Open creates it.
+function diagnosticsPreferredDir() {
+  return path.join(app.getPath('downloads'), 'Paiint Diagnostics')
+}
+
+function diagnosticsRoot() {
+  const preferred = diagnosticsPreferredDir()
+  try {
+    fs.mkdirSync(preferred, { recursive: true })
+    return { dir: preferred, fallback: false }
+  } catch (err) {
+    const fallback = path.join(app.getPath('userData'), 'diagnostics')
+    fs.mkdirSync(fallback, { recursive: true })
+    logLine('diagnostics: Downloads not writable, using', fallback, err.message)
+    return { dir: fallback, fallback: true }
+  }
+}
+
+function collectDiagnosticsSample() {
+  const win = mainWindow
+  const windowInfo = win && !win.isDestroyed()
+    ? {
+        exists: true,
+        open: isWindowOpen(win),
+        visible: win.isVisible(),
+        minimized: win.isMinimized(),
+        focused: win.isFocused(),
+        bounds: win.getBounds(),
+      }
+    : { exists: false, open: false }
+
+  const playlist = playlistScheduler?.state?.()
+  return {
+    app: {
+      uptimeSec: Math.round(process.uptime()),
+      memory: process.memoryUsage(),
+      freeMemory: os.freemem(),
+      totalMemory: os.totalmem(),
+      metrics: app.getAppMetrics().map((m) => ({
+        pid: m.pid,
+        type: m.type,
+        cpu: m.cpu,
+        workingSetSize: m.memory?.workingSetSize ?? null,
+        privateBytes: m.memory?.privateBytes ?? null,
+      })),
+    },
+    window: windowInfo,
+    displays: screen.getAllDisplays().map((d) => ({
+      id: d.id,
+      bounds: d.bounds,
+      workArea: d.workArea,
+      scaleFactor: d.scaleFactor,
+      rotation: d.rotation,
+      internal: d.internal,
+      displayFrequency: d.displayFrequency,
+      colorSpace: d.colorSpace,
+      colorDepth: d.colorDepth,
+    })),
+    power: {
+      onBattery: powerMonitor.isOnBatteryPower(),
+      idleTime: powerMonitor.getIdleTime(),
+      thermalState: typeof powerMonitor.getCurrentThermalState === 'function'
+        ? powerMonitor.getCurrentThermalState()
+        : null,
+    },
+    lastApplied: lastApplied ? { kind: lastApplied.kind, ...lastApplied.params } : null,
+    playlist: playlist
+      ? {
+          active: playlist.active,
+          playlistId: playlist.playlistId,
+          playlistName: playlist.playlistName,
+          mode: playlist.mode,
+          currentPath: playlist.currentPath,
+          queueLength: playlist.queueLength,
+          nextDueAt: playlist.nextDueAt,
+          exhausted: playlist.exhausted,
+        }
+      : null,
+    audio: {
+      onlyWhenClosed: audioOnlyWhenClosed(),
+      intentMuted: videoIntentMuted(),
+      windowOpen: isWindowOpen(mainWindow),
+      effectiveMuted: lastApplied?.kind === 'video' ? effectiveVideoMute(videoIntentMuted()) : null,
+    },
+  }
+}
+
+function diagnosticsStatus() {
+  const s = diagnostics?.status()
+  return {
+    enabled: !!s?.enabled,
+    forced: diagnosticsForced,
+    dir: s?.dir ?? diagnosticsRootInfo?.dir ?? diagnosticsPreferredDir(),
+    sessionDir: s?.sessionDir ?? null,
+    bytes: s?.bytes ?? 0,
+    samples: s?.samples ?? 0,
+    events: s?.events ?? 0,
+    lastSampleAt: s?.lastSampleAt ?? null,
+    capReached: s?.capReached ?? false,
+    fallback: s?.fallback ?? diagnosticsRootInfo?.fallback ?? false,
+  }
+}
+
+async function startDiagnostics(reason) {
+  if (diagnostics) return diagnosticsStatus()
+  if (diagnosticsStart) return diagnosticsStart
+  diagnosticsStart = (async () => {
+    const root = diagnosticsRoot()
+    diagnosticsRootInfo = root
+    const tempDir = app.getPath('temp')
+    const recorder = new DiagnosticsRecorder({
+      rootDir: root.dir,
+      fallback: root.fallback,
+      appVersion: app.getVersion(),
+      forced: diagnosticsForced,
+      log: logLine,
+      getStatus: async () => {
+        if (!runtime.proc) return { available: false, reason: 'runtime-stopped' }
+        try {
+          return { available: true, data: await runtime.send('GET_STATUS', {}, 1500) }
+        } catch (err) {
+          return {
+            available: false,
+            reason: /timeout/i.test(err.message) ? 'timeout' : 'error',
+          }
+        }
+      },
+      collectSample: collectDiagnosticsSample,
+      logFiles: [
+        { name: 'runtime.log', path: path.join(tempDir, 'Paiint', 'runtime.log') },
+        { name: 'app.log', path: path.join(tempDir, 'paiint-app.log') },
+        { name: 'crash.log', path: path.join(tempDir, 'Paiint', 'crash.log') },
+      ],
+      crashDir: path.join(tempDir, 'Paiint', 'crashes'),
+    })
+    recorder.start()
+    diagnostics = recorder
+    logLine('diagnostics: recorder started', root.dir, reason)
+    try {
+      recorder.setDeviceInfo(await collectDeviceInfo({ app, screen }))
+    } catch (err) {
+      logLine('diagnostics: device info failed', err.message)
+    }
+    return diagnosticsStatus()
+  })().finally(() => {
+    diagnosticsStart = null
+  })
+  return diagnosticsStart
+}
+
+function stopDiagnostics(reason) {
+  if (!diagnostics) return diagnosticsStatus()
+  try {
+    diagnostics.archive(reason)
+  } catch (err) {
+    logLine('diagnostics: archive failed', err.message)
+  }
+  diagnostics = null
+  logLine('diagnostics: recorder stopped', reason)
+  return diagnosticsStatus()
+}
+
 // Where the native runtime writes the quit/stop still. Kept in sync with
 // LastFrameImagePath() in rex-core/src/wallpaper_cli_main.cpp.
 function lastFrameSnapshotPath() {
@@ -545,6 +721,7 @@ async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set
     throw new Error('unsupported file type')
   }
   const engineMode = mode ?? 'fill'
+  diagnostics?.event('apply', { source, kind: 'image', path: filePath, mode: engineMode })
   // No INIT: LOAD applies the image through the OS wallpaper API and is valid
   // with no engine (the runtime spawns on demand). INIT would build a 4K D3D12
   // engine the image never uses - measured 84 MB private and ~103 MB VRAM.
@@ -558,6 +735,7 @@ async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set
   // warm for a video that may never come.
   reclaimIdleRuntime(`${source} image applied`)
   logLine(`${source}: image applied`, filePath)
+  diagnostics?.event('applied', { source, kind: 'image', path: filePath })
   return { ok: true, style: engineMode }
 }
 
@@ -568,6 +746,8 @@ async function applyVideoEntry(params, source = 'wallpaper:video', opts = {}) {
   const { path: filePath, mode, fps, loop, muted, volume, speed, audioMode, brightness, contrast, saturation } = params
   if (typeof filePath !== 'string' || !filePath) throw new Error('invalid video path')
   const intentMuted = muted ?? true
+  diagnostics?.event('apply', { source, kind: 'video', path: filePath, mode, muted: muted ?? true })
+  diagnostics?.markApply(source)
   const init = engineInitOptions()
   await runtime.init(init.maxFps, init.hardwareAcceleration)
   // Read the window state as late as possible: INIT can take ~0.7 s, and on a
@@ -615,6 +795,7 @@ async function applyVideoEntry(params, source = 'wallpaper:video', opts = {}) {
   if (opts.resetRecovery !== false && supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
   setRuntimeAvailable(true)
   logLine(`${source}: video applied`, filePath)
+  diagnostics?.event('applied', { source, kind: 'video', path: filePath })
   return { ok: true }
 }
 
@@ -715,6 +896,7 @@ function createWindow() {
   // hide (close-to-tray), minimize and closed all mean "not open".
   for (const eventName of ['show', 'hide', 'minimize', 'restore']) {
     win.on(eventName, () => {
+      diagnostics?.event('window', { event: eventName, open: isWindowOpen(win) })
       applyEffectiveMute(`window-${eventName}`).catch(() => {})
     })
   }
@@ -753,6 +935,7 @@ function createWindow() {
     // A newer window may already have replaced this one (e.g. second-instance
     // during teardown). Only clear state that still belongs to this window.
     if (mainWindow !== win) return
+    diagnostics?.event('window', { event: 'closed' })
     applyEffectiveMute('window-closed').catch(() => {})
     mainWindow = null
     navigateReady = false
@@ -912,6 +1095,7 @@ app.whenReady().then(() => {
   )
 
   runtime.on('event', (event, data) => {
+    diagnostics?.event('runtime-event', { event, data })
     if (event === 'PAUSED') trayManager?.updateWallpaperState(true)
     else if (event === 'PLAYING') trayManager?.updateWallpaperState(false)
     // Scene end is a rotation trigger for main now (the UI may not exist).
@@ -967,6 +1151,7 @@ app.whenReady().then(() => {
   // Live property updates — only the properties the active renderer
   // actually supports are sent; the rest are reported as skipped.
   ipcMain.handle('wallpaper:update', async (event, { mode, loop, volume, speed, muted, audioMode, brightness, contrast, saturation } = {}) => {
+    diagnostics?.event('wallpaper-update', { mode, loop, volume, speed, muted, audioMode, brightness, contrast, saturation })
     const applied = []
     const skipped = []
     // SET_FILL_MODE is the only update without a null guard — sending it with
@@ -1191,7 +1376,16 @@ app.whenReady().then(() => {
       if (typeof keyPath !== 'string' || !appState) return null
       const next = appState.set(keyPath, value) ?? null
       if (keyPath === 'engine.audioOnlyWhenWindowClosed') {
+        diagnostics?.event('setting', { keyPath, value })
         applyEffectiveMute('setting').catch(() => {})
+      }
+      if (keyPath === 'diagnostics.enabled') {
+        diagnostics?.event('setting', { keyPath, value })
+        if (value === true) {
+          startDiagnostics('setting').catch((err) => logLine('diagnostics: start ERROR', err.message))
+        } else {
+          stopDiagnostics('setting')
+        }
       }
       // The portable Run key bakes --background into its command line, so a
       // changed "start minimised" only reaches the next logon after the entry
@@ -1264,6 +1458,23 @@ app.whenReady().then(() => {
     } catch (err) {
       logLine('app:open-path ERROR', err.message)
       return { ok: false, reason: err.message }
+    }
+  })
+
+  // Local-only test-mode recorder. status() is polled whenever Settings opens,
+  // so it must never create the folder (see diagnosticsPreferredDir).
+  ipcMain.handle('diagnostics:status', () => diagnosticsStatus())
+  ipcMain.handle('diagnostics:open-folder', async () => {
+    const root = diagnosticsRootInfo ?? diagnosticsRoot()
+    diagnosticsRootInfo = root
+    const { dir } = root
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      await shell.openPath(dir)
+      return { ok: true, dir }
+    } catch (err) {
+      logLine('diagnostics: open-folder ERROR', err.message)
+      return { ok: false, dir, error: err.message }
     }
   })
 
@@ -1368,6 +1579,15 @@ app.whenReady().then(() => {
   _galleryLib = new WallpaperLibrary()
   // The real build version, for the Settings page's About section.
   try { appState.set('version', app.getVersion()) } catch {}
+  // Local-only test mode: --diagnostics forces one recorded session without
+  // touching the persisted setting.
+  diagnosticsForced = process.argv.includes('--diagnostics')
+  if (diagnosticsForced || appState.get('diagnostics.enabled') === true) {
+    setImmediate(() => {
+      startDiagnostics(diagnosticsForced ? 'flag' : 'setting')
+        .catch((err) => logLine('diagnostics: start ERROR', err.message))
+    })
+  }
   logLine('persistence: app-state + gallery library ready')
 
   // Playlist scheduling that outlives the UI. The renderer sends the plan;
@@ -1485,6 +1705,7 @@ app.whenReady().then(() => {
     },
     setRuntimeAvailable,
     onEvent: (msg) => {
+      diagnostics?.event('supervisor-event', msg)
       logLine('supervisor:event', msg.event)
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send('wallpaper:event', msg)
@@ -1622,6 +1843,13 @@ app.on('will-quit', (event) => {
     if (quitDrainFinished) return
     quitDrainFinished = true
     logLine('app: runtime drained, quitting')
+    // Runs after runtime.stop() resolved, so runtime.log is complete before
+    // the session folder is archived.
+    try {
+      diagnostics?.archive('quit')
+    } catch (err) {
+      logLine('diagnostics: quit archive failed', err.message)
+    }
     // MUST be a macrotask. When no runtime is running (every still-image
     // user) runtime.stop() resolves immediately, and a promise callback runs
     // as a microtask INSIDE this will-quit emission - Electron's quit flag is
