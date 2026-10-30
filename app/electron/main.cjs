@@ -501,7 +501,7 @@ function startOcclusionMonitor() {
         const line = buf.slice(0, idx).trim()
         buf = buf.slice(idx + 1)
         if (line === '') continue
-        const isDesktop = line === 'Progman' || line === 'WorkerW' || line === ''
+        const isDesktop = line === 'Progman' || line === 'WorkerW' || line === 'Shell_TrayWnd' || line === 'Shell_SecondaryTrayWnd' || line === 'CHeadBarWindow' || line === ''
         const next = !isDesktop
         if (next !== desktopOccluded) {
           desktopOccluded = next
