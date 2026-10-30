@@ -264,8 +264,8 @@ export default function SettingsPage() {
                 onChange={(v) => setSnapshotOnQuit(v)}
               />
               <PropertyToggle
-                label="Play audio only when Paiint is closed"
-                description="Mutes the wallpaper while a Paiint window is open. Audio returns when the window is minimized or closed to the tray."
+                label="Play audio only when the desktop is clear"
+                description="Mutes the wallpaper when the desktop is covered by another window (or a Paiint window is open). Audio returns when the desktop is clear."
                 checked={audioOnlyWhenClosed === true}
                 onChange={(v) => setAudioOnlyWhenClosed(v)}
               />

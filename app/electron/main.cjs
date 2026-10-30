@@ -1,6 +1,7 @@
 const { app, BrowserWindow, shell, ipcMain, screen, powerMonitor } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const { spawn } = require('node:child_process')
 const os = require('node:os')
 const { WallpaperRuntime } = require('./wallpaperRuntime.cjs')
 const { TrayManager } = require('./tray-manager.cjs')
@@ -303,7 +304,12 @@ let capabilities = null
 // is the supervisor's reapply callback. The native engine repairs its own
 // desktop layer; Electron only restarts the process and replays wallpaper.
 
-let lastApplied = null // { kind: 'image'|'video', params }
+let lastApplied = null
+
+// Occlusion-based audio mute: mute the wallpaper when the desktop is covered
+// by any window (not just a Paiint window). Driven by a background monitor.
+let desktopOccluded = false
+let occlusionMonitor = null // { kind: 'image'|'video', params }
 
 // Local-only test-mode recorder (Settings > Advanced, or --diagnostics).
 let diagnostics = null
@@ -425,7 +431,7 @@ function effectiveVideoMute(intentMuted) {
     // true); an accidental null must not read as "muted".
     intentMuted: intentMuted === true,
     onlyWhenClosed: audioOnlyWhenClosed(),
-    windowOpen: isWindowOpen(mainWindow),
+    windowOpen: isWindowOpen(mainWindow) || desktopOccluded,
   })
 }
 
@@ -445,10 +451,77 @@ async function applyEffectiveMute(source) {
   }
 }
 
-// ─── Local-only test mode diagnostics ───────────────────────────────────────
-// A poll must not create the folder: `status()` is called whenever Settings
-// opens, and an empty "Paiint Diagnostics" folder would appear even while the
-// recorder is off. Only starting or pressing Open creates it.
+// ─── Occlusion-based audio mute ─────────────────────────────────────────────
+// Mute the wallpaper when the desktop is covered by any window (not just a
+// Paiint window). A background PowerShell process watches the foreground
+// window's class name and reports changes; the desktop (Progman/WorkerW) counts
+// as "not occluded".
+function occlusionMonitorScript() {
+  return [
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices; using System.Text;',
+    'public class FG {',
+    '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+    '  [DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);',
+    '}"@',
+    '$last = ""',
+    'while ($true) {',
+    '  $h = [FG]::GetForegroundWindow()',
+    '  $sb = New-Object System.Text.StringBuilder 256',
+    '  [FG]::GetClassName($h, $sb, 256) | Out-Null',
+    '  $cls = $sb.ToString()',
+    '  if ($cls -ne $last) { Write-Output $cls; $last = $cls }',
+    '  Start-Sleep -Milliseconds 750',
+    '}',
+  ].join('\n')
+}
+
+function startOcclusionMonitor() {
+  if (occlusionMonitor) return
+  if (!audioOnlyWhenClosed()) return
+  try {
+    const child = spawn('powershell.exe', ['-NoProfile', '-Command', occlusionMonitorScript()], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    occlusionMonitor = child
+    child.stdout.setEncoding('utf8')
+    let buf = ''
+    child.stdout.on('data', (chunk) => {
+      buf += chunk
+      let idx
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 1)
+        if (line === '') continue
+        const isDesktop = line === 'Progman' || line === 'WorkerW' || line === ''
+        const next = !isDesktop
+        if (next !== desktopOccluded) {
+          desktopOccluded = next
+          applyEffectiveMute('occlusion').catch(() => {})
+        }
+      }
+    })
+    child.on('exit', () => {
+      occlusionMonitor = null
+      // Restart if still wanted and a video is applied.
+      if (audioOnlyWhenClosed() && lastApplied?.kind === 'video' && !isQuitting) {
+        setTimeout(startOcclusionMonitor, 1000)
+      }
+    })
+    child.unref?.()
+  } catch (err) {
+    logLine('audio: occlusion monitor failed to start', err.message)
+  }
+}
+
+function stopOcclusionMonitor() {
+  if (occlusionMonitor) {
+    try { occlusionMonitor.kill() } catch {}
+    occlusionMonitor = null
+  }
+  desktopOccluded = false
+}
 function diagnosticsPreferredDir() {
   return path.join(app.getPath('downloads'), 'Paiint Diagnostics')
 }
@@ -535,6 +608,7 @@ function collectDiagnosticsSample() {
       onlyWhenClosed: audioOnlyWhenClosed(),
       intentMuted: videoIntentMuted(),
       windowOpen: isWindowOpen(mainWindow),
+      desktopOccluded,
       effectiveMuted: lastApplied?.kind === 'video' ? effectiveVideoMute(videoIntentMuted()) : null,
     },
   }
@@ -833,6 +907,7 @@ async function applyVideoEntry(params, source = 'wallpaper:video', opts = {}) {
   // Reconcile once more now that lastApplied exists: a show/hide that landed
   // between the LOAD send and this assignment saw no video and was ignored.
   await applyEffectiveMute('video-applied')
+  if (audioOnlyWhenClosed()) startOcclusionMonitor()
   startup.saveLastApplied(app.getPath('userData'), lastApplied)
   if (opts.resetRecovery !== false && supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
   setRuntimeAvailable(true)
@@ -1420,6 +1495,8 @@ app.whenReady().then(() => {
       const next = appState.set(keyPath, value) ?? null
       if (keyPath === 'engine.audioOnlyWhenWindowClosed') {
         diagnostics?.event('setting', { keyPath, value })
+        if (value === true) startOcclusionMonitor()
+        else stopOcclusionMonitor()
         applyEffectiveMute('setting').catch(() => {})
       }
       if (keyPath === 'diagnostics.enabled') {
@@ -1868,6 +1945,7 @@ app.on('will-quit', (event) => {
   try {
     if (supervisor) supervisor.stop() // quitting: exits must not trigger recovery
     if (playlistScheduler) playlistScheduler.stop() // stop timers; plan is already persisted
+    stopOcclusionMonitor()
     // The scheduler's last change may still sit in the app-state debounce.
     try { appState?.flush() } catch {}
   } catch (err) {
