@@ -419,6 +419,7 @@ function effectiveVideoMute(intentMuted) {
 }
 
 async function applyEffectiveMute(source) {
+  if (isQuitting) return { ok: true, skipped: 'quitting' }
   if (lastApplied?.kind !== 'video') return { ok: true, skipped: 'no-video' }
   const intentMuted = videoIntentMuted()
   const muted = effectiveVideoMute(intentMuted)
@@ -607,6 +608,9 @@ async function applyVideoEntry(params, source = 'wallpaper:video', opts = {}) {
     kind: 'video',
     params: { path: filePath, mode, loop, muted: intentMuted, volume, speed, fps, audioMode, brightness, contrast, saturation },
   }
+  // Reconcile once more now that lastApplied exists: a show/hide that landed
+  // between the LOAD send and this assignment saw no video and was ignored.
+  await applyEffectiveMute('video-applied')
   startup.saveLastApplied(app.getPath('userData'), lastApplied)
   if (opts.resetRecovery !== false && supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
   setRuntimeAvailable(true)
