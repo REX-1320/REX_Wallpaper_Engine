@@ -116,7 +116,7 @@
 | Image loader | ✅ | `ImageLoader` |
 | Scene loader | ✅ | `SceneLoader` |
 | Frame snapshot | ✅ | `Engine::CaptureFrame` → `D3D12Renderer::CaptureFrameToJpeg` (readback buffer, WIC JPEG q0.95, 24bppBGR) → `%USERPROFILE%\Pictures\Paiint\last-frame.jpg` (JPEG since 2026-10-28; PNG before) |
-| Window-aware audio mute | ✅ | Settings → Engine → "Play audio only when Paiint is closed" (`engine.audioOnlyWhenWindowClosed`, default false); override only adds mute, never unmutes a user-muted wallpaper |
+| Window-aware audio mute | ✅ | Settings → Engine → "Play audio only when the desktop is clear" (`engine.audioOnlyWhenWindowClosed`, default false); mutes wallpaper audio when the desktop is covered by any window (or a Paiint window is open). Override only adds mute. Occlusion detected via foreground-window polling. |
 | Test-mode diagnostics | ✅ | Settings → Advanced → "Test mode diagnostics" (`diagnostics.enabled`, default false) or `--diagnostics`; local-only recorder writes to `Downloads\Paiint Diagnostics`; device info included, no serial |
 
 ---
