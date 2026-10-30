@@ -26,8 +26,10 @@ All of it is local, and all of it is yours:
 | Thumbnail cache | `%APPDATA%\Paiint\thumbnails` | Show gallery posters without re-decoding every file |
 | Last frame left on the desktop at quit | `%USERPROFILE%\Pictures\Paiint\last-frame.jpg` | Keep the final video frame as a still wallpaper |
 | Runtime logs and crash reports | `%TEMP%\Paiint` | Let you (or us, if you send them) diagnose a problem |
+| Test-mode diagnostics (optional) | `%USERPROFILE%\Downloads\Paiint Diagnostics` | Only when you turn on Settings → Advanced → Test mode diagnostics (or launch with `--diagnostics`); records local engine and device details so you can study or report a problem. Nothing is uploaded. |
 
-Deleting the app does not delete these folders; you can remove them at any
+Test-mode recordings are ordinary files on your PC. Paiint has no code that
+uploads them; you choose whether to share them.
 time. The Settings page shows the exact paths and can clear the thumbnail
 cache.
 
