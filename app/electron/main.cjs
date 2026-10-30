@@ -473,14 +473,20 @@ function occlusionMonitorScript() {
     '  if ($cls -ne $last) { Write-Output $cls; $last = $cls }',
     '  Start-Sleep -Milliseconds 750',
     '}',
-  ].join('\n')
+  ].join('\r\n')
+}
+
+function occlusionScriptPath() {
+  return path.join(app.getPath('temp'), 'paiint-occlusion.ps1')
 }
 
 function startOcclusionMonitor() {
   if (occlusionMonitor) return
   if (!audioOnlyWhenClosed()) return
   try {
-    const child = spawn('powershell.exe', ['-NoProfile', '-Command', occlusionMonitorScript()], {
+    const scriptPath = occlusionScriptPath()
+    fs.writeFileSync(scriptPath, occlusionMonitorScript(), 'utf8')
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
     })
@@ -521,6 +527,7 @@ function stopOcclusionMonitor() {
     occlusionMonitor = null
   }
   desktopOccluded = false
+  try { fs.rmSync(occlusionScriptPath(), { force: true }) } catch {}
 }
 function diagnosticsPreferredDir() {
   return path.join(app.getPath('downloads'), 'Paiint Diagnostics')
