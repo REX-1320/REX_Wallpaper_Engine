@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Monitor, Settings2, FolderOpen, Rocket, Palette, Eraser } from 'lucide-react'
+import { Monitor, Settings2, FolderOpen, Rocket, Palette, Eraser, Bug } from 'lucide-react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import PropertySection from '@/components/properties/PropertySection'
@@ -159,6 +159,9 @@ export default function SettingsPage() {
   const [maxFps, setMaxFps] = useAppState('engine.maxFps', 0)
   const [hwDecode, setHwDecode] = useAppState('engine.hardwareAcceleration', true)
   const [snapshotOnQuit, setSnapshotOnQuit] = useAppState('engine.snapshotOnQuit', true)
+  const [audioOnlyWhenClosed, setAudioOnlyWhenClosed] = useAppState('engine.audioOnlyWhenWindowClosed', false)
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useAppState('diagnostics.enabled', false)
+  const [diagStatus, setDiagStatus] = useState(null)
   const [defaults, setDefaults] = useState(() => sanitizeDefaults(DEFAULT_DEFAULTS))
   const [launchAtLogin, setLaunchAtLogin] = useState(false)
 
@@ -167,6 +170,21 @@ export default function SettingsPage() {
       if (raw) setDefaults(sanitizeDefaults(raw))
     }).catch(() => {})
     window.paiintDesktop?.loginItem?.().then((s) => setLaunchAtLogin(!!s?.enabled)).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    const read = () => {
+      window.paiintDesktop?.diagnostics?.status?.()
+        .then((s) => { if (alive) setDiagStatus(s) })
+        .catch(() => {})
+    }
+    read()
+    const timer = setInterval(read, 5000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
   }, [])
 
   const saveDefaults = (next) => {
@@ -245,9 +263,40 @@ export default function SettingsPage() {
                 checked={snapshotOnQuit !== false}
                 onChange={(v) => setSnapshotOnQuit(v)}
               />
+              <PropertyToggle
+                label="Play audio only when Paiint is closed"
+                description="Mutes the wallpaper while a Paiint window is open. Audio returns when the window is minimized or closed to the tray."
+                checked={audioOnlyWhenClosed === true}
+                onChange={(v) => setAudioOnlyWhenClosed(v)}
+              />
             </PropertyGroup>
             <PropertyGroup>
               <EngineStatus />
+            </PropertyGroup>
+          </PropertySection>
+
+          <PropertySection title="Advanced" icon={<Bug size={15} />} defaultOpen={false}>
+            <PropertyGroup>
+              <PropertyToggle
+                label="Test mode diagnostics"
+                description="Record engine, display and device details to Downloads\\Paiint Diagnostics while Paiint runs. Local only — nothing is uploaded."
+                checked={diagnosticsEnabled === true}
+                onChange={(v) => setDiagnosticsEnabled(v)}
+              />
+              <PropertyRow
+                label="Diagnostics folder"
+                description={
+                  diagStatus?.enabled
+                    ? `Recording${diagStatus.capReached ? ' (200 MB cap reached)' : ''} — ${diagStatus.samples} samples`
+                    : diagStatus?.fallback
+                      ? 'Downloads was not writable; recording to the app data folder'
+                      : 'Off'
+                }
+              >
+                <Button size="xs" variant="secondary" onClick={() => window.paiintDesktop?.diagnostics?.openFolder?.()}>
+                  <FolderOpen size={13} /> Open
+                </Button>
+              </PropertyRow>
             </PropertyGroup>
           </PropertySection>
 
