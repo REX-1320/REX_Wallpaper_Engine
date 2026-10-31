@@ -21,4 +21,15 @@ function effectiveMute({ intentMuted, onlyWhenClosed, windowOpen } = {}) {
   return false
 }
 
-module.exports = { isWindowOpen, effectiveMute }
+// Which signal decides whether the desktop counts as covered. Until the
+// occlusion monitor has reported once, the Paiint window is the only signal we
+// trust (mute - the safe default). After that the monitor wins: it enumerates
+// every top-level window (Paiint's included) and knows when the desktop is
+// genuinely visible again, e.g. Win+D raises the desktop above every window
+// while isWindowOpen() still says true because nothing was minimized.
+function desktopCovered({ occlusionReported, desktopOccluded, windowOpen } = {}) {
+  if (occlusionReported === true) return desktopOccluded === true
+  return windowOpen === true
+}
+
+module.exports = { isWindowOpen, effectiveMute, desktopCovered }

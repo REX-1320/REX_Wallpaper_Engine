@@ -406,13 +406,14 @@ test('maxBytes writes one cap-reached event and stops appending', async (t) => {
   )
 })
 
-test('start recovers a leftover current.jsonl from a crash into sessions/recovered-*', (t) => {
+test('start files a crashed current.jsonl back into the session that wrote it', (t) => {
   const root = tempRoot(t)
   let clock = FIXED_NOW
 
   const first = makeRecorder(root, { now: () => clock })
   t.after(() => first.stop())
   first.start()
+  const crashedDir = first.status().sessionDir
   first.event('before-crash', { ok: true })
   first.stop() // a crash leaves current.jsonl in place; stop only clears timers
 
@@ -422,21 +423,54 @@ test('start recovers a leftover current.jsonl from a crash into sessions/recover
   t.after(() => second.stop())
   second.start()
 
-  const sessions = fs.readdirSync(path.join(root, 'sessions'))
-  const recovered = sessions.filter((name) => name.startsWith('recovered-'))
-  assert.equal(recovered.length, 1)
-
-  const recoveredLines = readJsonLines(
-    path.join(root, 'sessions', recovered[0], 'session.jsonl'),
-  )
+  const recoveredLines = readJsonLines(path.join(crashedDir, 'session.jsonl'))
   assert.equal(recoveredLines[0].kind, 'session')
   assert.ok(recoveredLines.some((line) => line.event === 'before-crash'))
-  assert.ok(fs.existsSync(path.join(root, 'sessions', recovered[0], 'summary.json')))
+  assert.ok(fs.existsSync(path.join(crashedDir, 'summary.json')))
+
+  const sessions = fs.readdirSync(path.join(root, 'sessions'))
+  assert.equal(sessions.filter((name) => name.startsWith('recovered-')).length, 0)
+  assert.ok(sessions.includes(path.basename(crashedDir)))
 
   const fresh = readJsonLines(path.join(root, 'current.jsonl'))
   assert.equal(fresh[0].kind, 'session')
-  assert.notEqual(fresh[0].session, recovered[0])
+  assert.notEqual(fresh[0].session, path.basename(crashedDir))
   assert.ok(fs.existsSync(path.join(root, 'sessions', fresh[0].session)))
+})
+
+test('start removes stale empty session directories', (t) => {
+  const root = tempRoot(t)
+  const sessions = path.join(root, 'sessions')
+  fs.mkdirSync(path.join(sessions, '2020-01-01T00-00-00-000Z'), { recursive: true })
+  fs.mkdirSync(path.join(sessions, 'recovered-2020-01-02T00-00-00-000Z'), { recursive: true })
+  fs.mkdirSync(path.join(sessions, '2020-01-03T00-00-00-000Z'), { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'current.jsonl'),
+    `${JSON.stringify({ kind: 'session', session: '2020-01-03T00-00-00-000Z' })}\n`,
+  )
+
+  const recorder = startRecorder(t, root)
+  const names = fs.readdirSync(sessions)
+
+  assert.equal(names.includes('2020-01-01T00-00-00-000Z'), false)
+  assert.equal(names.includes('recovered-2020-01-02T00-00-00-000Z'), false)
+  assert.ok(names.includes('2020-01-03T00-00-00-000Z'))
+  assert.ok(fs.existsSync(path.join(sessions, '2020-01-03T00-00-00-000Z', 'session.jsonl')))
+  assert.equal(recorder.status().enabled, true)
+})
+
+test('start falls back to recovered-* when current.jsonl has no session record', (t) => {
+  const root = tempRoot(t)
+  const sessions = path.join(root, 'sessions')
+  fs.mkdirSync(sessions, { recursive: true })
+  fs.writeFileSync(path.join(root, 'current.jsonl'), 'not json\n')
+
+  const recorder = startRecorder(t, root)
+  const recovered = fs.readdirSync(sessions).filter((name) => name.startsWith('recovered-'))
+
+  assert.equal(recovered.length, 1)
+  assert.ok(fs.existsSync(path.join(sessions, recovered[0], 'session.jsonl')))
+  assert.equal(recorder.status().enabled, true)
 })
 
 // ─── status ──────────────────────────────────────────────────────────────────

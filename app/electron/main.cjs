@@ -19,7 +19,8 @@ const { migrateUserData } = require('./userdata-migrate.cjs')
 const { cleanupLegacyLoginItem } = require('./login-item-migrate.cjs')
 const startupTask = require('./startup-task.cjs')
 const { legalDocPath } = require('./legal-docs.cjs')
-const { isWindowOpen, effectiveMute } = require('./audio-visibility.cjs')
+const { isWindowOpen, effectiveMute, desktopCovered: decideDesktopCovered } = require('./audio-visibility.cjs')
+const { parseOcclusionLine } = require('./occlusion.cjs')
 const { DiagnosticsRecorder } = require('./diagnostics/recorder.cjs')
 const { collectDeviceInfo } = require('./diagnostics/device-info.cjs')
 
@@ -309,7 +310,11 @@ let lastApplied = null
 // Occlusion-based audio mute: mute the wallpaper when the desktop is covered
 // by any window (not just a Paiint window). Driven by a background monitor.
 let desktopOccluded = false
-let occlusionMonitor = null // { kind: 'image'|'video', params }
+let occlusionDetail = ''
+let occlusionReported = false
+let occlusionMonitor = null
+let occlusionRestartTimer = null
+let occlusionRestartDelay = 1000
 
 // Local-only test-mode recorder (Settings > Advanced, or --diagnostics).
 let diagnostics = null
@@ -431,15 +436,59 @@ function effectiveVideoMute(intentMuted) {
     // true); an accidental null must not read as "muted".
     intentMuted: intentMuted === true,
     onlyWhenClosed: audioOnlyWhenClosed(),
-    windowOpen: isWindowOpen(mainWindow) || desktopOccluded,
+    windowOpen: desktopCovered(),
   })
 }
+
+// Until the monitor has reported once, the Paiint window is the only signal we
+// trust (mute, the safe default). After that its enumeration is authoritative:
+// it already counts the Paiint window when it covers the desktop, and it knows
+// when the desktop is genuinely visible again (Win+D raises Progman above every
+// window, including ours, while isWindowOpen() still reports true because the
+// window was never minimized).
+function desktopCovered() {
+  return decideDesktopCovered({
+    occlusionReported,
+    desktopOccluded,
+    windowOpen: isWindowOpen(mainWindow),
+  })
+}
+
+// The whole mute decision in one object: the sample collector and the SET_MUTE
+// path must never disagree about why the wallpaper is silent.
+function audioDecision() {
+  const intentMuted = videoIntentMuted()
+  return {
+    intentMuted,
+    onlyWhenClosed: audioOnlyWhenClosed(),
+    windowOpen: isWindowOpen(mainWindow),
+    desktopOccluded,
+    occlusionReported,
+    muted: effectiveVideoMute(intentMuted),
+  }
+}
+
+// Only log a decision when it changes: show/hide/minimize fire in bursts and
+// every SET_MUTE must stay auditable without flooding the session.
+let lastAudioDecision = ''
 
 async function applyEffectiveMute(source) {
   if (isQuitting) return { ok: true, skipped: 'quitting' }
   if (lastApplied?.kind !== 'video') return { ok: true, skipped: 'no-video' }
-  const intentMuted = videoIntentMuted()
-  const muted = effectiveVideoMute(intentMuted)
+  const decision = audioDecision()
+  const muted = decision.muted
+  const key = [
+    decision.intentMuted,
+    decision.onlyWhenClosed,
+    decision.windowOpen,
+    decision.desktopOccluded,
+    decision.occlusionReported,
+    muted,
+  ].join('|')
+  if (key !== lastAudioDecision) {
+    lastAudioDecision = key
+    diagnostics?.event('audio', { source, ...decision })
+  }
   if (!runtime.proc) return { ok: true, skipped: 'runtime-stopped', muted }
   try {
     await runtime.send('SET_MUTE', { value: muted })
@@ -453,26 +502,130 @@ async function applyEffectiveMute(source) {
 
 // ─── Occlusion-based audio mute ─────────────────────────────────────────────
 // Mute the wallpaper when the desktop is covered by any window (not just a
-// Paiint window). A background PowerShell process watches the foreground
-// window's class name and reports changes; the desktop (Progman/WorkerW) counts
-// as "not occluded".
+// Paiint window). A background PowerShell process enumerates the top-level
+// windows and reports the state only when it changes.
+//
+// Foreground-only detection was wrong: clicking the desktop makes Progman the
+// foreground window while every other window stays visible, so the wallpaper
+// spoke through them. Enumeration also sees unfocused and second-monitor
+// windows.
+//
+// Ignored: the desktop itself (Progman/WorkerW), the taskbar, minimized,
+// invisible and DWM-cloaked windows (other virtual desktops / suspended UWP),
+// and windows covering less than 0.5 % of a monitor. That last rule keeps a
+// tiny always-on-top overlay (a 120x16 password-manager bar, a clock widget)
+// from silencing the wallpaper forever.
 function occlusionMonitorScript() {
   return [
     'Add-Type -TypeDefinition @"',
-    'using System; using System.Runtime.InteropServices; using System.Text;',
-    'public class FG {',
-    '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+    'using System;',
+    'using System.Collections.Generic;',
+    'using System.Runtime.InteropServices;',
+    'using System.Text;',
+    '',
+    'public class Occ {',
+    '  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);',
+    '  public delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, ref RECT rect, IntPtr data);',
+    '',
+    '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);',
+    '  [DllImport("user32.dll")] public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc cb, IntPtr data);',
+    '  [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO mi);',
+    '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
+    '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
+    '  [DllImport("user32.dll")] public static extern IntPtr GetShellWindow();',
     '  [DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);',
+    '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);',
+    '  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);',
+    '',
+    '  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }',
+    '  [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }',
+    '',
+    '  static long Area(RECT r) {',
+    '    long w = (long)r.Right - r.Left;',
+    '    long h = (long)r.Bottom - r.Top;',
+    '    return (w > 0 && h > 0) ? w * h : 0;',
+    '  }',
+    '',
+    '  static List<RECT> Monitors() {',
+    '    var list = new List<RECT>();',
+    '    EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate(IntPtr h, IntPtr hdc, ref RECT r, IntPtr d) {',
+    '      var mi = new MONITORINFO();',
+    '      mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));',
+    '      if (GetMonitorInfo(h, ref mi)) list.Add(mi.rcMonitor);',
+    '      return true;',
+    '    }, IntPtr.Zero);',
+    '    return list;',
+    '  }',
+    '',
+    '  static bool Cloaked(IntPtr h) {',
+    '    int cloaked = 0;',
+    '    int hr = DwmGetWindowAttribute(h, 14, out cloaked, sizeof(int));',
+    '    return hr == 0 && cloaked != 0;',
+    '  }',
+    '',
+    '  static string ClassName(IntPtr h) {',
+    '    var sb = new StringBuilder(256);',
+    '    GetClassName(h, sb, sb.Capacity);',
+    '    return sb.ToString();',
+    '  }',
+    '',
+    '  // EnumWindows walks top-to-bottom in Z-order, so the first window that',
+    '  // meaningfully covers a monitor decides. The desktop sits at the bottom of',
+    '  // the normal stack, so reaching it means nothing above it is covering the',
+    '  // screen - and Win+D raises it to the top, which is exactly the "desktop',
+    '  // visible" case. Skipping it instead (the first version) kept the desktop',
+    '  // muted forever after Win+D.',
+    '  public static string Scan() {',
+    '    IntPtr shell = GetShellWindow();',
+    '    List<RECT> monitors = Monitors();',
+    '    string found = null;',
+    '    EnumWindows(delegate(IntPtr h, IntPtr l) {',
+    '      if (found != null) return false;',
+    '      if (!IsWindowVisible(h) || IsIconic(h)) return true;',
+    '      string cls = ClassName(h);',
+    '      // The taskbar is always above normal windows; it is not content.',
+    '      if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return true;',
+    '      if (Cloaked(h)) return true;',
+    '      RECT r;',
+    '      if (!GetWindowRect(h, out r)) return true;',
+    '      if (Area(r) <= 0) return true;',
+    '      long bestW = 0;',
+    '      long bestH = 0;',
+    '      foreach (RECT m in monitors) {',
+    '        long iw = Math.Min((long)r.Right, m.Right) - Math.Max((long)r.Left, m.Left);',
+    '        long ih = Math.Min((long)r.Bottom, m.Bottom) - Math.Max((long)r.Top, m.Top);',
+    '        if (iw <= 0 || ih <= 0) continue;',
+    '        long inter = iw * ih;',
+    '        long threshold = (long)(Area(m) * 0.005);',
+    '        if (threshold < 4096) threshold = 4096;',
+    '        if (inter >= threshold && inter > bestW * bestH) {',
+    '          bestW = iw;',
+    '          bestH = ih;',
+    '        }',
+    '      }',
+    '      if (bestW == 0) return true;',
+    '      if (h == shell || cls == "Progman" || cls == "WorkerW" || cls == "SHELLDLL_DefView") {',
+    '        return false;',
+    '      }',
+    '      found = cls + " " + bestW + "x" + bestH;',
+    '      return false;',
+    '    }, IntPtr.Zero);',
+    '    return found ?? "";',
+    '  }',
     '}',
     '"@',
-    '$last = ""',
+    '$ErrorActionPreference = "Stop"',
+    '$last = "<init>"',
     'while ($true) {',
-    '  $h = [FG]::GetForegroundWindow()',
-    '  $sb = New-Object System.Text.StringBuilder 256',
-    '  [FG]::GetClassName($h, $sb, 256) | Out-Null',
-    '  $cls = $sb.ToString()',
-    '  if ($cls -ne $last) { Write-Output $cls; $last = $cls }',
-    '  Start-Sleep -Milliseconds 750',
+    '  $state = ""',
+    '  try { $state = [Occ]::Scan() } catch { $state = "" }',
+    '  if ($state -ne $last) {',
+    '    if ($state -eq "") { [Console]::Out.WriteLine("CLEAR") }',
+    '    else { [Console]::Out.WriteLine("OCCLUDED " + $state) }',
+    '    [Console]::Out.Flush()',
+    '    $last = $state',
+    '  }',
+    '  Start-Sleep -Milliseconds 500',
     '}',
   ].join('\r\n')
 }
@@ -481,17 +634,38 @@ function occlusionScriptPath() {
   return path.join(app.getPath('temp'), 'paiint-occlusion.ps1')
 }
 
+function scheduleOcclusionRestart() {
+  if (isQuitting || occlusionRestartTimer) return
+  if (!audioOnlyWhenClosed()) return
+  if (lastApplied?.kind !== 'video') return
+  const delay = occlusionRestartDelay
+  occlusionRestartDelay = Math.min(occlusionRestartDelay * 2, 30_000)
+  occlusionRestartTimer = setTimeout(() => {
+    occlusionRestartTimer = null
+    startOcclusionMonitor()
+  }, delay)
+  occlusionRestartTimer.unref?.()
+  logLine('audio: occlusion monitor restart in', delay, 'ms')
+}
+
 function startOcclusionMonitor() {
   if (occlusionMonitor) return
   if (!audioOnlyWhenClosed()) return
+  // Still images and an idle tray have no audio to mute.
+  if (lastApplied?.kind !== 'video') return
+  if (occlusionRestartTimer) {
+    clearTimeout(occlusionRestartTimer)
+    occlusionRestartTimer = null
+  }
   try {
     const scriptPath = occlusionScriptPath()
     fs.writeFileSync(scriptPath, occlusionMonitorScript(), 'utf8')
     const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
     occlusionMonitor = child
+    logLine('audio: occlusion monitor started')
     child.stdout.setEncoding('utf8')
     let buf = ''
     child.stdout.on('data', (chunk) => {
@@ -500,34 +674,59 @@ function startOcclusionMonitor() {
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).trim()
         buf = buf.slice(idx + 1)
-        if (line === '') continue
-        const isDesktop = line === 'Progman' || line === 'WorkerW' || line === 'Shell_TrayWnd' || line === 'Shell_SecondaryTrayWnd' || line === 'CHeadBarWindow' || line === ''
-        const next = !isDesktop
-        if (next !== desktopOccluded) {
-          desktopOccluded = next
-          applyEffectiveMute('occlusion').catch(() => {})
-        }
+        const state = parseOcclusionLine(line)
+        if (!state) continue
+        // The first report switches the decision from the Paiint-window
+        // fallback to the enumeration, so it must be applied even when it
+        // matches the initial `false`.
+        const firstReport = !occlusionReported
+        occlusionReported = true
+        occlusionRestartDelay = 1000
+        if (!firstReport && state.occluded === desktopOccluded) continue
+        desktopOccluded = state.occluded
+        occlusionDetail = state.detail
+        logLine('audio: desktop', state.occluded ? `occluded by ${state.detail || 'window'}` : 'clear')
+        diagnostics?.event('occlusion', { occluded: state.occluded, detail: state.detail })
+        applyEffectiveMute('occlusion').catch(() => {})
       }
     })
-    child.on('exit', () => {
-      occlusionMonitor = null
-      // Restart if still wanted and a video is applied.
-      if (audioOnlyWhenClosed() && lastApplied?.kind === 'video' && !isQuitting) {
-        setTimeout(startOcclusionMonitor, 1000)
-      }
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + chunk).slice(-2000)
+    })
+    child.on('error', (err) => {
+      logLine('audio: occlusion monitor error', err.message)
+      if (occlusionMonitor === child) occlusionMonitor = null
+      scheduleOcclusionRestart()
+    })
+    child.on('exit', (code) => {
+      if (occlusionMonitor === child) occlusionMonitor = null
+      if (stderr.trim()) logLine('audio: occlusion monitor stderr', stderr.trim().slice(0, 500))
+      if (!isQuitting && audioOnlyWhenClosed()) logLine('audio: occlusion monitor exited', code)
+      scheduleOcclusionRestart()
     })
     child.unref?.()
   } catch (err) {
     logLine('audio: occlusion monitor failed to start', err.message)
+    scheduleOcclusionRestart()
   }
 }
 
 function stopOcclusionMonitor() {
-  if (occlusionMonitor) {
-    try { occlusionMonitor.kill() } catch {}
-    occlusionMonitor = null
+  if (occlusionRestartTimer) {
+    clearTimeout(occlusionRestartTimer)
+    occlusionRestartTimer = null
+  }
+  occlusionRestartDelay = 1000
+  const child = occlusionMonitor
+  occlusionMonitor = null
+  if (child) {
+    try { child.kill() } catch {}
   }
   desktopOccluded = false
+  occlusionDetail = ''
+  occlusionReported = false
   try { fs.rmSync(occlusionScriptPath(), { force: true }) } catch {}
 }
 function diagnosticsPreferredDir() {
@@ -552,22 +751,22 @@ function diagnosticsRoot() {
   }
 }
 
+// One failing Electron API must not erase the rest of the sample. Real tester
+// sessions contained only {"error":"powerMonitor.getIdleTime is not a
+// function"} for every sample, so window, power, memory and audio state were
+// invisible. Each section fails on its own now.
+function sampleField(fn) {
+  try {
+    return fn()
+  } catch (err) {
+    return { error: err?.message || String(err) }
+  }
+}
+
 function collectDiagnosticsSample() {
   const win = mainWindow
-  const windowInfo = win && !win.isDestroyed()
-    ? {
-        exists: true,
-        open: isWindowOpen(win),
-        visible: win.isVisible(),
-        minimized: win.isMinimized(),
-        focused: win.isFocused(),
-        bounds: win.getBounds(),
-      }
-    : { exists: false, open: false }
-
-  const playlist = playlistScheduler?.state?.()
   return {
-    app: {
+    app: sampleField(() => ({
       uptimeSec: Math.round(process.uptime()),
       memory: process.memoryUsage(),
       freeMemory: os.freemem(),
@@ -579,46 +778,74 @@ function collectDiagnosticsSample() {
         workingSetSize: m.memory?.workingSetSize ?? null,
         privateBytes: m.memory?.privateBytes ?? null,
       })),
-    },
-    window: windowInfo,
-    displays: screen.getAllDisplays().map((d) => ({
-      id: d.id,
-      bounds: d.bounds,
-      workArea: d.workArea,
-      scaleFactor: d.scaleFactor,
-      rotation: d.rotation,
-      internal: d.internal,
-      displayFrequency: d.displayFrequency,
-      colorSpace: d.colorSpace,
-      colorDepth: d.colorDepth,
     })),
-    power: {
+    window: sampleField(() => {
+      if (!win || win.isDestroyed()) return { exists: false, open: false }
+      return {
+        exists: true,
+        open: isWindowOpen(win),
+        visible: win.isVisible(),
+        minimized: win.isMinimized(),
+        focused: win.isFocused(),
+        bounds: win.getBounds(),
+      }
+    }),
+    displays: sampleField(() =>
+      screen.getAllDisplays().map((d) => ({
+        id: d.id,
+        bounds: d.bounds,
+        workArea: d.workArea,
+        scaleFactor: d.scaleFactor,
+        rotation: d.rotation,
+        internal: d.internal,
+        displayFrequency: d.displayFrequency,
+        colorSpace: d.colorSpace,
+        colorDepth: d.colorDepth,
+      })),
+    ),
+    power: sampleField(() => ({
       onBattery: powerMonitor.isOnBatteryPower(),
-      idleTime: powerMonitor.getIdleTime(),
-      thermalState: typeof powerMonitor.getCurrentThermalState === 'function'
-        ? powerMonitor.getCurrentThermalState()
-        : null,
-    },
-    lastApplied: lastApplied ? { kind: lastApplied.kind, ...lastApplied.params } : null,
-    playlist: playlist
-      ? {
-          active: playlist.active,
-          playlistId: playlist.playlistId,
-          playlistName: playlist.playlistName,
-          mode: playlist.mode,
-          currentPath: playlist.currentPath,
-          queueLength: playlist.queueLength,
-          nextDueAt: playlist.nextDueAt,
-          exhausted: playlist.exhausted,
-        }
-      : null,
-    audio: {
-      onlyWhenClosed: audioOnlyWhenClosed(),
-      intentMuted: videoIntentMuted(),
-      windowOpen: isWindowOpen(mainWindow),
-      desktopOccluded,
-      effectiveMuted: lastApplied?.kind === 'video' ? effectiveVideoMute(videoIntentMuted()) : null,
-    },
+      // Electron exposes getSystemIdleTime() (seconds); getIdleTime() does
+      // not exist and used to throw away the whole sample.
+      idleTime:
+        typeof powerMonitor.getSystemIdleTime === 'function'
+          ? powerMonitor.getSystemIdleTime()
+          : null,
+      thermalState:
+        typeof powerMonitor.getCurrentThermalState === 'function'
+          ? powerMonitor.getCurrentThermalState()
+          : null,
+    })),
+    lastApplied: sampleField(() =>
+      lastApplied ? { kind: lastApplied.kind, ...lastApplied.params } : null,
+    ),
+    playlist: sampleField(() => {
+      const playlist = playlistScheduler?.state?.()
+      return playlist
+        ? {
+            active: playlist.active,
+            playlistId: playlist.playlistId,
+            playlistName: playlist.playlistName,
+            mode: playlist.mode,
+            currentPath: playlist.currentPath,
+            queueLength: playlist.queueLength,
+            nextDueAt: playlist.nextDueAt,
+            exhausted: playlist.exhausted,
+          }
+        : null
+    }),
+    audio: sampleField(() => {
+      const decision = audioDecision()
+      return {
+        onlyWhenClosed: decision.onlyWhenClosed,
+        intentMuted: decision.intentMuted,
+        windowOpen: decision.windowOpen,
+        desktopOccluded: decision.desktopOccluded,
+        occlusionReported: decision.occlusionReported,
+        occlusionDetail,
+        effectiveMuted: lastApplied?.kind === 'video' ? decision.muted : null,
+      }
+    }),
   }
 }
 
@@ -759,6 +986,7 @@ async function stopWallpaperForSnapshot() {
   // resuming the rotation; last-wallpaper.json is untouched, so a full app
   // restart still restores the wallpaper.
   lastApplied = null
+  stopOcclusionMonitor()
   if (!runtime.proc) {
     logLine('wallpaper:stop: no runtime running')
     return { ok: true, stopped: false, snapshot: lastFrameSnapshotPath() }
@@ -852,6 +1080,9 @@ async function applyImageEntry({ path: filePath, mode }, source = 'wallpaper:set
   await runtime.send('LOAD', { path: filePath, type: 'image', mode: engineMode })
   capabilities = null // adapter changed - refresh on next query
   lastApplied = { kind: 'image', params: { path: filePath, mode: engineMode } }
+  // No video, no audio: stop the occlusion poller instead of leaving a
+  // PowerShell process enumerating windows for nothing.
+  stopOcclusionMonitor()
   startup.saveLastApplied(app.getPath('userData'), lastApplied)
   if (opts.resetRecovery !== false && supervisor) supervisor.resetRecovery() // deliberate apply clears parked recovery
   setRuntimeAvailable(true)
@@ -1221,7 +1452,10 @@ app.whenReady().then(() => {
   )
 
   runtime.on('event', (event, data) => {
-    diagnostics?.event('runtime-event', { event, data })
+    // FRAME_READY is a ~30 Hz presentation heartbeat. Logging it filled a
+    // 1.2 MB session in three minutes and reached the 200 MB cap in hours;
+    // the engine telemetry in each sample already carries fps/present counts.
+    if (event !== 'FRAME_READY') diagnostics?.event('runtime-event', { event, data })
     if (event === 'PAUSED') trayManager?.updateWallpaperState(true)
     else if (event === 'PLAYING') trayManager?.updateWallpaperState(false)
     // Scene end is a rotation trigger for main now (the UI may not exist).

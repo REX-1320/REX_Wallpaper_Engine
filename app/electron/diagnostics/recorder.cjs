@@ -97,6 +97,10 @@ class DiagnosticsRecorder {
       this.sessionName = this._uniqueDirName(this._sessionName(sessionIso))
       this.sessionDir = this.path.join(this.sessionsDir, this.sessionName)
       this.fs.mkdirSync(this.sessionDir, { recursive: true })
+      // A crash before archive leaves the previous session directory empty
+      // while recovery files its data under a recovered-* name. Now that
+      // recovery reuses the recorded directory, anything still empty is stale.
+      this._removeEmptySessionDirs(this.sessionName)
       this.fs.writeFileSync(this.currentFile, '')
 
       this.seq = 0
@@ -464,7 +468,14 @@ class DiagnosticsRecorder {
       const stat = this.fs.statSync(this.currentFile)
       if (!stat.isFile() || stat.size === 0) return true
 
-      const name = this._uniqueDirName(`${RECOVERED_PREFIX}${this._sessionName()}`)
+      // The first line is the session record written by start(). Filing the
+      // data under that recorded name fills the directory the crashed run
+      // created instead of leaving it empty and adding a second, misleading
+      // recovered-<recovery-time> directory for the same run.
+      const recorded = this._readCurrentSessionName()
+      const name = this._isSessionDirName(recorded)
+        ? recorded
+        : this._uniqueDirName(`${RECOVERED_PREFIX}${this._sessionName()}`)
       const dir = this.path.join(this.sessionsDir, name)
       this.fs.mkdirSync(dir, { recursive: true })
 
@@ -483,12 +494,57 @@ class DiagnosticsRecorder {
         }
       }
 
-      this.fs.renameSync(this.currentFile, this.path.join(dir, 'session.jsonl'))
+      const destination = this.path.join(dir, 'session.jsonl')
+      this._removeIfExists(destination)
+      this.fs.renameSync(this.currentFile, destination)
       this._log('diagnostics: recovered previous session', dir)
       return true
     } catch (err) {
       this._log('diagnostics: recover failed', this._message(err))
       return false
+    }
+  }
+
+  // Read only the head of current.jsonl: the file can be up to maxBytes and
+  // the session record is always the first line.
+  _readCurrentSessionName() {
+    try {
+      const fd = this.fs.openSync(this.currentFile, 'r')
+      try {
+        const buf = Buffer.alloc(64 * 1024)
+        const read = this.fs.readSync(fd, buf, 0, buf.length, 0)
+        const first = buf.toString('utf8', 0, read).split('\n', 1)[0]
+        const record = JSON.parse(first)
+        return typeof record?.session === 'string' ? record.session : null
+      } finally {
+        this.fs.closeSync(fd)
+      }
+    } catch {
+      return null
+    }
+  }
+
+  _isSessionDirName(name) {
+    if (typeof name !== 'string' || name === '') return false
+    if (this.path.basename(name) !== name) return false
+    return !name.includes('..')
+  }
+
+  // Remove directories with no entries. A session that never archived has no
+  // files by definition; the live session is created after this runs.
+  _removeEmptySessionDirs(keepName) {
+    try {
+      for (const entry of this.fs.readdirSync(this.sessionsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name === keepName) continue
+        const dir = this.path.join(this.sessionsDir, entry.name)
+        try {
+          if (this.fs.readdirSync(dir).length === 0) this.fs.rmdirSync(dir)
+        } catch {
+          // A concurrent writer (or a locked directory) is not fatal.
+        }
+      }
+    } catch {
+      // Missing sessions dir is handled by _ensureRoot on the next start.
     }
   }
 
