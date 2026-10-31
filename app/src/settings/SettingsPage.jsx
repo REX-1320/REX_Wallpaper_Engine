@@ -69,7 +69,7 @@ function EngineStatus() {
   if (stopped) {
     return (
       <p className="insp-hint">
-        The wallpaper engine is not running. Apply a video wallpaper to see it live.
+        Engine offline. Apply a video wallpaper to start it.
       </p>
     )
   }
@@ -142,7 +142,7 @@ function Files() {
           <FolderOpen size={13} /> Open
         </Button>
       </PropertyRow>
-      <PropertyRow label="Clear posters" description="Cached preview images are rebuilt on demand">
+      <PropertyRow label="Clear posters" description="Preview cache. Rebuilt on demand">
         <Button size="xs" variant="secondary" onClick={clear}>
           <Eraser size={13} /> {cleared == null ? 'Clear' : `${cleared} removed`}
         </Button>
@@ -206,19 +206,19 @@ export default function SettingsPage() {
             <PropertyGroup>
               <PropertyToggle
                 label="Launch at login"
-                description="Start Paiint when you sign in to Windows"
+                description="Start with your Windows session."
                 checked={launchAtLogin}
                 onChange={toggleLogin}
               />
               <PropertyToggle
                 label="Start minimised"
-                description="Start in the tray without opening the window"
+                description="Boot to tray. No window."
                 checked={startMinimized !== false}
                 onChange={(v) => setStartMinimized(v)}
               />
               <PropertyToggle
                 label="Restore the last wallpaper at launch"
-                description="Put the wallpaper back on the desktop when Paiint starts"
+                description="Re-apply the last scene."
                 checked={restoreWallpaper !== false}
                 onChange={(v) => setRestoreWallpaper(v)}
               />
@@ -229,13 +229,13 @@ export default function SettingsPage() {
             <PropertyGroup>
               <PropertyToggle
                 label="Remember window size and position"
-                description="Restore where you left the window on the next launch"
+                description="Persist size and position."
                 checked={rememberBounds !== false}
                 onChange={(v) => setRememberBounds(v)}
               />
               <PropertyToggle
                 label="Quit Paiint when the window closes"
-                description="Stops the wallpaper and leaves the last frame on the desktop. Turn this off to keep Paiint running in the tray."
+                description="Stop engine. Keep last frame. Off = stay in tray."
                 checked={closeToTray === false}
                 onChange={(v) => setCloseToTray(!v)}
               />
@@ -246,26 +246,26 @@ export default function SettingsPage() {
             <PropertyGroup>
               <PropertyDropdown
                 label="Frame rate cap"
-                description="Off follows the monitor. Applies when the wallpaper engine starts"
+                description="Off = display refresh. Applied at engine start."
                 value={String(Number(maxFps) || 0)}
                 options={FPS_OPTIONS}
                 onChange={(v) => setMaxFps(Number(v) || 0)}
               />
               <PropertyToggle
                 label="Hardware video decoding"
-                description="Off uses the CPU. Applies when the wallpaper engine starts"
+                description="GPU default. Off = CPU decode. Applied at engine start."
                 checked={hwDecode !== false}
                 onChange={(v) => setHwDecode(v)}
               />
               <PropertyToggle
                 label="Leave the last frame on exit"
-                description="When Paiint quits, save the final frame of a playing video as a still wallpaper so the desktop keeps a picture"
+                description="Freeze the final frame as a still. No black desktop."
                 checked={snapshotOnQuit !== false}
                 onChange={(v) => setSnapshotOnQuit(v)}
               />
               <PropertyToggle
                 label="Play audio only when the desktop is clear"
-                description="Mutes the wallpaper when the desktop is covered by another window (or a Paiint window is open). Audio returns when the desktop is clear."
+                description="Mute when covered. Unmute when clear."
                 checked={audioOnlyWhenClosed === true}
                 onChange={(v) => setAudioOnlyWhenClosed(v)}
               />
@@ -279,7 +279,7 @@ export default function SettingsPage() {
             <PropertyGroup>
               <PropertyToggle
                 label="Test mode diagnostics"
-                description="Record engine, display and device details to Downloads\\Paiint Diagnostics while Paiint runs. Local only — nothing is uploaded."
+                description="Local-only engine log. Downloads\\Paiint Diagnostics. No upload."
                 checked={diagnosticsEnabled === true}
                 onChange={(v) => setDiagnosticsEnabled(v)}
               />
@@ -304,7 +304,7 @@ export default function SettingsPage() {
             <PropertyGroup>
               <PropertyDropdown
                 label="Default fit"
-                description="How a newly imported wallpaper fills the screen"
+                description="Fit mode for new imports."
                 value={defaults.display.mode}
                 options={FIT_OPTIONS}
                 onChange={(v) => setDefault('display', 'mode', v)}

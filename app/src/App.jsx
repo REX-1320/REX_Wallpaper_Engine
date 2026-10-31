@@ -22,13 +22,13 @@ const DEFAULT_GALLERY_RATIO = 0.771
 
 const PAGES = {
   Wallpapers: {
-    sub: 'Your library, your playlists, one click to the desktop.',
+    sub: 'Library. Playlists. Desktop.',
   },
   Settings: {
-    sub: 'How Paiint behaves on your machine.',
+    sub: 'Runtime configuration.',
   },
   About: {
-    sub: 'Paiint — the wallpaper engine.',
+    sub: 'The build, the engine, the licences.',
   },
 }
 

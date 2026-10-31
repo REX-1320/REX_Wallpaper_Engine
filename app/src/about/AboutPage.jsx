@@ -42,14 +42,14 @@ export default function AboutPage() {
           <img className="about-mark" src={paiintMark} alt="" aria-hidden="true" />
           <div className="about-id">
             <span className="about-name">Paiint</span>
-            <span className="about-tagline">Live wallpaper engine for Windows</span>
+            <span className="about-tagline">Native wallpaper engine for Windows</span>
           </div>
           <span className="about-version">{version ? `v${version}` : '—'}</span>
         </div>
 
         <p className="about-blurb">
-          Video, HDR and still wallpapers rendered on the desktop itself, behind your
-          icons. When you quit, the last frame stays on the desktop as a still.
+          Video, HDR and still wallpapers, rendered behind your icons. Native
+          C++/D3D12 runtime. Quit, and the last frame stays.
         </p>
 
         <PropertyGroup>
@@ -68,12 +68,12 @@ export default function AboutPage() {
         </PropertyGroup>
 
         <p className="about-note">
-          <strong>Privacy:</strong> Paiint collects nothing and makes no network
-          requests. Wallpapers, playlists and settings stay on this PC.
+          <strong>Privacy:</strong> No telemetry. No network. Wallpapers, playlists
+          and settings stay on this PC.
         </p>
         <p className="about-note">
           Bundles FFmpeg (LGPL-2.1) and other open-source components. Every licence
-          text — including all bundled JavaScript packages — ships with the app.
+          text ships with the app.
         </p>
 
         <div className="about-legal">
