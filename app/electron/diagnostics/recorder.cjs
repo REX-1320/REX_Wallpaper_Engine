@@ -97,9 +97,10 @@ class DiagnosticsRecorder {
       this.sessionName = this._uniqueDirName(this._sessionName(sessionIso))
       this.sessionDir = this.path.join(this.sessionsDir, this.sessionName)
       this.fs.mkdirSync(this.sessionDir, { recursive: true })
-      // A crash before archive leaves the previous session directory empty
-      // while recovery files its data under a recovered-* name. Now that
-      // recovery reuses the recorded directory, anything still empty is stale.
+      // Older builds filed recovered data under recovered-* and left the real
+      // session directory empty. Recovery now fills that directory, so any
+      // directory still empty at this point is stale. The live session was just
+      // created and is skipped by name.
       this._removeEmptySessionDirs(this.sessionName)
       this.fs.writeFileSync(this.currentFile, '')
 

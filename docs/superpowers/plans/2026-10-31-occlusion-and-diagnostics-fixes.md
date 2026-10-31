@@ -19,6 +19,6 @@ Two tester archives (`Downloads\Paiint Diagnostics_parkash.zip`, `Downloads\s_bh
 - [x] 5. Log `audio` events when the mute decision changes and `occlusion` events when the state changes; samples carry the full decision.
 - [x] 6. Tests: recorder recovery + empty-dir cleanup + malformed-record fallback, occlusion line parser, `desktopCovered` fallback/authority.
 - [x] 7. Gates: `node --test` 124/124, lint 0, typecheck 0, `pnpm --dir app build` 0, live A/B.
-- [x] 8. Live verification: Notepad/Chrome mute; Win+D → clear → audible → Win+D → occluded → muted; 120x16 `CHeadBarWindow` ignored; a 3.4 h session with 11,942 samples / 0 errors / `power.idleTime` present / 25 `audio` + 11 `occlusion` events / no `FRAME_READY`; crashed session recovered into its own dir with no new empty dirs.
+- [x] 8. Live verification: Notepad/Chrome mute; Win+D → clear → audible → Win+D → occluded → muted; 120x16 `CHeadBarWindow` ignored; a 3.4 h session with 12,006 samples / 0 errors / `power.idleTime` present / 25 `audio` + 11 `occlusion` events / no `FRAME_READY`; crashed session recovered into its own dir with no new empty dirs.
 - [x] 9. Tracking docs updated (`TODO.md`, `everything.md`, `#project_status.md`, spec); commit + push.
 - [ ] 10. Rebuild `Paiint-Unpacked` + rar and the Store MSIX with this build.
