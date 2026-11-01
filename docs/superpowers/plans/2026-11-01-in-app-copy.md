@@ -38,24 +38,52 @@
 - Consumes: the approved deck in the spec.
 - Produces: no API changes; user-visible strings only.
 
-- [ ] **Step 1: Replace the three page subtitles in `App.jsx`.**
-- [ ] **Step 2: Replace the Settings row descriptions and the engine-offline hint in `SettingsPage.jsx`.**
-- [ ] **Step 3: Replace the About tagline, blurb, privacy note, and FFmpeg note in `AboutPage.jsx`.**
-- [ ] **Step 4: Prove the old strings are gone.**
+- [x] **Step 1: Replace the three page subtitles in `App.jsx`.**
+- [x] **Step 2: Replace the Settings row descriptions and the engine-offline hint in `SettingsPage.jsx`.**
+- [x] **Step 3: Replace the About tagline, blurb, privacy note, and FFmpeg note in `AboutPage.jsx`.**
+- [x] **Step 4: Prove the old strings are gone.**
 
 Run: `rg -n "Your library, your playlists|How Paiint behaves|Live wallpaper engine|Start Paiint when you sign|Start in the tray without|Put the wallpaper back|Restore where you left|Stops the wallpaper and leaves|Off follows the monitor|Off uses the CPU|When Paiint quits, save|Mutes the wallpaper when the desktop|Cached preview images|How a newly imported|The wallpaper engine is not running" app/src`
 Expected: no matches.
 
-- [ ] **Step 5: Prove the new strings are present.**
+- [x] **Step 5: Prove the new strings are present.**
 
 Run: `rg -n "Library\. Playlists\. Desktop\.|Runtime configuration\.|Native wallpaper engine|No telemetry\. No network|Mute when covered|Freeze the final frame|Engine offline" app/src`
 Expected: every new string appears once.
 
-- [ ] **Step 6: Run the gates.**
+- [x] **Step 6: Run the gates.**
 
 Run: `pnpm lint`, `pnpm typecheck`, `pnpm build`
 Expected: 0 errors.
 
-- [ ] **Step 7: Update the tracking docs and commit.**
+- [x] **Step 7: Update the tracking docs and commit.**
 
 Add the copy change to `TODO.md` / `everything.md`, then commit the three source files plus the spec and plan.
+
+---
+
+### Task 2: Rebuild the Store MSIX with the new copy
+
+The Store package was packed before the copy rewrite, so the submission
+artefact must be rebuilt from the same tree.
+
+**Files:**
+- Run: `packaging/msix/build-msix.ps1` (full build, Store identity)
+- Produce: `packaging/msix/out/Paiint-0.1.0-x64.msix`
+- Copy: `C:\Users\Moinu\Downloads\Paiint-0.1.0-x64.msix`
+- Modify: `TODO.md`, `everything.md`
+
+- [x] **Step 1: Run the full build with the Store identity.**
+
+Run: `powershell -NoProfile -File packaging\msix\build-msix.ps1 -Publisher "CN=9D8DC345-5B4D-4571-831E-2EBC542FFA47" -IdentityName "Moinu.Paiint" -PublisherDisplayName "Moinu"`
+Expected: `Package creation succeeded.`, `Not signed. This is correct for the Store`.
+
+- [x] **Step 2: Prove the new copy is inside the package.**
+
+Run: `Select-String -Path packaging\msix\out\stage\resources\app.asar -Pattern "Runtime configuration|Library\. Playlists\. Desktop"`
+Expected: 2 hits — a stale `app.asar` would mean the portable build was skipped.
+
+- [x] **Step 3: Record and archive the artefact.**
+
+Record size + SHA256 in `TODO.md` / `everything.md`; copy the MSIX to
+`C:\Users\Moinu\Downloads\` and re-hash the copy to prove the bytes match.
