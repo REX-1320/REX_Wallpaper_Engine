@@ -97,4 +97,4 @@ force. This is the entire agreement between us about the Software.
 
 ## 12. Contact
 
-MoiNeX — `support@paiint.app`
+MoiNeX — `support.paiint@gmail.com`

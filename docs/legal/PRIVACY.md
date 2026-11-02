@@ -76,4 +76,4 @@ notes, and it will be opt-in where the law requires consent.
 
 ## 9. Contact
 
-MoiNeX — `support@paiint.app`
+MoiNeX — `support.paiint@gmail.com`
