@@ -68,11 +68,13 @@ Video, HDR and still wallpapers on a native desktop layer. Playlists with timers
 
 Features are numbered list items, each ≤ 200 chars. Measured chars: 98, 95, 108, 102, 77, 109, 90, 64, 115, 89.
 
-## Keywords (7)
+## Keywords (Partner Center: max 7 chips, max 21 words total, press Enter per chip)
 
 ```text
-wallpaper, video wallpaper, HDR, playlist, multi-monitor, live wallpaper, desktop
+wallpaper, HDR, playlist, multi-monitor, live wallpaper, desktop, video wallpaper
 ```
+
+Word count: 9 (10 if `multi-monitor` splits) — clears both red validation errors. The chips Partner Center creates from this line are the paste target; the comma text above is only the source. A brand chip ("Paiint …") is pointless — title searches already hit Paiint; if kept instead of `desktop`, `video wallpaper`, word limit is still fine. If the red errors persist after the chips are set, click the input and backspace any half-typed suggestion: the messages describe pending content, not committed chips.
 
 ## Copyright line
 
