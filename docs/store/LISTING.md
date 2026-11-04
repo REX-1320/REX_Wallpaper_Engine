@@ -107,8 +107,16 @@ Copyright (c) 2026 MoiNeX
 | 2:1 logo 300×150 | `Paiint Store Assets\StoreLogo-300x150.png` |
 | 1:1 logo 300×300 | `Paiint Store Assets\StoreLogo-300x300.png` |
 | Package | `C:\Users\Moinu\Downloads\Paiint-0.1.0-x64.msix` — 183,062,897 B, SHA256 `1654A340A5C2B0D60EF2B1E105BCB76DCC163B188F6872324FA4B62E25DEF573` |
+| Optional: 16:9 poster art (720×1080 / 1440×2160) — recommended as the main logo on Windows 10/11 tiles | `Paiint Store Assets\PosterArt-720x1080.png`, `PosterArt-1440x2160.png` (mark on `#1f1f23`) |
+| Optional: 16:9 super-hero art (1920×1080) — needed only if a trailer is added | `Paiint Store Assets\HeroArt-1920x1080.png` (mark on `#1f1f23`) |
 
 Do **not** upload: the older screenshots in the assets root (third-party artwork + personal paths), `demo\screenshot-5-desktop.png` (spare, bare gradient).
+
+### Partner Center state after the first pass (verified 2026-11-03)
+
+- **Correct:** product name; description (1,871); what's-new; all 10 features byte-equal to this file; short title `Paiint`; short description; copyright; additional license terms (EULA URL); developed by `MoiNeX`; box art 1080 ✓; app tile icon 300 ✓; featured promo square ✓ (Xbox-only, harmless); 150/71 tile slots empty (fall back to package icons); trailers/hero/poster empty (optional).
+- **Fix 1 — screenshots:** 2 of the 4 uploaded shots show third-party artwork (anime face; blue misty figure) — the old real-library captures got mixed in. Delete both, upload `demo\screenshot-4-playlist-config.png` (+ `demo\screenshot-3-about.png` if a fourth is wanted). The two dark shots in place are the demo set ✓.
+- **Fix 2 — keywords:** the red "cannot add more than 7" row persists because there are two uncommitted tokens pending in the input. Delete the `Paiint wallpaper engine` chip, then commit `desktop` and `video wallpaper` with Enter each → 7 chips, ~10 words, error clears.
 
 ## Regenerate
 

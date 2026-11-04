@@ -2,7 +2,7 @@
 
 > A modern desktop platform for Windows — widgets, wallpaper, window effects, and automation. By MoiNeX.
 
-**Status:** Active development — native core engine + Electron shell functional; **Paiint 0.1.0** builds as a Microsoft Store MSIX (`packaging/msix`, 174.9 MB, signed by Microsoft at certification) and as an unsigned portable tester exe. The packaged lifecycle paths (still images via `IDesktopWallpaper`, quit snapshot in `Pictures\Paiint`, launch-at-login startup task, awaited quit drain) are implemented and dev-verified; the installed-package smoke test is blocked on admin/Developer Mode.
+**Status:** Active development — native core engine + Electron shell functional; **Paiint 0.1.0** builds as a Microsoft Store MSIX (`packaging/msix`, 174.6 MB, signed by Microsoft at certification) and as an unsigned portable tester exe. **Submitted to the Microsoft Store on 2026-11-04 — certification in progress.** The packaged lifecycle paths (still images via `IDesktopWallpaper`, quit snapshot in `Pictures\Paiint`, launch-at-login startup task, awaited quit drain) are implemented and dev-verified; the installed-package smoke test runs after the Store build installs.
 **Target hardware:** Windows 10/11
 **See also:** [everything.md](everything.md) (what exists & what's done) · [TODO.md](TODO.md) (what's left) · [#project_status.md](%23project_status.md) (per-feature audit)
 
